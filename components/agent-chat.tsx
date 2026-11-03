@@ -11,7 +11,6 @@ import {
   Search,
   Bug,
   Folder,
-  Copy,
   LoaderCircle,
 } from 'lucide-react';
 import type { Server } from '@/lib/domain';
@@ -25,9 +24,9 @@ import {
   type AgentApproval,
   type HubProject,
   type AgentProvider,
-  type AgentStatus,
 } from '@/lib/hub';
 import { CopyButton, ErrorText, Field, Modal, Submit } from './hub-ui';
+import { AgentModelSelector, ChatModelSettings } from './agent-model-selector';
 
 export function NewSession({
   hub,
@@ -53,11 +52,11 @@ export function NewSession({
   );
   const [provider, setProvider] = useState<AgentProvider>('codex');
   const [model, setModel] = useState(''),
+    [reasoning, setReasoning] = useState(''),
     [mode, setMode] = useState(
       initialProject ? 'workspace-write' : 'read-only',
     );
-  const [models, setModels] = useState<{ id: string; name: string }[]>([]),
-    [loadingModels, setLoadingModels] = useState(false);
+  const [loadingModels, setLoadingModels] = useState(false);
   const [busy, setBusy] = useState(false),
     [error, setError] = useState('');
   return (
@@ -80,6 +79,7 @@ export function NewSession({
                 : machineId,
               provider,
               model,
+              reasoning,
               mode: provider === 'opencode' ? 'workspace-write' : mode,
             });
             onCreated(s);
@@ -96,8 +96,8 @@ export function NewSession({
             value={projectId}
             onChange={(e) => {
               setProjectId(e.target.value);
-              setModels([]);
               setModel('');
+              setReasoning('');
               setMode(e.target.value ? 'workspace-write' : 'read-only');
             }}
           >
@@ -121,8 +121,8 @@ export function NewSession({
               value={machineId}
               onChange={(e) => {
                 setMachineId(e.target.value);
-                setModels([]);
                 setModel('');
+                setReasoning('');
               }}
             >
               <option value="" disabled>
@@ -136,14 +136,19 @@ export function NewSession({
             </select>
           </Field>
         )}
-        <Field label="Агент">
+        <div className="hub-field">
+          <span>Агент</span>
           <div className="provider-options">
             {(['codex', 'opencode'] as const).map((p) => (
               <button
                 className={provider === p ? 'selected' : ''}
                 type="button"
                 key={p}
-                onClick={() => setProvider(p)}
+                onClick={() => {
+                  setProvider(p);
+                  setModel('');
+                  setReasoning('');
+                }}
               >
                 <Code2 size={20} />
                 <strong>{providerNames[p]}</strong>
@@ -155,67 +160,23 @@ export function NewSession({
               </button>
             ))}
           </div>
-        </Field>
-        <Field
-          label="Модель"
-          hint="Пустое поле — модель из настроек агента на выбранной машине."
-        >
-          <input
-            list="agent-model-options"
-            value={model}
-            onChange={(e) => setModel(e.target.value)}
-            placeholder={
-              provider === 'codex'
-                ? 'По умолчанию у Codex'
-                : 'provider/model — необязательно'
-            }
-            maxLength={120}
-          />
-          <datalist id="agent-model-options">
-            {models.map((m) => (
-              <option key={m.id} value={m.id}>
-                {m.name}
-              </option>
-            ))}
-          </datalist>
-        </Field>
-        {provider === 'codex' && (
-          <button
-            type="button"
-            className="text-button"
-            disabled={loadingModels || (!projectId && !machineId)}
-            onClick={async () => {
-              setLoadingModels(true);
-              setError('');
-              try {
-                const selectedMachine =
-                  projects.find((p) => p.id === projectId)?.machineId ||
-                  machineId;
-                if (selectedMachine) {
-                  const result = await hub.api<AgentStatus>(
-                    `/hub/machines/${selectedMachine}/agents/codex`,
-                  );
-                  if (!result.installed)
-                    throw new Error(
-                      'Codex не запущен. Проверьте установку и вход в карточке машины.',
-                    );
-                  setModels(result.models);
-                }
-              } catch (e) {
-                setError((e as Error).message);
-              } finally {
-                setLoadingModels(false);
-              }
-            }}
-          >
-            {loadingModels ? (
-              <LoaderCircle size={13} className="spin" />
-            ) : (
-              <ChevronDown size={13} />
-            )}
-            Загрузить доступные модели с машины
-          </button>
-        )}
+        </div>
+        <AgentModelSelector
+          key={provider + ':' + (projectId || machineId)}
+          hub={hub}
+          machineId={
+            projects.find((p) => p.id === projectId)?.machineId || machineId
+          }
+          provider={provider}
+          projectId={projectId || undefined}
+          model={model}
+          reasoning={reasoning}
+          onLoading={setLoadingModels}
+          onChange={(m, r) => {
+            setModel(m);
+            setReasoning(r);
+          }}
+        />
         {provider === 'codex' ? (
           <Field label="Доступ к рабочей папке">
             <select
@@ -242,7 +203,7 @@ export function NewSession({
           <button className="hub-button" type="button" onClick={onClose}>
             Отмена
           </button>
-          <Submit busy={busy}>Создать чат</Submit>
+          <Submit busy={busy || (loadingModels && !!model)}>Создать чат</Submit>
         </div>
       </form>
     </Modal>
@@ -727,9 +688,17 @@ export function AgentChat({
               <div>
                 <span className={`provider-dot ${session.provider}`} />
                 <strong>{providerNames[session.provider]}</strong>
-                <span className="composer-model">
-                  {session.model || 'По умолчанию'}
-                </span>
+                <ChatModelSettings
+                  key={session.id}
+                  hub={hub}
+                  session={live || session}
+                  disabled={
+                    disabled ||
+                    sending ||
+                    activeSession(live) ||
+                    session.archived
+                  }
+                />
                 <span className="composer-mode">
                   <ShieldCheck size={13} />
                   {session.mode === 'read-only'

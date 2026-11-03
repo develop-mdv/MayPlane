@@ -19,6 +19,7 @@ export type AgentSession = {
   provider: AgentProvider;
   title: string;
   model: string;
+  reasoning?: string;
   mode: string;
   status:
     | 'idle'
@@ -75,11 +76,23 @@ export type HubSnapshot = {
   sessions: AgentSession[];
   localMachineId?: string;
 };
+export type ModelChoice = { id: string; name: string; description?: string };
+export type AgentModel = ModelChoice & {
+  group?: string;
+  isDefault?: boolean;
+  reasoning: ModelChoice[];
+  defaultReasoning: string;
+};
+export type ModelCatalog = {
+  models: AgentModel[];
+  defaultModelId: string;
+  updatedAt: string;
+};
 export type AgentStatus = {
   installed: boolean;
   version?: string;
   account: { type: string; email?: string; planType?: string } | null;
-  models: { id: string; name: string }[];
+  models: AgentModel[];
   login?: { completed?: boolean; success?: boolean; error?: string };
 };
 export const providerNames = { codex: 'Codex', opencode: 'OpenCode' };

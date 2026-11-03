@@ -1,16 +1,22 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync, readFileSync } from 'node:fs';
+import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomBytes, randomUUID } from 'node:crypto';
 import { PassThrough, Writable } from 'node:stream';
-import { EventEmitter, once } from 'node:events';
+import { EventEmitter } from 'node:events';
 import { openStore } from '../runner/store.mjs';
 import { createApp } from '../runner/server.mjs';
 import { projectPath, processSpec } from '../runner/machine-process.mjs';
 import { AgentRpc } from '../runner/agent-rpc.mjs';
 import { separateServices } from '../runner/workspace-model.mjs';
+import {
+  acpOptions,
+  setAcpSelection,
+  codexModels,
+  createModelCatalog,
+} from '../runner/model-catalog.mjs';
 
 function fakeAgent(provider, calls, onClose = () => {}) {
   const stdout = new PassThrough(),
@@ -18,6 +24,38 @@ function fakeAgent(provider, calls, onClose = () => {}) {
     events = new EventEmitter();
   const emit = (message) => stdout.write(JSON.stringify(message) + '\n');
   let closed = false;
+  let acpModel = 'provider/reasoner',
+    acpEffort = 'default';
+  const acpState = () => ({
+    configOptions: [
+      {
+        id: 'agent-model',
+        name: 'Model',
+        category: 'model',
+        type: 'select',
+        currentValue: acpModel,
+        options: [
+          { value: 'provider/reasoner', name: 'Reasoner' },
+          { value: 'provider/plain', name: 'Plain model' },
+        ],
+      },
+      ...(acpModel === 'provider/reasoner'
+        ? [
+            {
+              id: 'thinking',
+              name: 'Effort',
+              category: 'thought_level',
+              type: 'select',
+              currentValue: acpEffort,
+              options: [
+                { value: 'default', name: 'Default' },
+                { value: 'deep', name: 'Deep reasoning' },
+              ],
+            },
+          ]
+        : []),
+    ],
+  });
   const input = new Writable({
     write(bytes, _encoding, callback) {
       for (const line of bytes.toString().trim().split('\n')) {
@@ -62,7 +100,7 @@ function fakeAgent(provider, calls, onClose = () => {}) {
         else if (m.method === 'thread/start' || m.method === 'thread/resume')
           respond({ thread: { id: 'native-thread' } });
         else if (m.method === 'session/new')
-          respond({ sessionId: 'native-acp' });
+          respond({ sessionId: 'native-acp', ...acpState() });
         else if (m.method === 'session/load') {
           emit({
             method: 'session/update',
@@ -76,7 +114,14 @@ function fakeAgent(provider, calls, onClose = () => {}) {
               },
             },
           });
-          respond({});
+          respond(acpState());
+        } else if (m.method === 'session/set_config_option') {
+          if (m.params.configId === 'agent-model') {
+            acpModel = m.params.value;
+            acpEffort = 'default';
+          }
+          if (m.params.configId === 'thinking') acpEffort = m.params.value;
+          respond(acpState());
         } else if (m.method === 'turn/start') {
           respond({ turn: { id: 'turn-1' } });
           setImmediate(() =>
@@ -124,7 +169,31 @@ function fakeAgent(provider, calls, onClose = () => {}) {
           });
         else if (m.method === 'model/list')
           respond({
-            data: [{ id: 'model-from-agent', displayName: 'Available model' }],
+            data: m.params.cursor
+              ? [
+                  {
+                    id: 'second-model',
+                    model: 'plain-model',
+                    displayName: 'Plain model',
+                    supportedReasoningEfforts: [],
+                  },
+                ]
+              : [
+                  {
+                    id: 'model-from-agent',
+                    model: 'model-from-agent',
+                    displayName: 'Available model',
+                    isDefault: true,
+                    defaultReasoningEffort: 'low',
+                    supportedReasoningEfforts: [
+                      { reasoningEffort: 'low', description: 'Quick' },
+                      { reasoningEffort: 'high', description: 'Deep' },
+                    ],
+                    token: 'catalog-must-not-leak',
+                  },
+                  { id: 'internal-hidden-model', hidden: true },
+                ],
+            nextCursor: m.params.cursor ? null : 'page-2',
           });
         else if (m.method === 'account/login/start')
           respond({
@@ -769,4 +838,263 @@ test('RPC streams fragmented lines, handles timeouts and rejects pending work wh
   const pending = rpc.request('later');
   rpc.close();
   await assert.rejects(pending, /отключён/);
+});
+
+test('live model catalogs paginate, cache, refresh and validate machine context without inference or secrets', async (t) => {
+  const f = await fixture(t);
+  const path = '/machines/' + f.machineId + '/agents/codex/models';
+  const read = async (body = {}) =>
+    (await f.request(path, 'POST', body)).json();
+  const catalog = await read();
+  assert.deepEqual(
+    catalog.models.map((m) => m.id),
+    ['model-from-agent', 'plain-model'],
+  );
+  assert.equal(catalog.models[0].reasoning[1].id, 'high');
+  assert.equal(catalog.models[0].defaultReasoning, 'low');
+  assert.equal(catalog.defaultModelId, 'model-from-agent');
+  assert.ok(catalog.updatedAt);
+  assert.ok(!JSON.stringify(catalog).includes('catalog-must-not-leak'));
+  assert.equal(f.calls.filter((c) => c.method === 'model/list').length, 2);
+  await read();
+  assert.equal(f.calls.filter((c) => c.method === 'model/list').length, 2);
+  await read({ refresh: true });
+  assert.equal(f.calls.filter((c) => c.method === 'model/list').length, 4);
+  assert.ok(
+    !f.calls.some((c) =>
+      ['thread/start', 'turn/start', 'session/prompt'].includes(c.method),
+    ),
+  );
+  const alien = randomUUID();
+  f.store.save(
+    'settings',
+    {
+      id: alien,
+      recordType: 'workspace',
+      name: 'Other',
+      machineId: randomUUID(),
+      path: '/tmp',
+    },
+    {},
+  );
+  assert.equal(
+    (await f.request(path, 'POST', { projectId: alien })).status,
+    400,
+  );
+});
+
+test('Codex model and reasoning persist, apply to the next turn and reject unsupported or active changes', async (t) => {
+  const f = await fixture(t);
+  const create = (body) =>
+    f.request('/sessions', 'POST', {
+      machineId: f.machineId,
+      provider: 'codex',
+      mode: 'read-only',
+      ...body,
+    });
+  assert.equal((await create({ model: 'made-up-model' })).status, 409);
+  assert.equal(
+    (await create({ model: 'plain-model', reasoning: 'high' })).status,
+    409,
+  );
+  assert.equal((await create({ reasoning: 'high' })).status, 400);
+  const s = await (
+    await create({ model: 'model-from-agent', reasoning: 'high' })
+  ).json();
+  assert.equal(s.reasoning, 'high');
+  const endpoint = '/sessions/' + s.id;
+  await f.request(endpoint + '/message', 'POST', {
+    message: 'Test model selection',
+  });
+  const read = async () => (await f.request(endpoint)).json();
+  await waitFor(read, (s) => s.status === 'approval');
+  const turn = f.calls.find((c) => c.method === 'turn/start');
+  assert.equal(turn.params.model, 'model-from-agent');
+  assert.equal(turn.params.effort, 'high');
+  assert.equal(
+    (await f.request(endpoint, 'PATCH', { model: 'plain-model' })).status,
+    409,
+  );
+  await f.request(endpoint + '/approval', 'POST', {
+    id: 'permission-1',
+    decision: 'accept',
+  });
+  await waitFor(read, (s) => s.status === 'idle');
+  const changed = await (
+    await f.request(endpoint, 'PATCH', { model: 'plain-model' })
+  ).json();
+  assert.equal(changed.reasoning, '');
+  await f.request(endpoint + '/message', 'POST', {
+    message: 'Continue with another model',
+  });
+  await waitFor(read, (s) => s.status === 'approval');
+  assert.equal(
+    f.calls.filter((c) => c.method === 'turn/start').at(-1).params.model,
+    'plain-model',
+  );
+  assert.equal(
+    f.calls.filter((c) => c.method === 'turn/start').at(-1).params.effort,
+    null,
+  );
+  assert.ok(f.calls.some((c) => c.method === 'thread/resume'));
+  assert.equal(
+    (await read()).messages.filter((m) => m.role === 'user').length,
+    2,
+  );
+});
+
+test('OpenCode models use project config, discover dependent reasoning, reuse probes and apply native config IDs', async (t) => {
+  const f = await fixture(t);
+  const path = '/machines/' + f.machineId + '/agents/opencode/models';
+  const first = await (await f.request(path, 'POST', {})).json();
+  assert.deepEqual(
+    first.models.map((m) => m.id),
+    ['provider/reasoner', 'provider/plain'],
+  );
+  assert.equal(first.models[0].reasoning[1].id, 'deep');
+  const next = await (
+    await f.request(path, 'POST', { model: 'provider/plain' })
+  ).json();
+  assert.deepEqual(
+    next.models.find((m) => m.id === 'provider/plain').reasoning,
+    [],
+  );
+  assert.ok(f.calls.some((c) => c.method === 'session/load'));
+  assert.equal(f.calls.filter((c) => c.method === 'session/new').length, 1);
+  assert.ok(!f.calls.some((c) => c.method === 'session/prompt'));
+  const refreshed = await (
+    await f.request(path, 'POST', { model: 'removed-model', refresh: true })
+  ).json();
+  assert.equal(refreshed.models.length, 2);
+  const s = await (
+    await f.request('/sessions', 'POST', {
+      machineId: f.machineId,
+      provider: 'opencode',
+      model: 'provider/reasoner',
+      reasoning: 'deep',
+    })
+  ).json();
+  assert.ok(s.id);
+  const endpoint = '/sessions/' + s.id;
+  await f.request(endpoint + '/message', 'POST', {
+    message: 'Native ACP config test',
+  });
+  await waitFor(
+    async () => (await f.request(endpoint)).json(),
+    (s) => s.status === 'approval',
+  );
+  assert.ok(
+    f.calls.some(
+      (c) =>
+        c.method === 'session/set_config_option' &&
+        c.params.configId === 'thinking' &&
+        c.params.value === 'deep',
+    ),
+  );
+  assert.ok(!f.calls.some((c) => c.method === 'session/set_model'));
+  await f.request(endpoint + '/stop', 'POST');
+  const detail = await (await f.request(endpoint)).json();
+  assert.ok(
+    !detail.messages.some((m) => m.content === 'Replay must not be duplicated'),
+  );
+});
+
+test('ACP legacy catalogs retain set_model fallback; grouped options and current-model-only effort stay capability driven', async () => {
+  const state = {
+    models: {
+      currentModelId: 'old/a',
+      availableModels: [
+        { modelId: 'old/a', name: 'Old A' },
+        { modelId: 'old/b', name: 'Old B' },
+      ],
+    },
+  };
+  const runtime = { nativeId: 'old-session', modelState: state };
+  const calls = [];
+  await setAcpSelection(
+    {
+      request: async (method, params) => {
+        calls.push({ method, params });
+        return {};
+      },
+    },
+    runtime,
+    'old/b',
+  );
+  assert.equal(calls[0].method, 'session/set_model');
+  await assert.rejects(
+    () =>
+      setAcpSelection({ request: async () => ({}) }, runtime, 'old/b', 'high'),
+    /reasoning/,
+  );
+  const grouped = acpOptions({
+    configOptions: [
+      {
+        id: 'models',
+        category: 'model',
+        type: 'select',
+        currentValue: 'p/a',
+        options: [
+          {
+            group: 'p',
+            name: 'Provider',
+            options: [
+              { value: 'p/a', name: 'A' },
+              { value: 'p/b', name: 'B' },
+            ],
+          },
+        ],
+      },
+      {
+        id: 'depth',
+        category: 'thought_level',
+        type: 'select',
+        currentValue: 'deep',
+        options: [{ value: 'deep', name: 'Deep' }],
+      },
+    ],
+  });
+  assert.equal(grouped.models[0].group, 'Provider');
+  assert.equal(grouped.models[0].reasoning[0].id, 'deep');
+  assert.deepEqual(grouped.models[1].reasoning, []);
+  await assert.rejects(
+    () =>
+      codexModels({ request: async () => ({ data: [], nextCursor: 'same' }) }),
+    /повторяющуюся/,
+  );
+});
+
+test('catalog failures can be retried and parallel reads share one probe whose process is closed', async () => {
+  let opened = 0,
+    closed = 0;
+  const calls = [];
+  const catalog = createModelCatalog({
+    connectors: null,
+    isClosed: () => false,
+    openProcess: async () => {
+      opened++;
+      if (opened === 1) throw new Error('Agent requires sign-in');
+      await new Promise((r) => setImmediate(r));
+      return fakeAgent('codex', calls, () => closed++);
+    },
+  });
+  const machine = { id: 'catalog-machine' };
+  try {
+    await assert.rejects(
+      () => catalog.get(machine, 'codex', '/test'),
+      /sign-in/,
+    );
+    const results = await Promise.all(
+      Array.from({ length: 5 }, () => catalog.get(machine, 'codex', '/test')),
+    );
+    assert.equal(opened, 2);
+    assert.equal(closed, 1);
+    assert.ok(results.every((r) => r.models.length === 2));
+    await catalog.get(machine, 'codex', '/test', { refresh: true });
+    assert.equal(opened, 3);
+    assert.equal(closed, 2);
+    assert.ok(!calls.some((c) => c.method === 'turn/start'));
+  } finally {
+    catalog.close();
+  }
 });

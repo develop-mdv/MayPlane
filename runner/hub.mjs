@@ -11,6 +11,12 @@ import { attachConnectors } from './connectors.mjs';
 import { connect, metrics } from './ssh.mjs';
 import { assert, redact } from './security.mjs';
 import { machineHome, separateServices } from './workspace-model.mjs';
+import {
+  createModelCatalog,
+  codexModels,
+  setAcpSelection,
+  validateSelection,
+} from './model-catalog.mjs';
 
 const now = () => new Date().toISOString();
 const publicRecord = (record) => {
@@ -28,6 +34,12 @@ export function createHub(
     tasks = new Map(),
     refreshing = new Set();
   let closed = false;
+  const modelCatalog = createModelCatalog({
+    openProcess,
+    connectors,
+    isClosed: () => closed,
+  });
+  const modelChanges = new Set();
   const records = (kind) =>
     store
       .list('settings')
@@ -203,6 +215,8 @@ export function createHub(
       addMessage(sid, 'system', p.error?.message || 'Ошибка агента');
     if (method === 'session/update') {
       const u = p.update || {};
+      if (u.sessionUpdate === 'config_option_update')
+        runtime.modelState = { configOptions: u.configOptions };
       if (
         u.sessionUpdate === 'agent_message_chunk' &&
         u.content?.type === 'text'
@@ -276,6 +290,17 @@ export function createHub(
           });
           runtime.rpc.notify('initialized');
           if (session) {
+            if (session.model || session.reasoning) {
+              const catalog = await codexModels(runtime.rpc);
+              validateSelection(
+                catalog,
+                session.model || '',
+                session.reasoning || '',
+              );
+              runtime.defaultReasoning = catalog.models.find(
+                (m) => m.id === session.model,
+              )?.defaultReasoning;
+            }
             const params = {
               cwd,
               approvalPolicy: 'on-request',
@@ -315,12 +340,14 @@ export function createHub(
             );
             runtime.replaying = false;
             runtime.nativeId = session.nativeId || loaded.sessionId;
-            runtime.models = loaded.models;
-            if (session.model)
-              await runtime.rpc.request('session/set_model', {
-                sessionId: runtime.nativeId,
-                modelId: session.model,
-              });
+            runtime.modelState = loaded;
+            if (session.model || session.reasoning)
+              await setAcpSelection(
+                runtime.rpc,
+                runtime,
+                session.model || '',
+                session.reasoning || '',
+              );
           }
         }
         if (session)
@@ -350,9 +377,7 @@ export function createHub(
         const account = await r.rpc.request('account/read', {
           refreshToken: false,
         });
-        const models = await r.rpc
-          .request('model/list', {})
-          .catch(() => ({ data: [] }));
+        const catalog = await codexModels(r.rpc).catch(() => ({ models: [] }));
         return {
           installed: true,
           account: account.account
@@ -362,10 +387,7 @@ export function createHub(
                 planType: account.account.planType,
               }
             : null,
-          models: (models.data || []).map((x) => ({
-            id: x.id,
-            name: x.displayName || x.id,
-          })),
+          models: catalog.models,
           login: r.login || null,
         };
       }
@@ -687,7 +709,8 @@ export function createHub(
         mode:
           body.mode ||
           (!p && body.provider === 'codex' ? 'read-only' : 'workspace-write'),
-        model: String(body.model || '').slice(0, 120),
+        model: body.model ?? '',
+        reasoning: body.reasoning ?? '',
         title: 'Новый чат',
         status: 'idle',
         archived: false,
@@ -695,6 +718,16 @@ export function createHub(
         updatedAt: now(),
         secret: { messages: [], approvals: [] },
       };
+      if (session.model || session.reasoning) {
+        const catalog = await modelCatalog.get(
+          m,
+          session.provider,
+          session.cwd,
+          { model: session.model },
+        );
+        validateSelection(catalog, session.model, session.reasoning);
+      } else
+        validateSelection({ models: [] }, session.model, session.reasoning);
       save(session);
       send(publicRecord(session), 201);
       return true;
@@ -716,6 +749,7 @@ export function createHub(
         return true;
       }
       if (!sm[2] && method === 'PATCH') {
+        assert(!modelChanges.has(s.id), 'Дождитесь сохранения модели', 409);
         if (body.title !== undefined)
           assert(
             typeof body.title === 'string' &&
@@ -728,6 +762,44 @@ export function createHub(
           'Сначала остановите диалог',
           409,
         );
+        if (Object.hasOwn(body, 'model') || Object.hasOwn(body, 'reasoning')) {
+          assert(!modelChanges.has(s.id), 'Настройки модели уже меняются', 409);
+          assert(
+            !Object.hasOwn(body, 'projectId'),
+            'Сначала перенесите чат, затем выберите модель',
+          );
+          modelChanges.add(s.id);
+          try {
+            const model = body.model ?? s.model ?? '';
+            const reasoning =
+              body.reasoning ?? (model === s.model ? s.reasoning || '' : '');
+            const catalog =
+              model || reasoning
+                ? await modelCatalog.get(
+                    machine(s.machineId),
+                    s.provider,
+                    s.cwd ||
+                      (s.projectId
+                        ? load(s.projectId, 'workspace').path
+                        : await resolveHome(machine(s.machineId))),
+                    { model },
+                  )
+                : { models: [] };
+            validateSelection(catalog, model, reasoning);
+            assert(
+              load(s.id, 'session').updatedAt === s.updatedAt &&
+                !['running', 'connecting', 'approval'].includes(
+                  load(s.id, 'session').status,
+                ),
+              'Диалог изменился. Повторите выбор модели.',
+              409,
+            );
+            s.model = model;
+            s.reasoning = reasoning;
+          } finally {
+            modelChanges.delete(s.id);
+          }
+        }
         if (body.title) {
           s.title = body.title.trim();
           s.customTitle = true;
@@ -763,6 +835,7 @@ export function createHub(
         return true;
       }
       if (method === 'POST' && sm[2] === 'message') {
+        assert(!modelChanges.has(s.id), 'Дождитесь сохранения модели', 409);
         assert(!s.archived, 'Восстановите диалог из архива', 409);
         assert(
           s.mode === 'read-only' ||
@@ -824,6 +897,8 @@ export function createHub(
               const result = await r.rpc.request('turn/start', {
                 threadId: r.nativeId,
                 input: [{ type: 'text', text: body.message.trim() }],
+                ...(s.model ? { model: s.model } : {}),
+                effort: s.reasoning || r.defaultReasoning || null,
               });
               r.turnId = result.turn?.id;
             } else {
@@ -957,11 +1032,37 @@ export function createHub(
       }
     }
     const am = path.match(
-      /^\/api\/hub\/machines\/([a-f0-9-]+)\/agents\/(codex|opencode)(?:\/(install|login|logout))?$/,
+      /^\/api\/hub\/machines\/([a-f0-9-]+)\/agents\/(codex|opencode)(?:\/(install|login|logout|models))?$/,
     );
     if (am) {
       const m = machine(am[1]),
         provider = am[2];
+      if (method === 'POST' && am[3] === 'models') {
+        const session = body.sessionId ? load(body.sessionId, 'session') : null;
+        const project = body.projectId
+          ? load(body.projectId, 'workspace')
+          : null;
+        assert(
+          !session ||
+            (session.machineId === m.id && session.provider === provider),
+          'Агент чата находится на другой машине',
+        );
+        assert(
+          !project || project.machineId === m.id,
+          'Проект находится на другой машине',
+        );
+        const cwd = projectPath(
+          session?.cwd || project?.path || (await resolveHome(m)),
+          m.platform || 'linux',
+        );
+        send(
+          await modelCatalog.get(m, provider, cwd, {
+            model: body.model ?? '',
+            refresh: body.refresh === true,
+          }),
+        );
+        return true;
+      }
       if (method === 'GET' && !am[3]) {
         send(await status(m, provider));
         return true;
@@ -1079,6 +1180,7 @@ export function createHub(
     close() {
       if (closed) return;
       closed = true;
+      modelCatalog.close();
       clearInterval(sampler);
       for (const r of runtimes.values()) r.rpc?.close();
       for (const t of tasks.values()) {
