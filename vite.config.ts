@@ -1,7 +1,10 @@
+import { readFileSync } from 'node:fs';
+import { parseEnv } from 'node:util';
 import { sites } from '@openai/sites-vite-plugin';
+import { reserveRunnerUpgrades } from './lib/runner-proxy.mjs';
 import tailwindcss from '@tailwindcss/postcss';
 import vinext from 'vinext';
-import { defineConfig } from 'vite';
+import { defineConfig, type ProxyOptions, type ViteDevServer } from 'vite';
 import hostingConfig from './.openai/hosting.json' with { type: 'json' };
 
 const SITE_CREATOR_PLACEHOLDER_DATABASE_ID =
@@ -44,9 +47,31 @@ export default defineConfig(async () => {
   // Wrangler snapshots its log path while the Cloudflare plugin is imported.
   const { cloudflare } = await import('@cloudflare/vite-plugin');
 
+  let localRunnerToken = process.env.EZDEPLOY_TOKEN;
+  try {
+    localRunnerToken ||= parseEnv(
+      readFileSync('.env.runner', 'utf8'),
+    ).EZDEPLOY_TOKEN;
+  } catch {}
+  const runnerProxy: Record<string, ProxyOptions> | undefined = localRunnerToken
+    ? {
+        '/api': {
+          target: 'http://127.0.0.1:8788',
+          ws: true,
+          configure(proxy) {
+            proxy.on('proxyReq', (req) =>
+              req.setHeader('Authorization', 'Bearer ' + localRunnerToken),
+            );
+          },
+        },
+      }
+    : undefined;
   return {
     css: { postcss: { plugins: [tailwindcss()] } },
     server: {
+      host: '127.0.0.1',
+      strictPort: true,
+      proxy: runnerProxy,
       fs: {
         deny: [
           '.env',
@@ -68,6 +93,12 @@ export default defineConfig(async () => {
         viteEnvironment: { name: 'rsc', childEnvironments: ['ssr'] },
         config: localBindingConfig,
       }),
+      {
+        name: 'ezdeploy:runner-websocket-route',
+        configureServer(server: ViteDevServer) {
+          if (runnerProxy) reserveRunnerUpgrades(server.httpServer);
+        },
+      },
     ],
   };
 });

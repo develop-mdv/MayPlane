@@ -7,12 +7,44 @@ export function openStore(directory, key) {
   const db = new DatabaseSync(join(directory, 'ezdeploy.sqlite'));
   db.exec(`PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000;
  CREATE TABLE IF NOT EXISTS servers (id TEXT PRIMARY KEY, data TEXT NOT NULL, secret TEXT NOT NULL);
- CREATE TABLE IF NOT EXISTS projects (id TEXT PRIMARY KEY, server_id TEXT NOT NULL REFERENCES servers(id), name TEXT NOT NULL UNIQUE, data TEXT NOT NULL, secret TEXT NOT NULL);
+ CREATE TABLE IF NOT EXISTS settings (id TEXT PRIMARY KEY, data TEXT NOT NULL, secret TEXT NOT NULL);
+ CREATE TABLE IF NOT EXISTS git_connections (id TEXT PRIMARY KEY, data TEXT NOT NULL, secret TEXT NOT NULL);
+ CREATE TABLE IF NOT EXISTS projects (id TEXT PRIMARY KEY, server_id TEXT NOT NULL REFERENCES servers(id), name TEXT NOT NULL, data TEXT NOT NULL, secret TEXT NOT NULL);
  CREATE INDEX IF NOT EXISTS idx_projects_server ON projects(server_id);
  CREATE TABLE IF NOT EXISTS jobs (id TEXT PRIMARY KEY, created_at TEXT NOT NULL, data TEXT NOT NULL);
  CREATE INDEX IF NOT EXISTS idx_jobs_created ON jobs(created_at);
  CREATE TABLE IF NOT EXISTS deliveries (id TEXT PRIMARY KEY, created_at TEXT NOT NULL);
  PRAGMA optimize;`);
+  // Names are display labels. Every deployment is addressed by its immutable ID.
+  const hasUniqueName = () =>
+    db
+      .prepare('PRAGMA index_list(projects)')
+      .all()
+      .some((index) => {
+        if (!index.unique) return false;
+        const columns = db
+          .prepare('SELECT name FROM pragma_index_info(?)')
+          .all(index.name);
+        return columns.length === 1 && columns[0].name === 'name';
+      });
+  if (hasUniqueName()) {
+    db.exec('BEGIN IMMEDIATE');
+    try {
+      if (hasUniqueName())
+        db.exec(
+          'CREATE TABLE projects_instances (id TEXT PRIMARY KEY, server_id TEXT NOT NULL REFERENCES servers(id), name TEXT NOT NULL, data TEXT NOT NULL, secret TEXT NOT NULL);' +
+            'INSERT INTO projects_instances (id, server_id, name, data, secret) SELECT id, server_id, name, data, secret FROM projects;' +
+            'DROP TABLE projects;' +
+            'ALTER TABLE projects_instances RENAME TO projects;' +
+            'CREATE INDEX idx_projects_server ON projects(server_id);',
+        );
+      db.exec('COMMIT');
+    } catch (error) {
+      db.exec('ROLLBACK');
+      db.close();
+      throw error;
+    }
+  }
   const get = (table, id) => {
     const row = db.prepare(`SELECT * FROM ${table} WHERE id=?`).get(id);
     return row
@@ -39,9 +71,13 @@ export function openStore(directory, key) {
       const data = { ...obj };
       delete data.secret;
       const json = JSON.stringify(data);
-      if (table === 'servers')
+      if (
+        table === 'servers' ||
+        table === 'git_connections' ||
+        table === 'settings'
+      )
         db.prepare(
-          'INSERT INTO servers VALUES(?,?,?) ON CONFLICT(id) DO UPDATE SET data=excluded.data,secret=excluded.secret',
+          `INSERT INTO ${table} VALUES(?,?,?) ON CONFLICT(id) DO UPDATE SET data=excluded.data,secret=excluded.secret`,
         ).run(obj.id, json, seal(JSON.stringify(secret || obj.secret), key));
       else if (table === 'projects')
         db.prepare(
@@ -61,6 +97,7 @@ export function openStore(directory, key) {
     snapshot() {
       return {
         servers: list('servers'),
+        gitConnections: list('git_connections'),
         projects: list('projects'),
         jobs: list('jobs'),
       };

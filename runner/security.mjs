@@ -1,3 +1,5 @@
+import { isProjectName, projectNameHint } from '../lib/project-name.mjs';
+import { parseEnvDocument } from '../lib/environment.mjs';
 import {
   createCipheriv,
   createDecipheriv,
@@ -32,35 +34,7 @@ export function unseal(text, key) {
   ]).toString('utf8');
 }
 export function envEntries(text) {
-  assert(
-    typeof text === 'string' && Buffer.byteLength(text) < 65536,
-    'Файл .env должен быть меньше 64 КБ',
-  );
-  const entries = [];
-  for (const [index, line] of text.split(/\r?\n/).entries()) {
-    if (!line.trim() || line.trimStart().startsWith('#')) continue;
-    const m = line.match(
-      /^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)$/,
-    );
-    assert(
-      m,
-      `Некорректная строка .env: ${index + 1}. Используйте KEY=value, без многострочных значений.`,
-    );
-    let v = m[2].trim();
-    if (v.startsWith('"') || v.startsWith("'")) {
-      assert(
-        v.endsWith(v[0]) && v.length > 1,
-        `Незакрытые кавычки в строке ${index + 1}`,
-      );
-      v = v.slice(1, -1);
-    } else v = v.replace(/\s+#.*$/, '');
-    assert(
-      !entries.some((e) => e[0] === m[1]),
-      `Повторяющаяся переменная: ${m[1]}`,
-    );
-    entries.push([m[1], v]);
-  }
-  return entries;
+  return parseEnvDocument(text).rows.map(({ key, value }) => [key, value]);
 }
 export function redact(text, secrets) {
   let clean = String(text);
@@ -76,35 +50,57 @@ export function redact(text, secrets) {
 export function serverInput(body) {
   assert(
     typeof body.name === 'string' &&
-      /^[a-zA-Z0-9][a-zA-Z0-9 ._-]{0,63}$/.test(body.name),
+      /^[\p{L}\p{N}][\p{L}\p{N} ._-]{0,63}$/u.test(body.name),
     'Укажите имя сервера, до 64 символов',
   );
   assert(
     typeof body.host === 'string' && isIP(body.host),
     'Укажите корректный IPv4 или IPv6 адрес',
   );
-  const port = Number(body.port || 22);
+  const port = Number(body.port ?? 22);
+  if (body.consoleUrl) {
+    let url;
+    try {
+      url = new URL(body.consoleUrl);
+    } catch {
+      assert(false, 'Укажите HTTPS-адрес консоли провайдера');
+    }
+    assert(
+      url.protocol === 'https:' &&
+        !url.username &&
+        !url.password &&
+        !url.search &&
+        !url.hash,
+      'Консоль провайдера: HTTPS URL без токенов, паролей и параметров',
+    );
+  }
   assert(
     Number.isInteger(port) && port > 0 && port <= 65535,
     'Некорректный SSH-порт',
   );
   assert(
-    body.username === 'root',
-    'В первой версии подключение выполняется под root',
+    typeof body.username === 'string' &&
+      /^[a-z_][a-z0-9_-]{0,31}$/.test(body.username),
+    'Укажите корректного SSH-пользователя',
   );
   return {
     name: body.name,
     host: body.host,
     port,
-    username: 'root',
+    username: body.username,
     region: String(body.region || 'Свой сервер').slice(0, 80),
+    ...(body.consoleUrl !== undefined
+      ? { consoleUrl: String(body.consoleUrl || '').slice(0, 1000) }
+      : {}),
   };
 }
+export function projectMetadata(body) {
+  assert(isProjectName(body.name), projectNameHint);
+  assert(['web', 'bot', 'service'].includes(body.kind), 'Выберите тип проекта');
+  return { name: body.name.trim(), kind: body.kind };
+}
 export function projectInput(body) {
-  assert(
-    typeof body.name === 'string' && /^[a-z][a-z0-9-]{1,47}$/.test(body.name),
-    'Имя проекта: 2–48 символов, a–z, цифры и дефис',
-  );
+  const metadata = projectMetadata(body);
   let url;
   try {
     url = new URL(body.repo);
@@ -133,16 +129,24 @@ export function projectInput(body) {
       !composeFile.includes('..'),
     'Укажите относительный путь к Compose-файлу',
   );
-  assert(['web', 'bot', 'service'].includes(body.kind), 'Выберите тип проекта');
   envEntries(body.env || '');
   return {
-    name: body.name,
+    name: metadata.name,
     repo: url.href,
     branch: body.branch,
     composeFile,
     kind: body.kind,
     domain: String(body.domain || '').slice(0, 253),
     serverId: body.serverId,
+    gitConnectionId:
+      typeof body.gitConnectionId === 'string' ? body.gitConnectionId : '',
+    requiredEnvKeys: Array.isArray(body.requiredEnvKeys)
+      ? body.requiredEnvKeys
+          .filter(
+            (k) => typeof k === 'string' && /^[A-Z_][A-Z0-9_]{0,99}$/.test(k),
+          )
+          .slice(0, 100)
+      : [],
     autoDeploy: !!body.autoDeploy,
   };
 }

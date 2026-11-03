@@ -45,3 +45,11 @@ next-env.d.ts
 *.tgz
 .artifacts/
 *.tsbuildinfo
+
+# Python migration worker
+__pycache__/
+*.pyc
+
+# Outbound computer connector credentials
+.ezdeploy-connector/
+connection.json

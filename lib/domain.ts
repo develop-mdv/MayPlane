@@ -9,6 +9,15 @@ export type Status =
   | 'offline'
   | 'needs_setup';
 export type Server = {
+  transport?: 'ssh' | 'local' | 'connector';
+  platform?: string;
+  consoleUrl?: string;
+  ipv4?: string;
+  ipv6?: string;
+  uptime?: number;
+  networkRx?: number | null;
+  networkTx?: number | null;
+  history?: { at: string; cpu: number | null; memory: number | null; disk: number | null; networkRx?: number | null; networkTx?: number | null }[];
   id: string;
   name: string;
   host: string;
@@ -23,7 +32,91 @@ export type Server = {
   fingerprint?: string;
   checkedAt?: string;
 };
+export type EnvDefinition = {
+  name: string;
+  required: boolean | null;
+  description: string;
+  defaultValue?: string;
+};
+export type AssistantPlan = {
+  id: string;
+  createdAt: string;
+  commit: string;
+  source: string;
+  usage: { input: number; output: number } | null;
+  summary: string;
+  runtime: string;
+  workdir: string;
+  composeFile: string;
+  appPort: number;
+  notes: string[];
+  blockers: string[];
+  env: EnvDefinition[];
+  files: string[];
+  inspectedFiles: string[];
+  omitted: number;
+  appliedAt?: string;
+};
+export type LlmModel = {
+  id: string;
+  name: string;
+  baseUrl: string;
+  model: string;
+  enabled: boolean;
+  configured: boolean;
+  updatedAt?: string;
+};
+export type LlmConfig = {
+  baseUrl: string;
+  model: string;
+  enabled: boolean;
+  configured: boolean;
+  updatedAt?: string;
+  defaultModelId?: string;
+  models: LlmModel[];
+};
+export type AdoptionCandidate = {
+  id: string;
+  runtime: 'compose' | 'docker' | 'systemd' | 'directory';
+  name: string;
+  directory: string;
+  resources: string[];
+  status: Status;
+  images: string[];
+  ports: string[];
+  configFiles: string[];
+  mounts: {
+    type: string;
+    source: string;
+    target: string;
+    name: string;
+    readOnly: boolean;
+  }[];
+  git?: { root: string; repo: string; branch: string; commit: string } | null;
+  repoMatch?: boolean;
+  linkedProject?: string;
+  unit?: string;
+  description?: string;
+};
+export type Adoption = AdoptionCandidate & {
+  linkedAt: string;
+  checkedAt: string;
+  envFile: string;
+  environmentSource: string;
+  environmentConflicts: string[];
+  warnings: string[];
+  sourceFiles: { path: string; bytes: number; sha256: string }[];
+};
+export type Discovery = {
+  id: string;
+  createdAt: string;
+  directory: string;
+  warnings: string[];
+  candidates: AdoptionCandidate[];
+};
 export type Project = {
+  adoption?: Adoption;
+  discovery?: { id: string; createdAt: string; count: number };
   id: string;
   name: string;
   repo: string;
@@ -38,25 +131,166 @@ export type Project = {
   commit: string;
   color: string;
   envKeys: string[];
+  envDefinitions?: EnvDefinition[];
+  filledEnvKeys?: string[];
+  gitConnectionId?: string;
+  assistant?: AssistantPlan;
+  workflow?: {
+    id: string;
+    summary: string;
+    source: string;
+    createdAt: string;
+    verifiedAt?: string;
+    stale?: boolean;
+  };
+  migrationDraft?: {
+    choice?: 'manual';
+    sourceId: string;
+    targetId: string;
+    jobId: string;
+    mode: 'standard' | 'llm';
+    updatedAt: string;
+    conflictPolicy?: string;
+  };
+  migrationPlan?: MigrationPlan;
+  savedMigrationPlan?: MigrationPlan;
+  migrationArchives?: {
+    serverId: string;
+    path: string;
+    createdAt: string;
+    jobId: string;
+    status?: 'creating' | 'complete' | 'failed';
+  }[];
+  migrationRepairPlan?: {
+    id: string;
+    jobId: string;
+    expiresAt: string;
+    assistant: {
+      summary: string;
+      model: string;
+      configure: { description: string; command: string }[];
+      check: string;
+      questions: string[];
+    };
+  };
+  migration?: MigrationState;
+  removedAt?: string;
+  diagnosis?: { summary: string; steps: string[] };
+  publicUrl?: string;
+  deploymentChecks?: { httpStatus: number | null; steps: string[] };
+  requiredEnvKeys?: string[];
+  missingEnvKeys?: string[];
+};
+export type MigrationPlan = {
+  draftOptions?: {
+    intent: string;
+    paths: string[];
+    units: string[];
+    stopSignal: string;
+  };
+
+  conflictResolution?: {
+    requiresStop?: boolean;
+    policy?: 'ask' | 'archive-stopped' | 'stop-archive';
+    available: boolean;
+    selected: boolean;
+    reason?: string;
+    resources: string[];
+    paths: string[];
+    bytes?: number;
+  };
+  savedPlanId?: string;
+  stopSignal?: string;
+  id: string;
+  jobId: string;
+  sourceId: string;
+  targetId: string;
+  createdAt: string;
+  expiresAt: string;
+  runtime?: 'docker' | 'systemd';
+  bytes: number;
+  paths: { path: string; volume?: string; bytes: number }[];
+  resources: string[];
+  blockers: string[];
+  warnings: string[];
+  hasCustomCheck: boolean;
+  mode?: 'standard' | 'llm';
+  preparationIssues?: string[];
+  assistant?: {
+    summary: string;
+    model: string;
+    prepare: { description: string; command: string }[];
+    configure: { description: string; command: string }[];
+    questions: string[];
+    notes: string[];
+    check: string;
+  } | null;
+};
+export type MigrationState = {
+  jobId: string;
+  sourceId: string;
+  targetId: string;
+  phase: string;
+  locked: boolean;
+  needsRecovery: boolean;
+  targetMayHaveWritten: boolean;
+  backupPath: string;
+  finishedAt?: string;
 };
 export type Job = {
   id: string;
   projectId?: string;
   serverId?: string;
+  modelId?: string;
   projectName: string;
-  type: 'deploy' | 'restart' | 'stop' | 'migration' | 'provision';
+  type:
+    | 'discover'
+    | 'adopt'
+    | 'check'
+    | 'analyze'
+    | 'auto-deploy'
+    | 'apply-plan'
+    | 'diagnose'
+    | 'domain'
+    | 'build'
+    | 'deploy'
+    | 'restart'
+    | 'stop'
+    | 'migration'
+    | 'migration-plan'
+    | 'migration-recover'
+    | 'migration-repair-plan'
+    | 'provision'
+    | 'chat'
+    | 'remove'
+    | 'project-forget';
   status: Status;
   createdAt: string;
   finishedAt?: string;
   source?: string;
   target?: string;
+  cancelRequested?: boolean;
+  outcome?: 'complete' | 'cancelled' | 'failed' | 'needs_input' | 'limit';
+  usage?: { input: number; output: number; calls: number };
   logs: string[];
 };
-export type Snapshot = { projects: Project[]; servers: Server[]; jobs: Job[] };
+export type GitConnection = {
+  id: string;
+  login: string;
+  name: string;
+  createdAt: string;
+};
+export type Snapshot = {
+  gitConnections?: GitConnection[];
+  llm?: LlmConfig;
+  projects: Project[];
+  servers: Server[];
+  jobs: Job[];
+};
 export const statusLabels: Record<Status, string> = {
   running: 'Работает',
   stopped: 'Остановлен',
-  deploying: 'Деплой',
+  deploying: 'Выполняется',
   failed: 'Ошибка',
   pending: 'В очереди',
   success: 'Успешно',
@@ -65,13 +299,31 @@ export const statusLabels: Record<Status, string> = {
   needs_setup: 'Нужна настройка',
 };
 export const jobLabels = {
+  discover: 'Поиск на сервере',
+  adopt: 'Привязка приложения',
+  check: 'Проверка состояния',
+  analyze: 'Анализ проекта',
+  'auto-deploy': 'Автоматический деплой',
+  'apply-plan': 'Деплой по плану',
+  diagnose: 'Разбор ошибки',
+  domain: 'Настройка домена',
+  build: 'Сборка',
   deploy: 'Деплой',
   restart: 'Перезапуск',
   stop: 'Остановка',
   migration: 'Перенос',
+  'migration-plan': 'Проверка переноса',
+  'migration-recover': 'Восстановление переноса',
+  'migration-repair-plan': 'План восстановления с LLM',
   provision: 'Настройка сервера',
+  chat: 'Задача из чата',
+  remove: 'Удаление развёртывания',
+  'project-forget': 'Удаление из панели',
 };
 export const kindLabels = { web: 'Сайт', bot: 'Бот', service: 'Сервис' };
+export function projectLabel(project: Project, servers: Server[]) {
+  return `${project.name} · ${servers.find((s) => s.id === project.serverId)?.name || 'Сервер'} · ${project.id.slice(0, 8)}`;
+}
 export function relativeDate(value: string) {
   const m = Math.max(
     0,
@@ -85,170 +337,24 @@ export function relativeDate(value: string) {
         ? `${Math.floor(m / 60)} ч назад`
         : `${Math.floor(m / 1440)} дн назад`;
 }
-export function makeDemo(): Snapshot {
-  const ago = (n: number) => new Date(Date.now() - n * 60000).toISOString();
-  const servers: Server[] = [
-    {
-      id: 's1',
-      name: 'production-01',
-      host: '203.0.113.24',
-      port: 22,
-      username: 'root',
-      status: 'online',
-      region: 'Frankfurt, DE',
-      cpu: 24,
-      memory: 46,
-      disk: 32,
-      specs: '4 vCPU · 8 GB RAM · Ubuntu 24.04',
-    },
-    {
-      id: 's2',
-      name: 'production-02',
-      host: '203.0.113.86',
-      port: 22,
-      username: 'root',
-      status: 'online',
-      region: 'Amsterdam, NL',
-      cpu: 12,
-      memory: 31,
-      disk: 18,
-      specs: '2 vCPU · 4 GB RAM · Ubuntu 24.04',
-    },
-    {
-      id: 's3',
-      name: 'staging',
-      host: '198.51.100.12',
-      port: 22,
-      username: 'root',
-      status: 'online',
-      region: 'Helsinki, FI',
-      cpu: 7,
-      memory: 22,
-      disk: 14,
-      specs: '2 vCPU · 4 GB RAM · Ubuntu 24.04',
-    },
-  ];
-  const projects: Project[] = [
-    {
-      id: 'p1',
-      name: 'storefront',
-      repo: 'https://github.com/example/storefront',
-      branch: 'main',
-      serverId: 's1',
-      kind: 'web',
-      status: 'running',
-      domain: 'store.example.com',
-      composeFile: 'compose.yaml',
-      autoDeploy: true,
-      updatedAt: ago(12),
-      commit: 'a8f42e1',
-      color: 'mint',
-      envKeys: ['DATABASE_URL', 'NODE_ENV', 'PORT'],
-    },
-    {
-      id: 'p2',
-      name: 'notify-bot',
-      repo: 'https://github.com/example/notify-bot',
-      branch: 'main',
-      serverId: 's2',
-      kind: 'bot',
-      status: 'running',
-      domain: 'Telegram bot',
-      composeFile: 'compose.yaml',
-      autoDeploy: true,
-      updatedAt: ago(48),
-      commit: 'c71db09',
-      color: 'blue',
-      envKeys: ['BOT_TOKEN', 'REDIS_URL'],
-    },
-    {
-      id: 'p3',
-      name: 'backend-api',
-      repo: 'https://github.com/example/backend-api',
-      branch: 'main',
-      serverId: 's1',
-      kind: 'service',
-      status: 'running',
-      domain: 'api.example.com',
-      composeFile: 'compose.yaml',
-      autoDeploy: true,
-      updatedAt: ago(125),
-      commit: '9de6b3a',
-      color: 'purple',
-      envKeys: ['DATABASE_URL', 'JWT_SECRET'],
-    },
-    {
-      id: 'p4',
-      name: 'personal-website',
-      repo: 'https://github.com/example/personal-website',
-      branch: 'main',
-      serverId: 's2',
-      kind: 'web',
-      status: 'running',
-      domain: 'hello.example.com',
-      composeFile: 'compose.yaml',
-      autoDeploy: false,
-      updatedAt: ago(210),
-      commit: '5f2a801',
-      color: 'orange',
-      envKeys: ['NODE_ENV'],
-    },
-    {
-      id: 'p5',
-      name: 'analytics-worker',
-      repo: 'https://github.com/example/analytics-worker',
-      branch: 'develop',
-      serverId: 's3',
-      kind: 'service',
-      status: 'stopped',
-      domain: 'Фоновый процесс',
-      composeFile: 'compose.yaml',
-      autoDeploy: false,
-      updatedAt: ago(960),
-      commit: '2c8e731',
-      color: 'pink',
-      envKeys: ['QUEUE_URL'],
-    },
-    {
-      id: 'p6',
-      name: 'support-bot',
-      repo: 'https://github.com/example/support-bot',
-      branch: 'main',
-      serverId: 's2',
-      kind: 'bot',
-      status: 'running',
-      domain: 'Telegram bot',
-      composeFile: 'compose.yaml',
-      autoDeploy: true,
-      updatedAt: ago(1300),
-      commit: 'b134e7c',
-      color: 'cyan',
-      envKeys: ['BOT_TOKEN'],
-    },
-  ];
-  const jobs: Job[] = projects.map((p, i) => ({
-    id: `j${i}`,
-    projectId: p.id,
-    projectName: p.name,
-    type: 'deploy',
-    status: i === 4 ? 'failed' : 'success',
-    createdAt: p.updatedAt,
-    finishedAt: p.updatedAt,
-    logs:
-      i === 4
-        ? [
-            '[demo] Получен push в develop',
-            '[demo] Сборка образа',
-            '[demo] ERROR: переменная QUEUE_URL не определена',
-          ]
-        : [
-            '[demo] Получен push в main',
-            '[demo] SSH-соединение установлено',
-            '[demo] Репозиторий обновлён',
-            '[demo] Docker Compose: образ собран',
-            '[demo] Контейнер запущен. Проверка состояния пройдена.',
-          ],
-    source: i % 2 === 0 ? 'Git push' : 'Вручную',
-  }));
-  return { servers, projects, jobs };
-}
+
+export type Workflow = {
+  id: string;
+  summary: string;
+  source: string;
+  createdAt: string;
+  deploy: string;
+  stop: string;
+  remove: string;
+  check: string;
+  logs: string;
+  files: Record<string, string>;
+};
+export type ChatMessage = {
+  id: string;
+  role: 'user' | 'assistant' | 'command' | 'result' | 'system';
+  content: string;
+  createdAt: string;
+  jobId?: string;
+  success?: boolean;
+};

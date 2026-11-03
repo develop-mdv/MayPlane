@@ -1,6 +1,7 @@
 import type { Metadata } from 'next';
 import { Geist, Geist_Mono } from 'next/font/google';
 import './globals.css';
+import './workspace.css';
 
 const geistSans = Geist({
   variable: '--font-geist-sans',
@@ -13,9 +14,9 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: 'ezdeploy — проекты под контролем',
+  title: 'ezdeploy — рабочее пространство',
   description:
-    'Управляйте Git-деплоями, серверами, логами и переносом проектов в одной панели.',
+    'Проекты, диалоги с Codex и OpenCode и ваши серверы в одном рабочем пространстве.',
 };
 
 export default function RootLayout({
@@ -24,7 +25,7 @@ export default function RootLayout({
   children: React.ReactNode;
 }>) {
   return (
-    <html lang="ru">
+    <html lang="ru" className="dark">
       <body
         className={`${geistSans.variable} ${geistMono.variable} antialiased`}
       >

@@ -35,7 +35,7 @@ test('authenticated API persists encrypted data and verifies GitHub deliveries',
     },
     refresh: async () => {},
   };
-  const { server } = createApp({
+  const { server } = createApp({ legacyApi: true,
     store,
     token,
     origins: ['http://localhost:3000'],
@@ -108,10 +108,10 @@ test('authenticated API persists encrypted data and verifies GitHub deliveries',
     );
   });
   await t.test(
-    'duplicates, missing servers and malformed env fail without writes',
+    'invalid names, missing servers and malformed env fail without writes',
     async () => {
       for (const changes of [
-        { name: 'app-one' },
+        { name: '../invalid' },
         { serverId: 'missing' },
         { env: 'BAD LINE' },
       ]) {
@@ -150,6 +150,89 @@ test('authenticated API persists encrypted data and verifies GitHub deliveries',
         400,
       );
       assert.deepEqual(store.list('projects')[0].envKeys, ['SECRET']);
+    },
+  );
+  await t.test(
+    'project metadata editing preserves deployment identity and allows repeated names',
+    async () => {
+      const before = store.get('projects', project.id);
+      before.updatedAt = '2020-01-01T00:00:00.000Z';
+      before.assistant = { id: 'old-plan' };
+      before.secret.assistantPlan = { id: 'old-plan', files: {} };
+      before.secret.generatedFiles = { 'compose.yaml': 'working deployment' };
+      before.secret.managedDeployment = true;
+      before.requiredEnvKeys = ['SECRET'];
+      store.save('projects', before);
+      const update = (body) =>
+        request('/projects/' + project.id, 'PATCH', body);
+      assert.equal((await update({ name: 'renamed-app' })).status, 200);
+      let saved = store.get('projects', project.id);
+      assert.equal(saved.name, 'renamed-app');
+      assert.equal(saved.kind, before.kind);
+      assert.deepEqual(saved.secret, before.secret);
+      assert.deepEqual(saved.assistant, before.assistant);
+      assert.notEqual(saved.updatedAt, before.updatedAt);
+      assert.equal(saved.id, before.id);
+      assert.equal(saved.serverId, before.serverId);
+      assert.equal(saved.repo, before.repo);
+      assert.equal(saved.composeFile, before.composeFile);
+      assert.equal(
+        (await update({ name: 'renamed-app', kind: 'bot' })).status,
+        200,
+      );
+      saved = store.get('projects', project.id);
+      assert.equal(saved.kind, 'bot');
+      assert.equal(saved.assistant, undefined);
+      assert.equal(saved.secret.assistantPlan, undefined);
+      assert.deepEqual(
+        saved.secret.generatedFiles,
+        before.secret.generatedFiles,
+      );
+      assert.equal(saved.secret.managedDeployment, true);
+      assert.equal(saved.secret.env, before.secret.env);
+      assert.equal(saved.secret.webhookSecret, before.secret.webhookSecret);
+      assert.deepEqual(saved.requiredEnvKeys, ['SECRET']);
+      const stable = structuredClone(saved);
+      for (const body of [
+        { name: '../invalid' },
+        { name: null },
+        { kind: 'invalid' },
+        { kind: null },
+        { name: 'valid-new-name', kind: 'web', env: 'BROKEN' },
+      ]) {
+        assert.equal((await update(body)).status, 400);
+        assert.deepEqual(store.get('projects', project.id), stable);
+      }
+      const collision = { ...stable, id: randomUUID(), name: 'occupied-name' };
+      store.save('projects', collision);
+      assert.equal((await update({ name: collision.name })).status, 200);
+      assert.equal(store.get('projects', project.id).name, collision.name);
+      assert.deepEqual(store.get('projects', collision.id), collision);
+      assert.deepEqual(store.get('projects', project.id).secret, stable.secret);
+      store.save('projects', stable);
+      const activeJob = {
+        id: randomUUID(),
+        projectId: project.id,
+        type: 'deploy',
+        status: 'pending',
+        createdAt: new Date().toISOString(),
+      };
+      store.save('jobs', activeJob);
+      assert.equal((await update({ kind: 'service' })).status, 409);
+      assert.deepEqual(store.get('projects', project.id), stable);
+      store.save('jobs', { ...activeJob, status: 'success' });
+      assert.equal((await update({ kind: 'service' })).status, 200);
+      const state = await (await request('/state')).json();
+      assert.equal(
+        state.projects.find((p) => p.id === project.id).kind,
+        'service',
+      );
+      assert.equal(
+        state.projects.find((p) => p.id === project.id).name,
+        'renamed-app',
+      );
+      assert.ok(!JSON.stringify(state).includes('replaced-value'));
+      assert.equal(jobs.length, 0);
     },
   );
   let hook;

@@ -1,4 +1,6 @@
 'use client';
+import { MigrationQueue } from './migration-progress';
+import { jobStatus } from '@/lib/job-actions.mjs';
 import { useState } from 'react';
 import Link from 'next/link';
 import {
@@ -18,6 +20,7 @@ import {
   Server as ServerIcon,
   Settings2,
   Terminal,
+  MessageSquare,
   Zap,
   Globe,
   Bot,
@@ -65,7 +68,16 @@ import {
   type Job,
   type Server,
 } from '@/lib/domain';
-import { WorkspaceDialogs, ProjectDetail, LogViewer } from './workspace-flows';
+import {
+  WorkspaceDialogs,
+  ProjectDetail,
+  LogViewer,
+  EditServer,
+} from './workspace-flows';
+import { ServerChat } from './operations-chat';
+import { ServerConsole } from './server-console';
+import { GitConnections } from './git-connections';
+import { LlmSettings } from './llm-settings';
 const navigation = [
   { id: 'overview', label: 'Обзор', icon: LayoutDashboard },
   { id: 'projects', label: 'Проекты', icon: FolderGit2 },
@@ -82,6 +94,14 @@ export function StatusBadge({ status }: { status: Status }) {
     </span>
   );
 }
+export function JobStatusBadge({ job }: { job: Job }) {
+  return (
+    <span className={`status status-${job.status}`}>
+      <span />
+      {jobStatus(job).label}
+    </span>
+  );
+}
 export default function Dashboard() {
   const ws = useWorkspace();
   const { data, connection } = ws;
@@ -89,10 +109,15 @@ export default function Dashboard() {
   const [filter, setFilter] = useState('all');
   const [search, setSearch] = useState('');
   const [modal, setModal] = useState('');
+  const [migrationProjectId, setMigrationProjectId] = useState<string>();
   const [projectId, setProjectId] = useState<string | null>(null);
+  const [projectTab, setProjectTab] = useState<'overview' | 'chat'>();
   const [selectedJob, setSelectedJob] = useState<string | null>(null);
   const [notice, setNotice] = useState('');
   const [confirmServer, setConfirmServer] = useState<Server | null>(null);
+  const [consoleServer, setConsoleServer] = useState<Server | null>(null);
+  const [chatServerId, setChatServerId] = useState<string | null>(null);
+  const [editServerId, setEditServerId] = useState<string | null>(null);
   const selectedProject = data.projects.find((p) => p.id === projectId);
   const visible = data.projects.filter(
     (p) =>
@@ -120,8 +145,13 @@ export default function Dashboard() {
     setView(next);
     setNotice('');
   };
+  const openProject = (project: Project, tab?: 'overview' | 'chat') => {
+    setProjectTab(tab);
+    setProjectId(project.id);
+  };
   const showJob = (job: Job) => {
     setSelectedJob(job.id);
+    setProjectId(null);
     go('logs');
   };
   async function refreshServer(s: Server) {
@@ -162,7 +192,7 @@ export default function Dashboard() {
               server={
                 data.servers.find((s) => s.id === p.serverId)?.name || '—'
               }
-              onClick={() => setProjectId(p.id)}
+              onClick={() => openProject(p)}
             />
           ))}
         </div>
@@ -236,9 +266,7 @@ export default function Dashboard() {
                 : `${online} из ${data.servers.length} на связи`}
             </div>
             <span className="muted">
-              {connection
-                ? 'Подключён исполнитель'
-                : 'Демонстрационное пространство'}
+              {connection ? 'Подключён исполнитель' : 'Нет подключения'}
             </span>
           </div>
         </SidebarContent>
@@ -281,7 +309,11 @@ export default function Dashboard() {
               className={`demo-tag ${connection ? 'connected-tag' : ''}`}
               onClick={() => setModal('connect')}
             >
-              {connection ? 'Исполнитель подключён' : 'Деморежим'}
+              {connection
+                ? 'Серверная часть подключена'
+                : ws.initializing
+                  ? 'Подключаемся…'
+                  : 'Нет подключения'}
               <span className="tag-action">
                 {connection ? <Check size={12} /> : <ArrowUpRight size={12} />}
               </span>
@@ -322,15 +354,16 @@ export default function Dashboard() {
                       ? 'Перенести проект'
                       : 'Новый проект'
                 }
-                onClick={() =>
+                onClick={() => {
+                  if (view === 'migrations') setMigrationProjectId(undefined);
                   setModal(
                     view === 'servers'
                       ? 'server'
                       : view === 'migrations'
                         ? 'migration'
                         : 'project',
-                  )
-                }
+                  );
+                }}
               >
                 <Plus size={17} />
                 {view === 'servers'
@@ -516,7 +549,7 @@ export default function Dashboard() {
                     {data.projects
                       .filter((p) => p.serverId === s.id)
                       .map((p) => (
-                        <button key={p.id} onClick={() => setProjectId(p.id)}>
+                        <button key={p.id} onClick={() => openProject(p)}>
                           <FolderGit2 size={13} />
                           {p.name}
                         </button>
@@ -526,6 +559,22 @@ export default function Dashboard() {
                     )}
                   </div>
                   <div className="server-actions">
+                    <Button
+                      variant="outline"
+                      disabled={!connection}
+                      onClick={() => setConsoleServer(s)}
+                    >
+                      <Terminal size={14} />
+                      Консоль
+                    </Button>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={() => setChatServerId(s.id)}
+                    >
+                      <MessageSquare size={14} />
+                      Чат
+                    </Button>
                     <Button
                       variant="outline"
                       disabled={ws.busy}
@@ -539,12 +588,19 @@ export default function Dashboard() {
                         Настроить сервер
                       </Button>
                     )}
+                    <Button
+                      variant="outline"
+                      disabled={!connection || ws.busy}
+                      onClick={() => setEditServerId(s.id)}
+                    >
+                      <Settings2 size={14} /> Редактировать
+                    </Button>
                     <small>
                       {s.checkedAt
                         ? relativeDate(s.checkedAt)
                         : connection
                           ? 'Не проверялся'
-                          : 'Пример метрик'}
+                          : 'Не проверялся'}
                     </small>
                   </div>
                 </section>
@@ -567,41 +623,60 @@ export default function Dashboard() {
           )}
           {view === 'migrations' && (
             <>
-              <div className="migration-explainer">
-                <div className="migration-visual">
-                  <span>
-                    <ServerIcon size={31} />
-                    Исходный сервер
-                  </span>
-                  <div className="transfer-line">
-                    <ArrowDownUp size={25} />
-                    <small>SSH · SHA-256</small>
+              <MigrationQueue
+                projects={data.projects}
+                servers={data.servers}
+                jobs={data.jobs}
+                onContinue={(id) => {
+                  setMigrationProjectId(id);
+                  setModal('migration');
+                }}
+                onLogs={showJob}
+              />
+
+              <details className="migration-guide">
+                <summary>Как проходит перенос</summary>
+                <div className="migration-explainer">
+                  <div className="migration-visual">
+                    <span>
+                      <ServerIcon size={31} />
+                      Исходный сервер
+                    </span>
+                    <div className="transfer-line">
+                      <ArrowDownUp size={25} />
+                      <small>SSH · SHA-256</small>
+                    </div>
+                    <span>
+                      <ServerIcon size={31} />
+                      Новый сервер
+                    </span>
                   </div>
-                  <span>
-                    <ServerIcon size={31} />
-                    Новый сервер
-                  </span>
-                </div>
-                <div>
-                  <h2>Переезд с сохранением данных</h2>
-                  <p>
-                    Исполнитель остановит контейнеры, скопирует проект,
-                    Docker-образы и тома, проверит контрольные суммы и запустит
-                    копию. Исходные данные останутся на месте.
-                  </p>
-                  <div className="inline-notice">
-                    На время переноса проект недоступен. DNS и внешние базы
-                    переключаются отдельно. Поддерживаются управляемые локальные
-                    тома и файлы внутри каталога проекта.
+                  <div>
+                    <h2>Переезд с сохранением данных</h2>
+                    <p>
+                      Сначала проверьте состав данных и новый сервер.
+                      Исполнитель остановит приложение, передаст файлы, Docker
+                      volumes и снимки контейнеров или конфигурацию systemd,
+                      затем проверит новую копию.
+                    </p>
+                    <div className="inline-notice">
+                      На время переноса проект недоступен. DNS и внешние базы
+                      переключаются отдельно. Исходная копия и резервные архивы
+                      сохраняются. После запуска новой копии откат не подменяет
+                      её данные старыми.
+                    </div>
+                    <Button
+                      className="primary-button"
+                      onClick={() => {
+                        setMigrationProjectId(undefined);
+                        setModal('migration');
+                      }}
+                    >
+                      Выбрать проект <ArrowUpRight size={15} />
+                    </Button>
                   </div>
-                  <Button
-                    className="primary-button"
-                    onClick={() => setModal('migration')}
-                  >
-                    Выбрать проект <ArrowUpRight size={15} />
-                  </Button>
                 </div>
-              </div>
+              </details>
               <div className="section-heading">
                 <h2>История переносов</h2>
               </div>
@@ -617,6 +692,12 @@ export default function Dashboard() {
               ws={ws}
               selectedJob={selectedJob}
               setSelectedJob={setSelectedJob}
+              onProject={(project, tab) => {
+                setFilter('all');
+                setSearch('');
+                go('projects');
+                openProject(project, tab);
+              }}
             />
           )}
           {view === 'settings' && (
@@ -627,16 +708,20 @@ export default function Dashboard() {
               <h2>
                 {connection
                   ? 'Исполнитель подключён'
-                  : 'Подключите свой исполнитель'}
+                  : 'Подключите серверную часть'}
               </h2>
               <p>
-                Исполнитель работает на вашем компьютере или сервере. В нём
-                хранятся проекты, зашифрованные SSH-доступы, переменные
-                окружения и история операций.
+                Исполнитель — серверная часть ezdeploy. Он подключается к вашим
+                VPS по SSH, собирает проекты, запускает контейнеры и передаёт
+                логи и консоль в панель. Один исполнитель управляет всеми
+                серверами.
               </p>
               {connection ? (
                 <>
-                  <code className="code-block">{connection.url}</code>
+                  <code className="code-block">
+                    {connection.url ||
+                      'Локальный исполнитель · подключён автоматически'}
+                  </code>
                   <Button
                     variant="outline"
                     onClick={() => {
@@ -653,14 +738,16 @@ export default function Dashboard() {
                   className="primary-button"
                   onClick={() => setModal('connect')}
                 >
-                  Подключить исполнитель <ArrowUpRight size={15} />
+                  Указать адрес исполнителя <ArrowUpRight size={15} />
                 </Button>
               )}
               <div className="inline-notice">
-                Ключ доступа действует для владельца пространства и хранится
-                только в памяти вкладки. После обновления страницы подключитесь
-                снова.
+                При локальном запуске панель подключается автоматически. Для
+                удалённого исполнителя укажите HTTPS-адрес и ключ; этот ключ
+                остаётся только в памяти вкладки.
               </div>
+              <LlmSettings ws={ws} />
+              <GitConnections ws={ws} />
               <button className="text-link" onClick={() => go('help')}>
                 Инструкция по настройке <ChevronRight size={14} />
               </button>
@@ -672,17 +759,17 @@ export default function Dashboard() {
                 [
                   '01',
                   'Запустите исполнитель',
-                  'В папке проекта выполните npm run runner:setup, затем npm run runner. В файле .env.runner найдите EZDEPLOY_TOKEN. Через «Настройки» укажите http://localhost:8788 и этот ключ. Для удалённой панели нужен исполнитель с HTTPS; разрешите адрес панели в ALLOWED_ORIGINS.',
+                  'В папке проекта выполните npm run runner:setup, затем npm run runner и npm run dev. Локальная панель подключится автоматически. Для удалённой панели нужен исполнитель с HTTPS; его адрес и ключ укажите в настройках.',
                 ],
                 [
                   '02',
                   'Подключите сервер',
-                  'Добавьте IP и root-доступ по SSH. Сравните SHA-256 ключа с консолью провайдера. Если Docker не установлен, нажмите «Настроить сервер». Автоматическая установка рассчитана на Ubuntu 24.04.',
+                  'Добавьте IP и root-доступ по SSH. Сравните SHA-256 ключа с консолью провайдера. Если Docker не установлен, нажмите «Настроить сервер». Автоматическая установка рассчитана на Ubuntu 24.04 и 26.04.',
                 ],
                 [
                   '03',
                   'Добавьте проект',
-                  'Укажите публичный HTTPS Git-репозиторий, ветку и Compose-файл. В репозитории должны быть compose.yaml и Dockerfile, если требуется сборка. Загрузите .env отдельно. Приложению добавьте healthcheck, задайте свободные порты и отдельные тома. Домены и TLS настраиваются в вашем прокси.',
+                  'Укажите HTTPS Git-репозиторий, ветку и Compose-файл. Для приватных репозиториев подключите GitHub в настройках. В репозитории должны быть compose.yaml и Dockerfile, если требуется сборка. Введите .env в карточке проекта или загрузите файл. Приложению добавьте healthcheck, задайте свободные порты и отдельные тома. Домены и TLS настраиваются в вашем прокси.',
                 ],
                 [
                   '04',
@@ -697,7 +784,7 @@ export default function Dashboard() {
                 [
                   '06',
                   'Сохраните доступы',
-                  'Резервируйте .runner-data и EZDEPLOY_ENCRYPTION_KEY вместе. Без ключа нельзя расшифровать сохранённые секреты. В деморежиме используются примеры: изменения сбрасываются при обновлении страницы.',
+                  'Резервируйте .runner-data и EZDEPLOY_ENCRYPTION_KEY вместе. Без ключа нельзя расшифровать сохранённые секреты.',
                 ],
               ].map(([n, t, d]) => (
                 <section className="help-card" key={n}>
@@ -714,22 +801,43 @@ export default function Dashboard() {
               <span className="online-dot" />
               {connection
                 ? 'Данные вашего исполнителя'
-                : 'Демоданные · изменения до обновления страницы'}
+                : 'Ожидаем подключения к серверной части'}
             </span>
           </footer>
         </div>
       </main>
+      <ServerChat
+        ws={ws}
+        server={data.servers.find((s) => s.id === chatServerId) || null}
+        onClose={() => setChatServerId(null)}
+      />
+      <ServerConsole
+        server={data.servers.find((s) => s.id === consoleServer?.id) || null}
+        ws={ws}
+        onClose={() => setConsoleServer(null)}
+      />
+      <EditServer
+        server={data.servers.find((s) => s.id === editServerId) || null}
+        ws={ws}
+        onClose={() => setEditServerId(null)}
+        onSaved={() => {
+          setEditServerId(null);
+          setNotice('Настройки сервера сохранены.');
+        }}
+      />
       <WorkspaceDialogs
         modal={modal}
         setModal={setModal}
         ws={ws}
-        onProject={(p) => setProjectId(p.id)}
+        onProject={openProject}
+        migrationProjectId={migrationProjectId}
         onJob={showJob}
         confirmServer={confirmServer}
         setConfirmServer={setConfirmServer}
       />
       <ProjectDetail
         project={selectedProject}
+        initialTab={projectTab}
         ws={ws}
         onClose={() => setProjectId(null)}
         onJob={(j) => {
@@ -737,6 +845,7 @@ export default function Dashboard() {
           showJob(j);
         }}
         onMigrate={() => {
+          setMigrationProjectId(projectId || undefined);
           setProjectId(null);
           setModal('migration');
         }}
@@ -763,6 +872,9 @@ function ProjectCard({
         <StatusBadge status={p.status} />
       </div>
       <h3>{p.name}</h3>
+      <span className="instance-label" title="Идентификатор экземпляра">
+        Экземпляр {p.id.slice(0, 8)}
+      </span>
       <div className="project-domain">
         {p.domain || kindLabels[p.kind]}
         <ArrowUpRight size={13} />
@@ -897,12 +1009,17 @@ function JobTable({
                     )}
                   </span>
                   {j.projectName}
+                  {j.projectId && (
+                    <span className="instance-label">
+                      {j.projectId.slice(0, 8)}
+                    </span>
+                  )}
                 </button>
               </TableCell>
               <TableCell>{jobLabels[j.type]}</TableCell>
               <TableCell className="muted">{j.source || 'Вручную'}</TableCell>
               <TableCell>
-                <StatusBadge status={j.status} />
+                <JobStatusBadge job={j} />
               </TableCell>
               <TableCell className="muted">
                 {relativeDate(j.createdAt)}
