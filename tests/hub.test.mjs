@@ -221,6 +221,18 @@ function fakeAgent(provider, calls, onClose = () => {}) {
   };
 }
 
+function fakeVersion(provider, code = 0, errors = '') {
+  const stdout = new PassThrough(),
+    stderr = new PassThrough(),
+    events = new EventEmitter();
+  setImmediate(() => {
+    if (code === 0) stdout.write(provider + ' 1.0.0\n');
+    if (errors) stderr.write(errors);
+    events.emit('close', code);
+  });
+  return { stdout, stderr, events, input: new PassThrough(), close() {} };
+}
+
 async function fixture(t, options = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'ezdeploy-hub-')),
     key = randomBytes(32),
@@ -256,7 +268,10 @@ async function fixture(t, options = {}) {
     hubOptions: {
       openProcess: async (m, opts) => {
         assert.equal(m.id, machineId);
-        const p = fakeAgent(opts.provider, calls);
+        const p =
+          opts.operation === 'version'
+            ? fakeVersion(opts.provider)
+            : fakeAgent(opts.provider, calls);
         processes.push(p);
         return p;
       },
@@ -807,11 +822,18 @@ test('a manually named empty chat keeps its name after the first prompt', async 
 test('process launch rejects unsupported providers, arbitrary operations and traversal on both platforms', () => {
   assert.throws(() => processSpec('shell', 'agent'));
   assert.throws(() => processSpec('codex', 'rm -rf /'));
-  assert.deepEqual(processSpec('codex', 'install').args, [
+  assert.deepEqual(processSpec('codex', 'install', 'win32').args, [
     'install',
     '--global',
     '@openai/codex',
   ]);
+  assert.equal(
+    processSpec('codex', 'install', 'linux').executable,
+    '/bin/bash',
+  );
+  assert.ok(
+    !processSpec('codex', 'install', 'linux').args[1].includes('npm install'),
+  );
   assert.throws(() => projectPath('/project/../etc'));
   assert.throws(() => projectPath('C:\\project\\..\\Windows', 'win32'));
   assert.throws(() => projectPath('/tmp/hello\nworld'));
@@ -1097,4 +1119,87 @@ test('catalog failures can be retried and parallel reads share one probe whose p
   } finally {
     catalog.close();
   }
+});
+
+test('installed Codex remains installed when app-server fails, and missing CLI keeps useful diagnostics', async (t) => {
+  const broken = await fixture(t, {
+    openProcess: async (m, opts) => {
+      if (opts.operation === 'version') return fakeVersion(opts.provider);
+      throw new Error('app-server failed hidden-ssh-password');
+    },
+  });
+  const status = await (
+    await broken.request('/machines/' + broken.machineId + '/agents/codex')
+  ).json();
+  assert.equal(status.installed, true);
+  assert.equal(status.ready, false);
+  assert.equal(status.version, 'codex 1.0.0');
+  assert.match(status.error, /app-server failed/);
+  assert.ok(!status.error.includes('hidden-ssh-password'));
+  const absent = await fixture(t, {
+    openProcess: async () => fakeVersion('codex', 127, 'codex: not found'),
+  });
+  const missing = await (
+    await absent.request('/machines/' + absent.machineId + '/agents/codex')
+  ).json();
+  assert.equal(missing.installed, false);
+  assert.equal(missing.missing, true);
+  assert.match(missing.error, /not found/);
+});
+
+test('successful installation clears cached runtimes and models before checking the installed version again', async (t) => {
+  const calls = [];
+  let starts = 0,
+    closed = 0;
+  const f = await fixture(t, {
+    openProcess: async (m, opts) => {
+      if (opts.operation === 'version' || opts.operation === 'install')
+        return fakeVersion(opts.provider);
+      starts++;
+      return fakeAgent(opts.provider, calls, () => closed++);
+    },
+  });
+  const base = '/machines/' + f.machineId + '/agents/codex';
+  assert.equal((await (await f.request(base)).json()).ready, true);
+  await f.request(base + '/models', 'POST', {});
+  assert.equal(starts, 2);
+  const install = await (
+    await f.request(base + '/install', 'POST', { confirm: true })
+  ).json();
+  await waitFor(
+    async () => (await f.request('/tasks/' + install.id)).json(),
+    (x) => x.status === 'success',
+  );
+  assert.equal(closed, 2);
+  await f.request(base + '/models', 'POST', {});
+  assert.equal(starts, 3);
+  assert.equal((await (await f.request(base)).json()).ready, true);
+  assert.equal(starts, 4);
+});
+
+test('an installation opening its SSH channel already reserves the machine against duplicate installs', async (t) => {
+  let release,
+    starting = false;
+  const gate = new Promise((r) => {
+    release = r;
+  });
+  const f = await fixture(t, {
+    openProcess: async (m, opts) => {
+      if (opts.operation === 'install') {
+        starting = true;
+        await gate;
+      }
+      return fakeVersion(opts.provider);
+    },
+  });
+  const base = '/machines/' + f.machineId + '/agents/codex/install';
+  const first = f.request(base, 'POST', { confirm: true });
+  await waitFor(
+    async () => starting,
+    (x) => x,
+  );
+  const second = await f.request(base, 'POST', { confirm: true });
+  assert.equal(second.status, 409);
+  release();
+  assert.equal((await first).status, 202);
 });

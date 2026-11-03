@@ -3,7 +3,7 @@ import { existsSync, statfsSync, readFileSync } from 'node:fs';
 import { dirname, join, isAbsolute, win32 } from 'node:path';
 import os from 'node:os';
 import { connect } from './ssh.mjs';
-import { assert, q } from './security.mjs';
+import { assert } from './security.mjs';
 import { posixAgentCommand } from './agent-launch.mjs';
 
 export const providers = {
@@ -25,6 +25,8 @@ export function projectPath(value, platform = 'linux') {
   assert(
     typeof value === 'string' &&
       value.length <= 1024 &&
+      // Paths cannot contain terminal/shell control characters.
+      // eslint-disable-next-line no-control-regex
       !/[\x00-\x1f]/.test(value),
     'Укажите абсолютный путь к проекту',
   );
@@ -43,6 +45,11 @@ export function processSpec(provider, operation, platform = process.platform) {
     ['agent', 'version', 'install', 'login'].includes(operation),
     'Неизвестная операция',
   );
+  if (operation === 'install' && platform !== 'win32')
+    return {
+      executable: '/bin/bash',
+      args: ['-c', posixAgentCommand(provider, operation, [])],
+    };
   if (operation === 'install')
     return { executable: 'npm', args: ['install', '--global', p.package] };
   if (operation === 'login')
@@ -59,7 +66,7 @@ export function processSpec(provider, operation, platform = process.platform) {
 
 export function localProcess({ provider, operation, cwd }) {
   let { executable, args } = processSpec(provider, operation);
-  if (process.platform !== 'win32') {
+  if (process.platform !== 'win32' && operation !== 'install') {
     executable = '/bin/bash';
     args = [
       '-c',

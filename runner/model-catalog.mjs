@@ -336,6 +336,12 @@ export function createModelCatalog({ openProcess, connectors, isClosed }) {
   }
   return {
     get,
+    invalidate(machineId, provider) {
+      for (const key of entries.keys()) {
+        const [id, agent] = JSON.parse(key);
+        if (id === machineId && agent === provider) entries.delete(key);
+      }
+    },
     close() {
       for (const rpc of probes) rpc.close();
       entries.clear();

@@ -11,6 +11,7 @@ import { attachConnectors } from './connectors.mjs';
 import { connect, metrics } from './ssh.mjs';
 import { assert, redact } from './security.mjs';
 import { machineHome, separateServices } from './workspace-model.mjs';
+import { agentVersion, agentError } from './agent-status.mjs';
 import {
   createModelCatalog,
   codexModels,
@@ -40,6 +41,7 @@ export function createHub(
     isClosed: () => closed,
   });
   const modelChanges = new Set();
+  const openingTasks = new Set();
   const records = (kind) =>
     store
       .list('settings')
@@ -371,15 +373,28 @@ export function createHub(
     return runtime;
   }
   async function status(m, provider) {
+    const version = await agentVersion(m, provider, openProcess, connectors);
+    if (!version.installed || provider !== 'codex')
+      return { ...version, account: null, models: [] };
     try {
       if (provider === 'codex') {
         const r = await (await runtimeFor(m, provider)).ready;
         const account = await r.rpc.request('account/read', {
           refreshToken: false,
         });
-        const catalog = await codexModels(r.rpc).catch(() => ({ models: [] }));
+        let catalog = { models: [] },
+          catalogError;
+        try {
+          catalog = await codexModels(r.rpc);
+        } catch (error) {
+          catalogError = agentError(m, error.message);
+        }
         return {
-          installed: true,
+          ...version,
+          ready: true,
+          ...(catalogError
+            ? { error: `Каталог моделей недоступен: ${catalogError}` }
+            : {}),
           account: account.account
             ? {
                 type: account.account.type,
@@ -391,36 +406,14 @@ export function createHub(
           login: r.login || null,
         };
       }
-      const p = await openProcess(
-        m,
-        { provider, operation: 'version' },
-        connectors,
-      );
-      return await new Promise((resolve) => {
-        let output = '';
-        let done = false;
-        const finish = (installed) => {
-          if (done) return;
-          done = true;
-          clearTimeout(timer);
-          p.close();
-          resolve({
-            installed,
-            version: output.trim().slice(0, 100),
-            account: null,
-            models: [],
-          });
-        };
-        const timer = setTimeout(() => finish(false), 15000);
-        p.stdout.on('data', (chunk) => {
-          output = (output + chunk).slice(-200);
-        });
-        p.stderr.on('data', () => {});
-        p.events.on('close', (code) => finish(code === 0));
-        p.events.on('error', () => finish(false));
-      });
-    } catch {
-      return { installed: false, account: null, models: [] };
+    } catch (error) {
+      return {
+        ...version,
+        ready: false,
+        account: null,
+        models: [],
+        error: agentError(m, error.message),
+      };
     }
   }
   function snapshot() {
@@ -529,15 +522,22 @@ export function createHub(
   }
   async function task(m, provider, operation) {
     assert(
-      ![...tasks.values()].some(
-        (t) => t.machineId === m.id && t.status === 'running',
-      ),
+      !openingTasks.has(m.id) &&
+        ![...tasks.values()].some(
+          (t) => t.machineId === m.id && t.status === 'running',
+        ),
       'На машине уже выполняется установка или вход',
       409,
     );
     if (tasks.size > 40)
       for (const [id, t] of tasks) if (t.status !== 'running') tasks.delete(id);
-    const p = await openProcess(m, { provider, operation }, connectors);
+    openingTasks.add(m.id);
+    let p;
+    try {
+      p = await openProcess(m, { provider, operation }, connectors);
+    } finally {
+      openingTasks.delete(m.id);
+    }
     const t = {
       id: randomUUID(),
       machineId: m.id,
@@ -554,6 +554,11 @@ export function createHub(
       if (t.status !== 'running') return;
       clearTimeout(t.timer);
       t.status = code === 0 ? 'success' : 'error';
+      if (code === 0 && operation === 'install') {
+        for (const r of runtimes.values())
+          if (r.machineId === m.id && r.provider === provider) r.rpc?.close();
+        modelCatalog.invalidate(m.id, provider);
+      }
       p.close();
     };
     const capture = (bytes) => {
@@ -567,10 +572,17 @@ export function createHub(
     p.events.on('close', finish);
     p.events.on('error', () => {
       t.output +=
-        '\nНе удалось запустить процесс. Проверьте Node.js/npm и установку агента.';
+        '\nНе удалось запустить процесс. Проверьте соединение, путь и установку агента.';
       finish(1);
     });
-    t.timer = setTimeout(() => finish(1), 10 * 60 * 1000);
+    t.timer = setTimeout(
+      () => {
+        t.output +=
+          '\nОперация не завершилась за 10 минут. Проверьте соединение и повторите.';
+        finish(1);
+      },
+      10 * 60 * 1000,
+    );
     t.timer.unref();
     return { id: t.id };
   }

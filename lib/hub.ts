@@ -91,6 +91,9 @@ export type ModelCatalog = {
 export type AgentStatus = {
   installed: boolean;
   version?: string;
+  ready?: boolean;
+  missing?: boolean;
+  error?: string;
   account: { type: string; email?: string; planType?: string } | null;
   models: AgentModel[];
   login?: { completed?: boolean; success?: boolean; error?: string };

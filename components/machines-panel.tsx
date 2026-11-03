@@ -647,7 +647,13 @@ function ProviderPanel({
         }>(`/hub/tasks/${taskId}`);
         if (active) {
           setTask(result);
-          if (result.status !== 'running') setTaskId('');
+          if (result.status !== 'running') {
+            if (result.status === 'success') {
+              const next = await api<AgentStatus>('/hub' + base);
+              if (active) setStatus(next);
+            }
+            if (active) setTaskId('');
+          }
         }
       } catch (e) {
         if (active) {
@@ -664,7 +670,7 @@ function ProviderPanel({
       active = false;
       clearInterval(timer);
     };
-  }, [taskId, api]);
+  }, [taskId, api, base]);
   async function operate(action: string) {
     setBusy(true);
     setError('');
@@ -677,7 +683,7 @@ function ProviderPanel({
       if (result.id) setTaskId(result.id);
       if (result.verificationUrl) setLogin(result);
       setConfirm(false);
-      if (action === 'logout') setStatus(null);
+      if (action === 'logout') await check();
     } catch (e) {
       setError((e as Error).message);
     } finally {
@@ -694,9 +700,7 @@ function ProviderPanel({
           <strong>{providerNames[provider]}</strong>
           <p>
             {status?.installed
-              ? status.account?.email ||
-                status.version ||
-                'Установлен · используется аккаунт на машине'
+              ? status.account?.email || status.version || 'Установлен'
               : 'Агент на этой машине'}
           </p>
         </div>
@@ -704,7 +708,9 @@ function ProviderPanel({
           {status
             ? status.installed
               ? 'Установлен'
-              : 'Не найден'
+              : status.error && !status.missing
+                ? 'Ошибка проверки'
+                : 'Не найден'
             : 'Не проверен'}
         </span>
       </div>
@@ -763,6 +769,22 @@ function ProviderPanel({
           {status.account.planType ? `· ${status.account.planType}` : ''}
         </p>
       )}
+      {provider === 'codex' &&
+        status?.installed &&
+        status.ready &&
+        !status.account && (
+          <p className="hub-note">
+            <LogIn size={14} /> Codex установлен. Войдите с ChatGPT или
+            настройте API-доступ на этой машине.
+          </p>
+        )}
+      {status?.installed && status.ready === false && (
+        <p className="hub-note">
+          Codex установлен, но подключиться к агенту не удалось. Подробности
+          ниже.
+        </p>
+      )}
+      <ErrorText error={status?.error || ''} />
       {login?.verificationUrl && (
         <div className="device-login">
           <p>
@@ -844,8 +866,10 @@ function ProviderPanel({
             <code>
               {provider === 'codex' ? '@openai/codex' : 'opencode-ai'}
             </code>{' '}
-            {provider === 'opencode' && machine.platform !== 'win32' ? (
-              <>через официальный установщик OpenCode без npm</>
+            {machine.platform !== 'win32' ? (
+              <>
+                через официальный установщик {providerNames[provider]} без npm
+              </>
             ) : (
               <>
                 через <code>npm install --global</code>
@@ -853,10 +877,12 @@ function ProviderPanel({
             )}{' '}
             на <b>{machine.name}</b> от пользователя{' '}
             <b>{machine.username || 'владельца коннектора'}</b>? На
-            {provider === 'opencode' && machine.platform !== 'win32' ? (
+            {machine.platform !== 'win32' ? (
               <>
-                машине нужен curl. Существующая установка, настройки и
-                запущенные процессы сохраняются.
+                машине нужен curl.{' '}
+                {provider === 'codex'
+                  ? 'Codex будет установлен или обновлён в ~/.local/bin; вход и настройки сохраняются.'
+                  : 'Существующая установка, настройки и запущенные процессы сохраняются.'}
               </>
             ) : (
               <>машине нужны Node.js и npm.</>
