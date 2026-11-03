@@ -13,7 +13,8 @@ export type HubProject = {
 export type AgentProvider = 'codex' | 'opencode';
 export type AgentSession = {
   id: string;
-  projectId: string;
+  projectId: string | null;
+  cwd?: string;
   machineId: string;
   provider: AgentProvider;
   title: string;
@@ -61,6 +62,15 @@ export type SessionDetail = AgentSession & {
   approvals: AgentApproval[];
 };
 export type HubSnapshot = {
+  services: {
+    id: string;
+    name: string;
+    machineId: string;
+    repo: string;
+    kind: string;
+    status: string;
+    domain?: string;
+  }[];
   projects: HubProject[];
   sessions: AgentSession[];
   localMachineId?: string;
@@ -85,7 +95,11 @@ export const activeSession = (session?: AgentSession | null) =>
   !!session && ['running', 'connecting', 'approval'].includes(session.status);
 
 export function useHub(ws: Workspace) {
-  const [data, setData] = useState<HubSnapshot>({ projects: [], sessions: [] });
+  const [data, setData] = useState<HubSnapshot>({
+    projects: [],
+    sessions: [],
+    services: [],
+  });
   const [error, setError] = useState('');
   const api = ws.api;
   const refresh = useCallback(async () => {
@@ -95,7 +109,7 @@ export function useHub(ws: Workspace) {
     return next;
   }, [api]);
   useEffect(() => {
-    setData({ projects: [], sessions: [] });
+    setData({ projects: [], sessions: [], services: [] });
     if (!ws.connection) return;
     let alive = true,
       loading = false;

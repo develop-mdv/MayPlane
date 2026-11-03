@@ -10,6 +10,7 @@ import { openStore } from '../runner/store.mjs';
 import { createApp } from '../runner/server.mjs';
 import { projectPath, processSpec } from '../runner/machine-process.mjs';
 import { AgentRpc } from '../runner/agent-rpc.mjs';
+import { separateServices } from '../runner/workspace-model.mjs';
 
 function fakeAgent(provider, calls, onClose = () => {}) {
   const stdout = new PassThrough(),
@@ -410,8 +411,20 @@ test('OpenCode ACP requires per-action permission, rejects permanent grants and 
   const read = async () => await (await f.request(`/sessions/${s.id}`)).json();
   const waiting = await waitFor(read, (s) => s.status === 'approval');
   assert.equal(waiting.nativeId, 'native-acp');
-  const second = await (await f.request('/sessions', 'POST', { projectId: project.id, provider: 'opencode' })).json();
-  assert.equal((await f.request(`/sessions/${second.id}/message`, 'POST', { message: 'conflicting write' })).status, 409);
+  const second = await (
+    await f.request('/sessions', 'POST', {
+      projectId: project.id,
+      provider: 'opencode',
+    })
+  ).json();
+  assert.equal(
+    (
+      await f.request(`/sessions/${second.id}/message`, 'POST', {
+        message: 'conflicting write',
+      })
+    ).status,
+    409,
+  );
   assert.equal(
     (
       await f.request(`/sessions/${s.id}/approval`, 'POST', {
@@ -466,6 +479,260 @@ test('workspace mode disables legacy root deployment and LLM endpoints', async (
     assert.equal(response.status, 410);
   }
   assert.equal((await f.request('')).status, 200);
+});
+
+test('standalone chats run in the machine home, move to a project on the same machine and survive removing the folder', async (t) => {
+  const home =
+    process.platform === 'win32' ? 'D:\\Users\\owner' : '/home/owner';
+  const folder =
+    process.platform === 'win32'
+      ? 'D:\\Projects\\workspace'
+      : '/home/owner/workspace';
+  const f = await fixture(t, { resolveHome: async () => home });
+  assert.equal(
+    (await f.request('/sessions', 'POST', { provider: 'codex' })).status,
+    404,
+  );
+  const chat = await (
+    await f.request('/sessions', 'POST', {
+      provider: 'codex',
+      machineId: f.machineId,
+    })
+  ).json();
+  assert.equal(chat.projectId, null);
+  assert.equal(chat.cwd, home);
+  assert.equal(chat.mode, 'read-only');
+  await f.request(`/sessions/${chat.id}/message`, 'POST', {
+    message: 'Standalone message',
+  });
+  const read = async () =>
+    await (await f.request(`/sessions/${chat.id}`)).json();
+  await waitFor(read, (s) => s.status === 'approval');
+  assert.equal(
+    f.calls.find((c) => c.method === 'thread/start').params.cwd,
+    home,
+  );
+  assert.equal(
+    (await f.request(`/sessions/${chat.id}`, 'PATCH', { projectId: null }))
+      .status,
+    409,
+  );
+  await f.request(`/sessions/${chat.id}/approval`, 'POST', {
+    id: 'permission-1',
+    decision: 'accept',
+  });
+  await waitFor(read, (s) => s.status === 'idle');
+  const project = await (
+    await f.request('/projects', 'POST', {
+      name: 'Workspace',
+      machineId: f.machineId,
+      path: folder,
+    })
+  ).json();
+  assert.equal(
+    (
+      await f.request(`/projects/${project.id}`, 'PATCH', {
+        name: 'Renamed workspace',
+      })
+    ).status,
+    200,
+  );
+  const moved = await (
+    await f.request(`/sessions/${chat.id}`, 'PATCH', { projectId: project.id })
+  ).json();
+  assert.equal(moved.projectId, project.id);
+  assert.equal(moved.cwd, folder);
+  assert.equal(moved.nativeId, 'native-thread');
+  assert.equal((await read()).messages[0].content, 'Standalone message');
+  await f.request(`/sessions/${chat.id}/message`, 'POST', {
+    message: 'Continue in project',
+  });
+  await waitFor(read, (s) => s.status === 'approval');
+  assert.equal(
+    f.calls.find((c) => c.method === 'thread/resume').params.cwd,
+    folder,
+  );
+  assert.equal(
+    (await f.request(`/projects/${project.id}`, 'DELETE', {})).status,
+    409,
+  );
+  await f.request(`/sessions/${chat.id}/approval`, 'POST', {
+    id: 'permission-1',
+    decision: 'accept',
+  });
+  await waitFor(read, (s) => s.status === 'idle');
+  const otherMachine = randomUUID();
+  f.store.save(
+    'servers',
+    {
+      id: otherMachine,
+      name: 'Other',
+      platform: process.platform,
+      transport: 'local',
+    },
+    {},
+  );
+  const other = await (
+    await f.request('/projects', 'POST', {
+      name: 'Other folder',
+      machineId: otherMachine,
+      path: folder,
+    })
+  ).json();
+  assert.equal(
+    (await f.request(`/sessions/${chat.id}`, 'PATCH', { projectId: other.id }))
+      .status,
+    409,
+  );
+  assert.equal((await read()).projectId, project.id);
+  assert.equal(
+    (await f.request(`/projects/${project.id}`, 'DELETE', {})).status,
+    200,
+  );
+  const detached = await read();
+  assert.equal(detached.projectId, null);
+  assert.equal(detached.cwd, folder);
+  assert.equal(detached.nativeId, 'native-thread');
+  assert.ok(detached.messages.some((m) => m.content === 'Continue in project'));
+});
+
+test('services remain separate from real working folders; migration retains native chats, encrypted history and deployment data', async (t) => {
+  const f = await fixture(t),
+    serviceId = randomUUID(),
+    importedId = randomUUID(),
+    chatId = randomUUID(),
+    realFolderId = randomUUID();
+  const path =
+    process.platform === 'win32' ? 'D:\\Projects\\service' : '/srv/service';
+  f.store.save(
+    'projects',
+    {
+      id: serviceId,
+      name: 'Production service',
+      serverId: f.machineId,
+      repo: 'https://github.com/example/service',
+      kind: 'web',
+      status: 'running',
+    },
+    { env: 'PRIVATE_SERVICE_KEY=keep' },
+  );
+  f.store.save(
+    'settings',
+    {
+      id: importedId,
+      recordType: 'workspace',
+      legacyProjectId: serviceId,
+      name: 'Production service',
+      machineId: f.machineId,
+      path,
+    },
+    {},
+  );
+  f.store.save(
+    'settings',
+    {
+      id: realFolderId,
+      recordType: 'workspace',
+      name: 'Real folder',
+      machineId: f.machineId,
+      path: path + '-source',
+    },
+    {},
+  );
+  f.store.save(
+    'settings',
+    {
+      id: chatId,
+      recordType: 'session',
+      projectId: importedId,
+      machineId: f.machineId,
+      provider: 'opencode',
+      nativeId: 'existing-acp-native',
+      mode: 'workspace-write',
+      status: 'idle',
+      updatedAt: new Date().toISOString(),
+    },
+    {
+      title: 'Private conversation title',
+      messages: [
+        { id: 'old-msg', role: 'user', content: 'Private existing message' },
+      ],
+      approvals: [],
+    },
+  );
+  separateServices(f.store);
+  separateServices(f.store);
+  const snapshot = await (await f.request('')).json();
+  assert.deepEqual(
+    snapshot.projects.map((p) => p.id),
+    [realFolderId],
+  );
+  assert.equal(snapshot.services[0].name, 'Production service');
+  assert.equal(snapshot.sessions[0].projectId, null);
+  assert.equal(snapshot.sessions[0].cwd, path);
+  assert.equal(snapshot.sessions[0].nativeId, 'existing-acp-native');
+  const chat = await (await f.request(`/sessions/${chatId}`)).json();
+  assert.equal(chat.messages[0].content, 'Private existing message');
+  assert.equal(chat.title, 'Private conversation title');
+  assert.equal(
+    f.store.get('projects', serviceId).secret.env,
+    'PRIVATE_SERVICE_KEY=keep',
+  );
+  assert.equal(
+    f.store.get('settings', importedId).recordType,
+    'service_context',
+  );
+  assert.ok(!JSON.stringify(snapshot).includes('PRIVATE_SERVICE_KEY'));
+  const row = f.store.db
+    .prepare('SELECT data,secret FROM settings WHERE id=?')
+    .get(chatId);
+  assert.ok(!row.data.includes('Private conversation'));
+  assert.ok(!row.secret.includes('Private existing'));
+});
+
+test('OpenCode standalone sessions receive a real absolute cwd without requiring a project', async (t) => {
+  const home =
+    process.platform === 'win32' ? 'D:\\Users\\owner' : '/home/owner';
+  const f = await fixture(t, { resolveHome: async () => home });
+  const s = await (
+    await f.request('/sessions', 'POST', {
+      machineId: f.machineId,
+      provider: 'opencode',
+    })
+  ).json();
+  assert.equal(s.projectId, null);
+  assert.equal(s.cwd, home);
+  await f.request(`/sessions/${s.id}/message`, 'POST', {
+    message: 'Hello without project',
+  });
+  const read = async () => await (await f.request(`/sessions/${s.id}`)).json();
+  await waitFor(read, (s) => s.status === 'approval');
+  assert.equal(
+    f.calls.find((c) => c.method === 'session/new').params.cwd,
+    home,
+  );
+  await f.request(`/sessions/${s.id}/stop`, 'POST', {});
+});
+
+test('a manually named empty chat keeps its name after the first prompt', async (t) => {
+  const f = await fixture(t, {
+    resolveHome: async () =>
+      process.platform === 'win32' ? 'D:\\Users\\owner' : '/home/owner',
+  });
+  const s = await (
+    await f.request('/sessions', 'POST', {
+      machineId: f.machineId,
+      provider: 'codex',
+    })
+  ).json();
+  await f.request(`/sessions/${s.id}`, 'PATCH', { title: 'Название вручную' });
+  await f.request(`/sessions/${s.id}/message`, 'POST', {
+    message: 'Первое сообщение',
+  });
+  const read = async () => await (await f.request(`/sessions/${s.id}`)).json();
+  const current = await waitFor(read, (s) => s.status === 'approval');
+  assert.equal(current.title, 'Название вручную');
+  await f.request(`/sessions/${s.id}/stop`, 'POST', {});
 });
 
 test('process launch rejects unsupported providers, arbitrary operations and traversal on both platforms', () => {

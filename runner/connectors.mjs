@@ -3,6 +3,7 @@ import { EventEmitter } from 'node:events';
 import { PassThrough } from 'node:stream';
 import { WebSocketServer, WebSocket } from 'ws';
 import { assert, equal } from './security.mjs';
+import { projectPath } from './machine-process.mjs';
 
 export function attachConnectors(server, store) {
   const peers = new Map(),
@@ -114,6 +115,13 @@ export function attachConnectors(server, store) {
                 : null,
             checkedAt: new Date().toISOString(),
           });
+          if (typeof m.homePath === 'string') {
+            try {
+              s.homePath = projectPath(m.homePath, s.platform);
+            } catch {
+              /* Ignore invalid connector metadata. */
+            }
+          }
           s.history = [
             ...(s.history || []),
             {

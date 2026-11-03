@@ -233,6 +233,7 @@ export function localMetrics() {
   return {
     status: 'online',
     platform: os.platform(),
+    homePath: os.homedir(),
     cpu,
     memory: Math.round(100 * (1 - os.freemem() / total)),
     disk,

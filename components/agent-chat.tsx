@@ -44,20 +44,26 @@ export function NewSession({
   onCreated: (s: AgentSession) => void;
   onClose: () => void;
 }) {
-  const [projectId, setProjectId] = useState(
-    initialProject || projects[0]?.id || '',
+  const [projectId, setProjectId] = useState(initialProject || '');
+  const [machineId, setMachineId] = useState(
+    projects.find((p) => p.id === initialProject)?.machineId ||
+      machines.find((m) => ['online', 'needs_setup'].includes(m.status))?.id ||
+      machines[0]?.id ||
+      '',
   );
   const [provider, setProvider] = useState<AgentProvider>('codex');
   const [model, setModel] = useState(''),
-    [mode, setMode] = useState('workspace-write');
+    [mode, setMode] = useState(
+      initialProject ? 'workspace-write' : 'read-only',
+    );
   const [models, setModels] = useState<{ id: string; name: string }[]>([]),
     [loadingModels, setLoadingModels] = useState(false);
   const [busy, setBusy] = useState(false),
     [error, setError] = useState('');
   return (
     <Modal
-      title="Новый диалог"
-      description="Выберите проект и агента. Диалог будет выполняться на машине проекта."
+      title="Новый чат"
+      description="Начните чат в рабочей папке проекта или без проекта на выбранной машине."
       onClose={onClose}
     >
       <form
@@ -68,7 +74,10 @@ export function NewSession({
           setError('');
           try {
             const s = await hub.mutate<AgentSession>('/sessions', {
-              projectId,
+              projectId: projectId || null,
+              machineId: projectId
+                ? projects.find((p) => p.id === projectId)?.machineId
+                : machineId,
               provider,
               model,
               mode: provider === 'opencode' ? 'workspace-write' : mode,
@@ -83,10 +92,16 @@ export function NewSession({
       >
         <Field label="Проект">
           <select
-            required
+            aria-label="Проект"
             value={projectId}
-            onChange={(e) => setProjectId(e.target.value)}
+            onChange={(e) => {
+              setProjectId(e.target.value);
+              setModels([]);
+              setModel('');
+              setMode(e.target.value ? 'workspace-write' : 'read-only');
+            }}
           >
+            <option value="">Без проекта</option>
             {projects.map((p) => (
               <option key={p.id} value={p.id}>
                 {p.name} ·{' '}
@@ -95,6 +110,32 @@ export function NewSession({
             ))}
           </select>
         </Field>
+        {!projectId && (
+          <Field
+            label="Машина"
+            hint="Чат начнётся в домашнем каталоге пользователя агента. Проект можно выбрать позже."
+          >
+            <select
+              aria-label="Машина"
+              required
+              value={machineId}
+              onChange={(e) => {
+                setMachineId(e.target.value);
+                setModels([]);
+                setModel('');
+              }}
+            >
+              <option value="" disabled>
+                Выберите машину
+              </option>
+              {machines.map((m) => (
+                <option key={m.id} value={m.id}>
+                  {m.name}
+                </option>
+              ))}
+            </select>
+          </Field>
+        )}
         <Field label="Агент">
           <div className="provider-options">
             {(['codex', 'opencode'] as const).map((p) => (
@@ -142,15 +183,17 @@ export function NewSession({
           <button
             type="button"
             className="text-button"
-            disabled={loadingModels || !projectId}
+            disabled={loadingModels || (!projectId && !machineId)}
             onClick={async () => {
               setLoadingModels(true);
               setError('');
               try {
-                const p = projects.find((p) => p.id === projectId);
-                if (p) {
+                const selectedMachine =
+                  projects.find((p) => p.id === projectId)?.machineId ||
+                  machineId;
+                if (selectedMachine) {
                   const result = await hub.api<AgentStatus>(
-                    `/hub/machines/${p.machineId}/agents/codex`,
+                    `/hub/machines/${selectedMachine}/agents/codex`,
                   );
                   if (!result.installed)
                     throw new Error(
@@ -174,10 +217,14 @@ export function NewSession({
           </button>
         )}
         {provider === 'codex' ? (
-          <Field label="Доступ к проекту">
-            <select value={mode} onChange={(e) => setMode(e.target.value)}>
+          <Field label="Доступ к рабочей папке">
+            <select
+              aria-label="Доступ к рабочей папке"
+              value={mode}
+              onChange={(e) => setMode(e.target.value)}
+            >
               <option value="workspace-write">
-                Изменения в проекте · дополнительные права по запросу
+                Изменения в рабочей папке · дополнительные права по запросу
               </option>
               <option value="read-only">
                 Только чтение · для анализа и ревью
@@ -195,7 +242,7 @@ export function NewSession({
           <button className="hub-button" type="button" onClick={onClose}>
             Отмена
           </button>
-          <Submit busy={busy}>Создать диалог</Submit>
+          <Submit busy={busy}>Создать чат</Submit>
         </div>
       </form>
     </Modal>
@@ -496,28 +543,47 @@ export function AgentChat({
             </h1>
             <p>
               {session
-                ? `${providerNames[session.provider]} работает в проекте ${project?.name || ''} на ${machine?.name || 'выбранной машине'}.`
+                ? `${providerNames[session.provider]} · ${project?.name || 'Без проекта'} · ${machine?.name || 'выбранная машина'}.`
                 : 'Ваши агенты, проекты и машины. Один спокойный интерфейс.'}
             </p>
             {session ? (
               <div className="prompt-suggestions">
-                {[
-                  {
-                    icon: Search,
-                    text: 'Разберись в архитектуре проекта',
-                    sub: 'Структура, стек и точки входа',
-                  },
-                  {
-                    icon: Bug,
-                    text: 'Найди причину ошибок',
-                    sub: 'Проверка и план исправления',
-                  },
-                  {
-                    icon: Sparkles,
-                    text: 'Предложи улучшения проекта',
-                    sub: 'Идеи с учётом текущего кода',
-                  },
-                ].map(({ icon: Icon, text, sub }) => (
+                {(session.projectId
+                  ? [
+                      {
+                        icon: Search,
+                        text: 'Разберись в архитектуре проекта',
+                        sub: 'Структура, стек и точки входа',
+                      },
+                      {
+                        icon: Bug,
+                        text: 'Найди причину ошибок',
+                        sub: 'Проверка и план исправления',
+                      },
+                      {
+                        icon: Sparkles,
+                        text: 'Предложи улучшения проекта',
+                        sub: 'Идеи с учётом текущего кода',
+                      },
+                    ]
+                  : [
+                      {
+                        icon: Sparkles,
+                        text: 'Что ты умеешь?',
+                        sub: 'Возможности агента и доступные инструменты',
+                      },
+                      {
+                        icon: Search,
+                        text: 'Помоги разобраться в задаче',
+                        sub: 'Обсудим идею и составим план',
+                      },
+                      {
+                        icon: Code2,
+                        text: 'Объясни технический вопрос',
+                        sub: 'Задайте вопрос без привязки к проекту',
+                      },
+                    ]
+                ).map(({ icon: Icon, text, sub }) => (
                   <button
                     key={text}
                     disabled={disabled}
@@ -708,7 +774,7 @@ export function AgentChat({
           <p className="composer-footnote">
             <span>
               <Folder size={12} />
-              {project?.path}
+              {session.cwd || project?.path || 'Без проекта'}
             </span>
             <span>Enter — отправить · Shift + Enter — новая строка</span>
           </p>

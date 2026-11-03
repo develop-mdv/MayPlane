@@ -10,6 +10,7 @@ import {
 import { attachConnectors } from './connectors.mjs';
 import { connect, metrics } from './ssh.mjs';
 import { assert, redact } from './security.mjs';
+import { machineHome, separateServices } from './workspace-model.mjs';
 
 const now = () => new Date().toISOString();
 const publicRecord = (record) => {
@@ -20,7 +21,7 @@ const publicRecord = (record) => {
 export function createHub(
   server,
   store,
-  { openProcess = machineProcess } = {},
+  { openProcess = machineProcess, resolveHome = machineHome } = {},
 ) {
   const connectors = attachConnectors(server, store);
   const runtimes = new Map(),
@@ -57,25 +58,19 @@ export function createHub(
     return record;
   };
   const machine = (id) => {
+    assert(typeof id === 'string' && id, 'Выберите машину', 404);
     const m = store.get('servers', id);
     assert(m, 'Машина не найдена', 404);
     return m;
   };
-  for (const legacy of store.list('projects')) {
-    if (records('workspace').some((p) => p.legacyProjectId === legacy.id))
-      continue;
-    save({
-      id: randomUUID(),
-      recordType: 'workspace',
-      legacyProjectId: legacy.id,
-      name: legacy.name,
-      machineId: legacy.serverId,
-      path: legacy.adoption?.directory || `/opt/ezdeploy/${legacy.id}/repo`,
-      repo: legacy.repo || '',
-      createdAt: legacy.updatedAt || now(),
-    });
-  }
-  const sessions = () => records('session');
+  separateServices(store);
+  const sessions = () =>
+    records('session').map((s) => ({
+      ...s,
+      cwd:
+        s.cwd ||
+        (s.projectId ? load(s.projectId, 'workspace').path : undefined),
+    }));
   // No turn is replayed after a runner restart. Native IDs remain resumable.
   for (const s of sessions())
     if (['running', 'connecting', 'approval'].includes(s.status)) {
@@ -243,10 +238,15 @@ export function createHub(
     const runtime = { key, sessionId: session?.id, provider, machineId: m.id };
     runtimes.set(key, runtime);
     runtime.ready = (async () => {
-      const project = session ? load(session.projectId, 'workspace') : null;
+      const cwd = session
+        ? session.cwd ||
+          (session.projectId
+            ? load(session.projectId, 'workspace').path
+            : await resolveHome(m))
+        : undefined;
       const opened = await openProcess(
         m,
-        { provider, operation: 'agent', cwd: project?.path },
+        { provider, operation: 'agent', cwd },
         connectors,
       );
       if (closed) {
@@ -277,7 +277,7 @@ export function createHub(
           runtime.rpc.notify('initialized');
           if (session) {
             const params = {
-              cwd: project.path,
+              cwd,
               approvalPolicy: 'on-request',
               sandbox:
                 session.mode === 'read-only' ? 'read-only' : 'workspace-write',
@@ -308,7 +308,7 @@ export function createHub(
             const loaded = await runtime.rpc.request(
               session.nativeId ? 'session/load' : 'session/new',
               {
-                cwd: project.path,
+                cwd,
                 mcpServers: [],
                 ...(session.nativeId ? { sessionId: session.nativeId } : {}),
               },
@@ -404,6 +404,15 @@ export function createHub(
   function snapshot() {
     return {
       projects: records('workspace'),
+      services: store.list('projects').map((s) => ({
+        id: s.id,
+        name: s.name,
+        machineId: s.serverId,
+        repo: s.repo,
+        kind: s.kind,
+        status: s.status,
+        domain: s.domain,
+      })),
       sessions: sessions().sort((a, b) =>
         b.updatedAt.localeCompare(a.updatedAt),
       ),
@@ -461,6 +470,7 @@ export function createHub(
             'checkedAt',
             'networkRx',
             'networkTx',
+            'homePath',
           ]
             .filter((k) => m[k] !== undefined)
             .map((k) => [k, m[k]]),
@@ -611,6 +621,19 @@ export function createHub(
       return true;
     }
     const projectMatch = path.match(/^\/api\/hub\/projects\/([a-f0-9-]+)$/);
+    if (projectMatch && method === 'PATCH') {
+      const p = load(projectMatch[1], 'workspace');
+      assert(
+        typeof body.name === 'string' &&
+          body.name.trim() &&
+          body.name.length <= 80,
+        'Название проекта: от 1 до 80 символов',
+      );
+      p.name = body.name.trim();
+      save(p);
+      send(p);
+      return true;
+    }
     if (projectMatch && method === 'DELETE') {
       assert(
         !sessions().some(
@@ -621,18 +644,27 @@ export function createHub(
         'Остановите активные диалоги',
         409,
       );
-      load(projectMatch[1], 'workspace');
-      assert(
-        !sessions().some((s) => s.projectId === projectMatch[1]),
-        'Сначала архивируйте или удалите диалоги проекта',
-        409,
-      );
+      const project = load(projectMatch[1], 'workspace');
+      // Removing a folder from the sidebar never deletes files or chat history.
+      for (const item of sessions().filter((s) => s.projectId === project.id)) {
+        runtimes.get(item.id)?.rpc?.close();
+        updateSession(item.id, (s) => {
+          s.projectId = null;
+          s.cwd = item.cwd || project.path;
+        });
+      }
       store.db.prepare('DELETE FROM settings WHERE id=?').run(projectMatch[1]);
       send({ ok: true });
       return true;
     }
     if (path === '/api/hub/sessions' && method === 'POST') {
-      const p = load(body.projectId, 'workspace');
+      const p = body.projectId ? load(body.projectId, 'workspace') : null;
+      const m = machine(p?.machineId || body.machineId);
+      if (p && body.machineId)
+        assert(
+          p.machineId === body.machineId,
+          'Проект находится на другой машине',
+        );
       assert(providers[body.provider], 'Выберите агента');
       assert(
         ['read-only', 'workspace-write'].includes(
@@ -647,12 +679,16 @@ export function createHub(
       const session = {
         id: randomUUID(),
         recordType: 'session',
-        projectId: p.id,
-        machineId: p.machineId,
+        projectId: p?.id || null,
+        machineId: m.id,
+        cwd:
+          p?.path || projectPath(await resolveHome(m), m.platform || 'linux'),
         provider: body.provider,
-        mode: body.mode || 'workspace-write',
+        mode:
+          body.mode ||
+          (!p && body.provider === 'codex' ? 'read-only' : 'workspace-write'),
         model: String(body.model || '').slice(0, 120),
-        title: 'Новый диалог',
+        title: 'Новый чат',
         status: 'idle',
         archived: false,
         createdAt: now(),
@@ -671,6 +707,9 @@ export function createHub(
       if (!sm[2] && method === 'GET') {
         send({
           ...publicRecord(s),
+          cwd:
+            s.cwd ||
+            (s.projectId ? load(s.projectId, 'workspace').path : undefined),
           messages: s.secret.messages,
           approvals: s.secret.approvals,
         });
@@ -689,7 +728,34 @@ export function createHub(
           'Сначала остановите диалог',
           409,
         );
-        if (body.title) s.title = body.title.trim();
+        if (body.title) {
+          s.title = body.title.trim();
+          s.customTitle = true;
+        }
+        if (Object.hasOwn(body, 'projectId')) {
+          const target = body.projectId
+            ? load(body.projectId, 'workspace')
+            : null;
+          assert(
+            !target || target.machineId === s.machineId,
+            'Диалог можно перенести только в проект на той же машине',
+            409,
+          );
+          const oldCwd =
+            s.cwd ||
+            (s.projectId
+              ? load(s.projectId, 'workspace').path
+              : await resolveHome(machine(s.machineId)));
+          s.projectId = target?.id || null;
+          s.cwd = target?.path || oldCwd;
+          if (s.cwd !== oldCwd && s.secret.messages.length)
+            s.secret.messages.push({
+              id: randomUUID(),
+              role: 'system',
+              content: `Рабочая папка диалога изменена: ${s.cwd}`,
+              createdAt: now(),
+            });
+        }
         if (typeof body.archived === 'boolean') s.archived = body.archived;
         runtimes.get(s.id)?.rpc?.close();
         save(s);
@@ -703,7 +769,12 @@ export function createHub(
             !sessions().some(
               (other) =>
                 other.id !== s.id &&
-                other.projectId === s.projectId &&
+                other.machineId === s.machineId &&
+                other.cwd ===
+                  (s.cwd ||
+                    (s.projectId
+                      ? load(s.projectId, 'workspace').path
+                      : undefined)) &&
                 other.mode !== 'read-only' &&
                 ['running', 'connecting', 'approval'].includes(other.status),
             ),
@@ -722,7 +793,7 @@ export function createHub(
           'Сообщение: от 1 до 32000 символов',
         );
         s.status = 'connecting';
-        if (!s.secret.messages.length)
+        if (!s.customTitle && !s.secret.messages.some((m) => m.role === 'user'))
           s.title = body.message.trim().slice(0, 70);
         save(s);
         addMessage(s.id, 'user', body.message.trim());

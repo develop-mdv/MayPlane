@@ -11,6 +11,7 @@ export type Status =
 export type Server = {
   transport?: 'ssh' | 'local' | 'connector';
   platform?: string;
+  homePath?: string;
   consoleUrl?: string;
   ipv4?: string;
   ipv6?: string;
