@@ -1,6 +1,7 @@
 'use client';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { Snapshot, Job } from './domain';
+import { panelCsrf, notifySignedOut } from './panel-session';
 export type Connection = { url: string; token: string };
 const empty: Snapshot = {
   servers: [],
@@ -16,13 +17,24 @@ async function apiRequest<T>(
 ): Promise<T> {
   if (!custom)
     throw new Error(
-      'Серверная часть не подключена. Запустите npm run runner и подключитесь в настройках.',
+      'Нет соединения с панелью. Проверьте её запуск и обновите страницу.',
+    );
+  if (
+    custom.url &&
+    new URL(custom.url, window.location.origin).origin !==
+      window.location.origin
+  )
+    throw new Error(
+      'Откройте нужную панель по её адресу и войдите там. Доступ между разными панелями не передаётся.',
     );
   const response = await fetch(custom.url + '/api' + path, {
     method,
+    credentials: 'same-origin',
     headers: {
-      ...(custom.token ? { Authorization: `Bearer ${custom.token}` } : {}),
       ...(body !== undefined ? { 'Content-Type': 'application/json' } : {}),
+      ...(!['GET', 'HEAD'].includes(method)
+        ? { 'X-MayPlane-CSRF': panelCsrf() }
+        : {}),
     },
     ...(method !== 'GET' && body !== undefined
       ? { body: JSON.stringify(body) }
@@ -34,6 +46,7 @@ async function apiRequest<T>(
     .catch(() => ({ error: 'Адрес не является API mayplane' }))) as T & {
     error?: string;
   };
+  if (response.status === 401) notifySignedOut();
   if (!response.ok)
     throw new Error(result.error || `Ошибка ${response.status}`);
   if (path === '/state') {
@@ -74,7 +87,7 @@ export function useWorkspace() {
       .catch(() => {
         if (active && generation.current === expected)
           setError(
-            'Не удалось подключиться к серверной части. Запустите npm run runner или укажите её адрес в настройках.',
+            'Не удалось подключиться к серверной части. Проверьте запуск MayPlane и обновите страницу.',
           );
       })
       .finally(() => {
@@ -83,7 +96,7 @@ export function useWorkspace() {
     return () => {
       active = false;
     };
-    // Initial same-origin connection uses the local development proxy; secrets stay server-side.
+    // Workspace mounts only after owner login; requests use its same-origin cookie.
   }, []);
   useEffect(() => {
     if (!connection) return;

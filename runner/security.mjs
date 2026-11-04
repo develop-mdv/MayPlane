@@ -13,6 +13,19 @@ export const q = (value) => "'" + String(value).replaceAll("'", "'\\''") + "'";
 export function assert(condition, message, status = 400) {
   if (!condition) throw Object.assign(new Error(message), { status });
 }
+export function requestPath(target) {
+  if (
+    typeof target !== 'string' ||
+    !target.startsWith('/') ||
+    target.startsWith('//')
+  )
+    return null;
+  try {
+    return new URL(target, 'http://localhost').pathname;
+  } catch {
+    return null;
+  }
+}
 export function equal(a, b) {
   const x = createHash('sha256').update(String(a)).digest();
   const y = createHash('sha256').update(String(b)).digest();

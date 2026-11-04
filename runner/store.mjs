@@ -23,6 +23,28 @@ export function openStore(directory, key) {
  CREATE INDEX IF NOT EXISTS idx_jobs_created ON jobs(created_at);
  CREATE TABLE IF NOT EXISTS deliveries (id TEXT PRIMARY KEY, created_at TEXT NOT NULL);
  PRAGMA optimize;`);
+  // Fail before any credential changes if an existing encrypted store has the wrong key.
+  try {
+    for (const table of [
+      'servers',
+      'settings',
+      'git_connections',
+      'projects',
+    ]) {
+      const row = db
+        .prepare(`SELECT secret FROM ${table} WHERE secret != '' LIMIT 1`)
+        .get();
+      if (row) {
+        JSON.parse(unseal(row.secret, key));
+        break;
+      }
+    }
+  } catch {
+    db.close();
+    throw new Error(
+      'Ключ шифрования не подходит к существующей базе или её секреты повреждены. Восстановите прежний ключ и резервную копию; данные не перезаписаны.',
+    );
+  }
   // Names are display labels. Every deployment is addressed by its immutable ID.
   const hasUniqueName = () =>
     db

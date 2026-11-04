@@ -1,7 +1,7 @@
 import { randomBytes } from 'node:crypto';
 import { WebSocketServer, WebSocket } from 'ws';
 import { connect } from './ssh.mjs';
-import { assert } from './security.mjs';
+import { assert, requestPath } from './security.mjs';
 
 export function attachTerminals(
   server,
@@ -13,6 +13,8 @@ export function attachTerminals(
     ticketTtl = 30000,
     idleMs = 30 * 60 * 1000,
     maxSessions = 8,
+    authorizeOwner,
+    ownerActive,
   },
 ) {
   const tickets = new Map();
@@ -26,8 +28,12 @@ export function attachTerminals(
   const prune = () => {
     for (const [key, value] of tickets)
       if (value.expiresAt <= now()) tickets.delete(key);
+    if (ownerActive)
+      for (const session of sessions)
+        if (!ownerActive(session.ownerId))
+          session.close('Сессия MayPlane завершена.');
   };
-  function issue(serverId, origin) {
+  function issue(serverId, origin, owner = null) {
     prune();
     assert(
       origin && origins.includes(origin),
@@ -41,11 +47,19 @@ export function attachTerminals(
       429,
     );
     const ticket = randomBytes(32).toString('base64url');
-    tickets.set(ticket, { serverId, origin, expiresAt: now() + ticketTtl });
+    assert(!authorizeOwner || owner?.id, 'Войдите в MayPlane', 401);
+    tickets.set(ticket, {
+      serverId,
+      origin,
+      ownerId: owner?.id,
+      ownerExpires: owner?.expiresAt,
+      expiresAt: now() + ticketTtl,
+    });
     return { ticket, expiresIn: ticketTtl / 1000 };
   }
   const upgrade = (req, socket, head) => {
-    const path = new URL(req.url, 'http://localhost').pathname;
+    const path = requestPath(req.url);
+    if (!path) return;
     const match = path.match(/^\/api\/servers\/([a-f0-9-]+)\/terminal$/);
     const reject = (status) => {
       socket.end(
@@ -53,6 +67,14 @@ export function attachTerminals(
       );
     };
     if (!match) return;
+    let owner;
+    if (authorizeOwner) {
+      try {
+        owner = authorizeOwner(req);
+      } catch {
+        return reject('401 Unauthorized');
+      }
+    }
     const protocols = String(req.headers['sec-websocket-protocol'] || '')
       .split(',')
       .map((v) => v.trim());
@@ -63,6 +85,7 @@ export function attachTerminals(
     const entry = tickets.get(credential);
     if (
       !entry ||
+      (authorizeOwner && entry.ownerId !== owner?.id) ||
       entry.expiresAt <= now() ||
       entry.serverId !== match[1] ||
       entry.origin !== req.headers.origin ||
@@ -73,9 +96,9 @@ export function attachTerminals(
     const target = store.get('servers', entry.serverId);
     if (!target) return reject('404 Not Found');
     tickets.delete(credential);
-    wss.handleUpgrade(req, socket, head, (ws) => start(ws, target));
+    wss.handleUpgrade(req, socket, head, (ws) => start(ws, target, entry));
   };
-  function start(ws, target) {
+  function start(ws, target, ticket) {
     let client,
       channel,
       ended = false,
@@ -84,9 +107,17 @@ export function attachTerminals(
       ptyStarted = false;
     const session = {
       serverId: target.id,
+      ownerId: ticket.ownerId,
       close: (reason = 'Исполнитель остановлен') => close(1001, reason),
     };
     sessions.add(session);
+    const ownerTimer = ticket.ownerExpires
+      ? setTimeout(
+          () => session.close('Сессия MayPlane истекла. Войдите снова.'),
+          Math.max(0, ticket.ownerExpires - now()),
+        )
+      : null;
+    ws.once('close', () => clearTimeout(ownerTimer));
     const control = (type, extra = {}) => {
       if (ws.readyState === WebSocket.OPEN)
         ws.send(JSON.stringify({ type, ...extra }));
@@ -249,5 +280,16 @@ export function attachTerminals(
       if (session.serverId === serverId)
         session.close('Настройки SSH изменились. Подключитесь снова.');
   }
-  return { issue, close, invalidate };
+  return {
+    issue,
+    close,
+    invalidate,
+    revokeOwner(id) {
+      for (const [key, ticket] of tickets)
+        if (!id || ticket.ownerId === id) tickets.delete(key);
+      for (const session of sessions)
+        if (!id || session.ownerId === id)
+          session.close('Вход в MayPlane завершён.');
+    },
+  };
 }

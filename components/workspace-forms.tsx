@@ -1,4 +1,5 @@
 'use client';
+import { OwnerSettings } from './panel-auth';
 import { useState } from 'react';
 import { ArrowUpRight, Check, Plus, ShieldCheck } from 'lucide-react';
 import type { Server as Machine } from '@/lib/domain';
@@ -130,12 +131,7 @@ export function NewProject({
     </Modal>
   );
 }
-export function SettingsPanel({ ws, hub }: { ws: Workspace; hub: Hub }) {
-  const [url, setUrl] = useState(ws.connection?.url || ''),
-    [token, setToken] = useState(''),
-    [error, setError] = useState(''),
-    [busy, setBusy] = useState(false);
-  return (
+export function SettingsPanel({ ws, hub }: { ws: Workspace; hub: Hub }) {  return (
     <div className="hub-page settings-page">
       <div className="page-heading">
         <div>
@@ -144,77 +140,8 @@ export function SettingsPanel({ ws, hub }: { ws: Workspace; hub: Hub }) {
           <p>Подключение панели и границы доступа.</p>
         </div>
       </div>
+      <OwnerSettings />
       <AccountsSettings hub={hub} ws={ws} />
-      <section className="detail-card">
-        <div className="section-title">
-          <h2>Серверная часть</h2>
-          <span
-            className={`state-badge ${ws.connection && !ws.error ? 'online' : ''}`}
-          >
-            <i />
-            {ws.connection && !ws.error ? 'Подключена' : 'Нет соединения'}
-          </span>
-        </div>
-        <p className="muted">
-          Runner хранит проекты и зашифрованные секреты, соединяет панель с
-          вашими машинами.
-        </p>
-        <form
-          className="hub-form"
-          onSubmit={async (e) => {
-            e.preventDefault();
-            setBusy(true);
-            setError('');
-            try {
-              await ws.connect(url, token);
-              setToken('');
-            } catch (e) {
-              setError((e as Error).message);
-            } finally {
-              setBusy(false);
-            }
-          }}
-        >
-          <Field
-            label="Адрес API"
-            hint="Пустое поле — локальный прокси панели. Для удалённого API нужен HTTPS."
-          >
-            <input
-              value={url}
-              onChange={(e) => setUrl(e.target.value)}
-              placeholder="Локальное подключение / https://control.example.com"
-            />
-          </Field>
-          <Field
-            label="Ключ доступа"
-            hint="Хранится в памяти этой вкладки. Не записывается в localStorage."
-          >
-            <input
-              type="password"
-              value={token}
-              onChange={(e) => setToken(e.target.value)}
-              autoComplete="off"
-              placeholder="MAYPLANE_TOKEN — для прямого подключения"
-            />
-          </Field>
-          <ErrorText error={error} />
-          <div className="form-actions">
-            {ws.connection && (
-              <button
-                type="button"
-                className="hub-button"
-                onClick={() => {
-                  ws.disconnect();
-                  setToken('');
-                }}
-              >
-                Отключить
-              </button>
-            )}
-            <Submit busy={busy}>Подключить</Submit>
-          </div>
-        </form>
-      </section>
       <section className="detail-card">
         <div className="section-title">
           <h2>Безопасность</h2>
@@ -257,8 +184,8 @@ export function SettingsPanel({ ws, hub }: { ws: Workspace; hub: Hub }) {
           <div>
             <strong>Личная панель</strong>
             <p>
-              Текущая версия рассчитана на одного владельца. Для доступа через
-              интернет используйте HTTPS и аутентификацию reverse proxy или VPN.
+              Панель рассчитана на одного владельца. Для доступа через
+              интернет установщик настраивает HTTPS и автоматическое продление сертификатов. Вход защищён логином и паролем.
               Локальный dev-сервер доступен на 127.0.0.1.
             </p>
           </div>

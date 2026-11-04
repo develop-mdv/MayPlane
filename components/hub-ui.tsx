@@ -107,13 +107,15 @@ export function ErrorText({ error }: { error: string }) {
 }
 export function Submit({
   busy,
+  disabled = false,
   children,
 }: {
   busy: boolean;
+  disabled?: boolean;
   children: ReactNode;
 }) {
   return (
-    <button type="submit" className="hub-button primary" disabled={busy}>
+    <button type="submit" className="hub-button primary" disabled={busy || disabled}>
       {busy && <LoaderCircle size={15} className="spin" />}
       {children}
     </button>

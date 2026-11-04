@@ -18,6 +18,7 @@ import {
   projectMetadata,
   serverInput,
   redact,
+  requestPath,
 } from './security.mjs';
 import { connect, fingerprint, run, compose } from './ssh.mjs';
 import { createEngine } from './engine.mjs';
@@ -36,6 +37,9 @@ import {
 } from './llm.mjs';
 import { domainName } from './managed-deploy.mjs';
 import { createHub } from './hub.mjs';
+import { createOwnerAuth } from './owner-auth.mjs';
+import { proxyFrontend, browserSecurityHeaders } from './web-proxy.mjs';
+import { runtimeConfig } from './config.mjs';
 
 export function createApp({
   store,
@@ -48,9 +52,52 @@ export function createApp({
   llmChat = chatJson,
   hubOptions = {},
   legacyApi = false,
+  ownerAuth = false,
+  trustProxy = false,
+  managedTls = false,
+  frontendUrl = '',
 }) {
+  assert(
+    ownerAuth || (typeof token === 'string' && token.length > 0),
+    'Требуется настроенная авторизация владельца',
+  );
+  const auth = ownerAuth
+    ? createOwnerAuth(store.db, {
+        origins,
+        publicUrl,
+        trustProxy,
+        managedTls,
+        onRevoke: (id) => terminals.revokeOwner(id),
+        onRevokeAll: () => {
+          terminals.revokeOwner();
+          hub.connectors.cancelPairings();
+        },
+      })
+    : null;
   const failures = new Map();
   const server = createServer(async (req, res) => {
+    browserSecurityHeaders(res, { publicUrl, development: !frontendUrl });
+    let path;
+    try {
+      assert(
+        req.url?.startsWith('/') && !req.url.startsWith('//'),
+        'Некорректный адрес',
+        400,
+      );
+      path = new URL(req.url, 'http://localhost').pathname;
+    } catch {
+      res.writeHead(400);
+      return res.end('Некорректный адрес');
+    }
+    if (path === '/healthz' && req.method === 'GET') {
+      res.writeHead(auth && !auth.configured() ? 503 : 200, {
+        'Content-Type': 'application/json',
+        'Cache-Control': 'no-store',
+      });
+      return res.end(JSON.stringify({ ok: !auth || auth.configured() }));
+    }
+    if (!path.startsWith('/api/') && frontendUrl)
+      return proxyFrontend(req, res, frontendUrl);
     res.setHeader('Content-Type', 'application/json; charset=utf-8');
     res.setHeader('Cache-Control', 'no-store');
     res.setHeader('X-Content-Type-Options', 'nosniff');
@@ -68,7 +115,7 @@ export function createApp({
       res.setHeader('Vary', 'Origin');
       res.setHeader(
         'Access-Control-Allow-Headers',
-        'Authorization, Content-Type',
+        'Authorization, Content-Type, X-MayPlane-CSRF',
       );
       res.setHeader(
         'Access-Control-Allow-Methods',
@@ -84,9 +131,11 @@ export function createApp({
       res.end(JSON.stringify(obj));
     };
     try {
-      const path = new URL(req.url, 'http://localhost').pathname;
       const webhook = path.match(/^\/api\/webhooks\/github\/([a-f0-9-]+)$/);
-      if (!webhook) {
+      let ownerSession;
+      const authRoute = auth && path.startsWith('/api/auth/');
+      if (!webhook && !authRoute && auth) ownerSession = auth.requireOwner(req);
+      if (!webhook && !authRoute && !auth) {
         const ip = req.socket.remoteAddress;
         const failure = failures.get(ip);
         if (failure && failure.until < Date.now()) failures.delete(ip);
@@ -108,7 +157,7 @@ export function createApp({
       let raw = Buffer.alloc(0);
       for await (const chunk of req) {
         assert(
-          raw.length + chunk.length <= 131072,
+          raw.length + chunk.length <= (authRoute ? 8192 : 131072),
           'Слишком большой запрос',
           413,
         );
@@ -122,6 +171,7 @@ export function createApp({
           throw Object.assign(new Error('Некорректный JSON'), { status: 400 });
         }
       }
+      if (authRoute && (await auth.handle(path, req, res, body, send))) return;
       if (
         path.startsWith('/api/hub') &&
         (await hub.handle(path, req.method, body, send))
@@ -339,7 +389,10 @@ export function createApp({
         /^\/api\/servers\/([a-f0-9-]+)\/terminal-ticket$/,
       );
       if (req.method === 'POST' && terminalRequest)
-        return send(terminals.issue(terminalRequest[1], origin), 201);
+        return send(
+          terminals.issue(terminalRequest[1], origin, ownerSession),
+          201,
+        );
       const sm = path.match(
         /^\/api\/servers\/([a-f0-9-]+)\/(refresh|provision)$/,
       );
@@ -753,48 +806,47 @@ export function createApp({
     ...terminalOptions,
     store,
     origins,
+    authorizeOwner: auth ? (req) => auth.requireOwner(req, false) : undefined,
+    ownerActive: auth ? (id) => auth.active(id) : undefined,
   });
   const editServer = createServerEditor(store, engine, terminals);
   const hub = createHub(server, store, { publicUrl, ...hubOptions });
   server.once('close', () => hub.close());
   server.requestTimeout = 30000;
   server.headersTimeout = 10000;
-  return { server, engine, terminals, hub };
+  server.on('upgrade', (req, socket) => {
+    const path = requestPath(req.url) || '';
+    if (
+      path !== '/api/connector' &&
+      !/^\/api\/servers\/[a-f0-9-]+\/terminal$/.test(path)
+    )
+      socket.end('HTTP/1.1 404 Not Found\r\nConnection: close\r\n\r\n');
+  });
+  return { server, engine, terminals, hub, auth };
 }
 if (
   process.argv[1] &&
   resolve(process.argv[1]) === fileURLToPath(import.meta.url)
 ) {
-  try {
-    process.loadEnvFile('.env.runner');
-  } catch {}
-  const token = process.env.MAYPLANE_TOKEN;
-  const key = process.env.MAYPLANE_ENCRYPTION_KEY;
-  assert(token?.length >= 32, 'Выполните npm run runner:setup');
-  assert(
-    /^[a-f0-9]{64}$/i.test(key || ''),
-    'Задайте MAYPLANE_ENCRYPTION_KEY: 32 байта в hex',
-  );
-  const store = openStore(
-    process.env.MAYPLANE_DATA_DIR || '.runner-data',
-    Buffer.from(key, 'hex'),
-  );
+  const config = runtimeConfig();
+  const store = openStore(config.dataDir, config.key);
   const { server, engine, terminals, hub } = createApp({
     store,
-    token,
-    origins: (process.env.ALLOWED_ORIGINS || 'http://localhost:3000')
-      .split(',')
-      .map((s) => s.trim()),
-    publicUrl: process.env.MAYPLANE_PUBLIC_URL || '',
-    legacyApi: process.env.MAYPLANE_LEGACY_API === 'true',
+    ownerAuth: true,
+    origins: config.origins,
+    publicUrl: config.publicUrl,
+    trustProxy: config.trustProxy,
+    managedTls: process.env.MAYPLANE_TLS_MANAGED === 'true',
+    legacyApi: config.legacyApi,
   });
-  server.listen(
-    Number(process.env.PORT || 8788),
-    process.env.HOST || '127.0.0.1',
-    () =>
-      console.log(
-        `MayPlane runner: ${process.env.HOST || '127.0.0.1'}:${process.env.PORT || 8788}`,
-      ),
+  assert(
+    store.db.prepare('SELECT id FROM owner_credentials WHERE id=1').get(),
+    'Сначала выполните npm run runner:setup для создания логина владельца.',
+  );
+  server.listen(config.port, config.host, () =>
+    console.log(
+      `MayPlane runner: ${process.env.HOST || '127.0.0.1'}:${process.env.PORT || 8788}`,
+    ),
   );
   async function shutdown() {
     hub.close();

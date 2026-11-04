@@ -3,7 +3,7 @@ import { resourceMetrics, metricSample } from '../lib/machine-metrics.mjs';
 import { EventEmitter } from 'node:events';
 import { PassThrough } from 'node:stream';
 import { WebSocketServer, WebSocket } from 'ws';
-import { assert, equal } from './security.mjs';
+import { assert, equal, requestPath } from './security.mjs';
 import { projectPath } from './machine-process.mjs';
 
 export function attachConnectors(server, store) {
@@ -20,8 +20,7 @@ export function attachConnectors(server, store) {
     if (socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify(data));
   };
   const upgrade = (req, socket, head) => {
-    if (new URL(req.url, 'http://localhost').pathname !== '/api/connector')
-      return;
+    if (requestPath(req.url) !== '/api/connector') return;
     const key = String(req.headers.authorization || '').replace(/^Bearer /, '');
     const pair = pairing.get(key);
     const machine =
@@ -227,6 +226,11 @@ export function attachConnectors(server, store) {
       };
     },
     connected: (id) => peers.has(id),
+    cancelPairings() {
+      pairing.clear();
+      for (const ticket of tickets.values())
+        if (ticket.status === 'pending') ticket.status = 'cancelled';
+    },
     revoke(id) {
       peers.get(id)?.ws.close(1000, 'Доступ отозван');
     },
