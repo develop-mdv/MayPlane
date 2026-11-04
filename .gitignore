@@ -51,5 +51,5 @@ __pycache__/
 *.pyc
 
 # Outbound computer connector credentials
-.ezdeploy-connector/
+.mayplane-connector/
 connection.json

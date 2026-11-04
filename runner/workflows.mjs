@@ -103,21 +103,21 @@ export function workflowEnvironment(p, server) {
   const variables = p
     ? {
         ...(p.adoption ? {} : Object.fromEntries(envEntries(deploymentEnv(p)))),
-        EZDEPLOY_PROJECT_ID: p.id,
-        EZDEPLOY_PROJECT_NAME: p.name,
-        EZDEPLOY_PROJECT_DIR: p.adoption?.directory || ssh.rootOf(p),
-        EZDEPLOY_REPO_DIR:
+        MAYPLANE_PROJECT_ID: p.id,
+        MAYPLANE_PROJECT_NAME: p.name,
+        MAYPLANE_PROJECT_DIR: p.adoption?.directory || ssh.rootOf(p),
+        MAYPLANE_REPO_DIR:
           p.adoption?.git?.root ||
           p.adoption?.directory ||
           ssh.rootOf(p) + '/repo',
-        EZDEPLOY_DATA_DIR: ssh.rootOf(p) + '/data',
-        EZDEPLOY_ENV_FILE: p.adoption
+        MAYPLANE_DATA_DIR: ssh.rootOf(p) + '/data',
+        MAYPLANE_ENV_FILE: p.adoption
           ? p.adoption.envFile || ''
           : ssh.rootOf(p) + '/.env',
-        EZDEPLOY_DOMAIN: p.domain || '',
-        EZDEPLOY_SERVER_HOST: server.host,
+        MAYPLANE_DOMAIN: p.domain || '',
+        MAYPLANE_SERVER_HOST: server.host,
       }
-    : { EZDEPLOY_SERVER_HOST: server.host };
+    : { MAYPLANE_SERVER_HOST: server.host };
   return Object.entries(variables)
     .map(([key, value]) => 'export ' + key + '=' + q(value))
     .join('\n');
@@ -139,11 +139,11 @@ export function createWorkflowRunner(store, overrides = {}) {
       ? 'Authorization: Basic ' +
         Buffer.from('x-access-token:' + git.secret.token).toString('base64')
       : '';
-    const authPath = '/opt/ezdeploy/.auth/' + randomUUID();
+    const authPath = '/opt/mayplane/.auth/' + randomUUID();
     await run(
       client,
       `command -v git >/dev/null || { echo 'Сначала установите Git на сервер'; exit 1; }
-install -d -m 700 ${q(root)} ${q(root + '/data')} /opt/ezdeploy/.auth
+install -d -m 700 ${q(root)} ${q(root + '/data')} /opt/mayplane/.auth
 actual=$(realpath ${q(root)}); test "$actual" = ${q(root)} || { echo 'Каталог проекта является ссылкой'; exit 1; }`,
       { log },
     );

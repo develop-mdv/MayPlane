@@ -665,15 +665,15 @@ export function PairComputer({
                   </p>
                   <div className="copy-code">
                     <code>
-                      git clone https://github.com/develop-mdv/ezdeploy.git
+                      git clone https://github.com/develop-mdv/MayPlane.git
                       <br />
-                      cd ezdeploy
+                      cd MayPlane
                       <br />
                       npm ci
                     </code>
                     <CopyButton
                       value={
-                        'git clone https://github.com/develop-mdv/ezdeploy.git\ncd ezdeploy\nnpm ci'
+                        'git clone https://github.com/develop-mdv/MayPlane.git\ncd MayPlane\nnpm ci'
                       }
                     />
                   </div>
@@ -1379,7 +1379,7 @@ export function MachinesPanel({
             <section className="detail-card">
               <h2>Постоянное подключение</h2>
               <p className="hub-note">
-                В каталоге ezdeploy на этой машине остановите ручной коннектор
+                В каталоге MayPlane на этой машине остановите ручной коннектор
                 (Ctrl+C) и включите автозапуск для своего пользователя. Машина
                 должна оставаться включённой.
               </p>

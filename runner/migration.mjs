@@ -117,7 +117,7 @@ export function createMigration(store, overrides = {}) {
   const remote =
     overrides.migrationRemote ||
     (async (client, action, data) => {
-      const delimiter = 'EZ_MIGRATION_' + randomUUID().replaceAll('-', '');
+      const delimiter = 'MAYPLANE_MIGRATION_' + randomUUID().replaceAll('-', '');
       let output;
       try {
         output = await run(
@@ -158,7 +158,7 @@ export function createMigration(store, overrides = {}) {
             ? 'systemd'
             : 'auto',
       directory,
-      composeProject: a?.runtime === 'compose' ? a.name : 'ez_' + p.id,
+      composeProject: a?.runtime === 'compose' ? a.name : 'mayplane_' + p.id,
       resources: docker ? a.resources : options.resources || [],
       units: [
         ...new Set([
@@ -605,7 +605,7 @@ export function createMigration(store, overrides = {}) {
             ? 'compose'
             : 'docker'
           : 'systemd',
-      name: sourceAdoption?.name || unit || 'ez_' + p.id,
+      name: sourceAdoption?.name || unit || 'mayplane_' + p.id,
       directory,
       resources: [...result.resources],
       status: 'running',
@@ -627,7 +627,7 @@ export function createMigration(store, overrides = {}) {
     };
     if (record.inventory.runtime === 'docker') {
       migratedAdoption.images = record.inventory.containers.map(
-        (_, i) => 'ezdeploy-migration-' + record.jobId + ':c' + i,
+        (_, i) => 'mayplane-migration-' + record.jobId + ':c' + i,
       );
       migratedAdoption.ports = [
         ...new Set(
@@ -808,7 +808,7 @@ export function createMigration(store, overrides = {}) {
         needsRecovery: false,
         targetMayHaveWritten: false,
         sourceMayHaveStopped: false,
-        backupPath: '/opt/ezdeploy-migrations/' + job.id,
+        backupPath: '/opt/mayplane-migrations/' + job.id,
       };
       const fresh = store.get('projects', p.id);
       fresh.secret.migrationRecord = record;
@@ -817,7 +817,7 @@ export function createMigration(store, overrides = {}) {
         transition(p, migration, 'preparing_target');
         const archiveId = randomUUID();
         log(
-          'Сохраняем конфликтующую копию в /opt/ezdeploy-migrations/' +
+          'Сохраняем конфликтующую копию в /opt/mayplane-migrations/' +
             archiveId +
             '. Источник продолжает работать.',
         );
@@ -826,7 +826,7 @@ export function createMigration(store, overrides = {}) {
           ...(current.migrationArchives || []),
           {
             serverId: job.target,
-            path: '/opt/ezdeploy-migrations/' + archiveId,
+            path: '/opt/mayplane-migrations/' + archiveId,
             createdAt: new Date().toISOString(),
             jobId: job.id,
             status: 'creating',

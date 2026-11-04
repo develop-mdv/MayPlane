@@ -194,7 +194,7 @@ export function SettingsPanel({ ws, hub }: { ws: Workspace; hub: Hub }) {
               value={token}
               onChange={(e) => setToken(e.target.value)}
               autoComplete="off"
-              placeholder="EZDEPLOY_TOKEN — для прямого подключения"
+              placeholder="MAYPLANE_TOKEN — для прямого подключения"
             />
           </Field>
           <ErrorText error={error} />
@@ -266,10 +266,10 @@ export function SettingsPanel({ ws, hub }: { ws: Workspace; hub: Hub }) {
       </section>
       <div className="settings-footer">
         <span>
-          ezdeploy <code>0.2.0</code>
+          MayPlane <code>0.2.0</code>
         </span>
         <a
-          href="https://github.com/develop-mdv/ezdeploy"
+          href="https://github.com/develop-mdv/MayPlane"
           target="_blank"
           rel="noreferrer"
         >

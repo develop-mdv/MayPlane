@@ -23,7 +23,7 @@ export function profilePaths(provider, id) {
   assert(['codex', 'opencode'].includes(provider), 'Неизвестный агент');
   const root = join(
     os.homedir(),
-    '.ezdeploy',
+    '.mayplane',
     'agent-profiles',
     provider,
     profileId(id),
@@ -57,12 +57,12 @@ export function profileEnvironment(provider, id) {
 }
 export function posixProfileSetup(provider, id) {
   profileId(id);
-  const root = `"$HOME/.ezdeploy/agent-profiles/${provider}/${id}"`;
+  const root = `"$HOME/.mayplane/agent-profiles/${provider}/${id}"`;
   return (
-    `umask 077\nfor __ez_name in $(env | cut -d= -f1); do\ncase "$__ez_name" in\n*_API_KEY|*_TOKEN|*_ACCESS_KEY|*_SECRET_ACCESS_KEY|*_CREDENTIALS|OPENAI_*|ANTHROPIC_*|CODEX_HOME|CODEX_SQLITE_HOME|OPENCODE_AUTH_CONTENT|OPENCODE_CONFIG|OPENCODE_CONFIG_CONTENT) unset "$__ez_name" ;;\nesac\ndone\n__ez_profile=${root}\nmkdir -p "$__ez_profile"\n` +
+    `umask 077\nfor __mayplane_name in $(env | cut -d= -f1); do\ncase "$__mayplane_name" in\n*_API_KEY|*_TOKEN|*_ACCESS_KEY|*_SECRET_ACCESS_KEY|*_CREDENTIALS|OPENAI_*|ANTHROPIC_*|CODEX_HOME|CODEX_SQLITE_HOME|OPENCODE_AUTH_CONTENT|OPENCODE_CONFIG|OPENCODE_CONFIG_CONTENT) unset "$__mayplane_name" ;;\nesac\ndone\n__mayplane_profile=${root}\nmkdir -p "$__mayplane_profile"\n` +
     (provider === 'codex'
-      ? 'export CODEX_HOME="$__ez_profile/codex"\nunset CODEX_SQLITE_HOME OPENAI_API_KEY CODEX_ACCESS_TOKEN\nmkdir -p "$CODEX_HOME"\n'
-      : 'export XDG_DATA_HOME="$__ez_profile/data" XDG_CONFIG_HOME="$__ez_profile/config" XDG_CACHE_HOME="$__ez_profile/cache" XDG_STATE_HOME="$__ez_profile/state"\nexport OPENCODE_DB="$XDG_DATA_HOME/opencode/opencode.db"\nunset OPENCODE_AUTH_CONTENT OPENAI_API_KEY ANTHROPIC_API_KEY GOOGLE_API_KEY GEMINI_API_KEY OPENROUTER_API_KEY OPENCODE_CONFIG OPENCODE_CONFIG_CONTENT\nmkdir -p "$XDG_DATA_HOME/opencode" "$XDG_CONFIG_HOME" "$XDG_STATE_HOME" "$XDG_CACHE_HOME"\n')
+      ? 'export CODEX_HOME="$__mayplane_profile/codex"\nunset CODEX_SQLITE_HOME OPENAI_API_KEY CODEX_ACCESS_TOKEN\nmkdir -p "$CODEX_HOME"\n'
+      : 'export XDG_DATA_HOME="$__mayplane_profile/data" XDG_CONFIG_HOME="$__mayplane_profile/config" XDG_CACHE_HOME="$__mayplane_profile/cache" XDG_STATE_HOME="$__mayplane_profile/state"\nexport OPENCODE_DB="$XDG_DATA_HOME/opencode/opencode.db"\nunset OPENCODE_AUTH_CONTENT OPENAI_API_KEY ANTHROPIC_API_KEY GOOGLE_API_KEY GEMINI_API_KEY OPENROUTER_API_KEY OPENCODE_CONFIG OPENCODE_CONFIG_CONTENT\nmkdir -p "$XDG_DATA_HOME/opencode" "$XDG_CONFIG_HOME" "$XDG_STATE_HOME" "$XDG_CACHE_HOME"\n')
   );
 }
 export function posixProfileOperation(
@@ -98,7 +98,7 @@ export function posixProfileOperation(
     assert(operation === 'profile-write', 'Неизвестная операция профиля');
     return (
       prefix +
-      'IFS= read -r __ez_auth\nprintf \'%s\' "$__ez_auth" | opencode auth import --standalone'
+      'IFS= read -r __mayplane_auth\nprintf \'%s\' "$__mayplane_auth" | opencode auth import --standalone'
     );
   }
   const file =
@@ -109,7 +109,7 @@ export function posixProfileOperation(
     return `set -eu\n${setup}if [ -f ${file} ]; then cat ${file}; else printf '{}'; fi`;
   if (operation === 'profile-clear') return `set -eu\n${setup}rm -f -- ${file}`;
   assert(operation === 'profile-write', 'Неизвестная операция профиля');
-  return `set -eu\n${setup}IFS= read -r __ez_auth\n__ez_auth_file=${file}\nprintf '%s' "$__ez_auth" > "$__ez_auth_file.tmp"\nchmod 600 "$__ez_auth_file.tmp"\nmv -f -- "$__ez_auth_file.tmp" "$__ez_auth_file"\nunset __ez_auth`;
+  return `set -eu\n${setup}IFS= read -r __mayplane_auth\n__mayplane_auth_file=${file}\nprintf '%s' "$__mayplane_auth" > "$__mayplane_auth_file.tmp"\nchmod 600 "$__mayplane_auth_file.tmp"\nmv -f -- "$__mayplane_auth_file.tmp" "$__mayplane_auth_file"\nunset __mayplane_auth`;
 }
 export function localProfileProcess({ provider, operation, profileId: id }) {
   const { auth } = profilePaths(provider, id);

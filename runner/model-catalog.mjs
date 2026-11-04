@@ -278,7 +278,7 @@ export function createModelCatalog({
         let catalog;
         if (provider === 'codex') {
           await rpc.request('initialize', {
-            clientInfo: { name: 'ezdeploy', version: '0.2.0' },
+            clientInfo: { name: 'mayplane', version: '0.2.0' },
             ...(accountId ? { capabilities: { experimentalApi: true } } : {}),
           });
           rpc.notify('initialized');
@@ -288,7 +288,7 @@ export function createModelCatalog({
           const init = await rpc.request('initialize', {
             protocolVersion: 1,
             clientCapabilities: {},
-            clientInfo: { name: 'ezdeploy', version: '0.2.0' },
+            clientInfo: { name: 'mayplane', version: '0.2.0' },
           });
           const reusable =
             entry.nativeId && init.agentCapabilities?.loadSession;

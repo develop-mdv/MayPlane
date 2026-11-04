@@ -52,20 +52,20 @@ export function connectorServicePlan(
         '.config',
         'systemd',
         'user',
-        'ezdeploy-connector.service',
+        'mayplane-connector.service',
       ),
-      content: `[Unit]\nDescription=ezdeploy personal computer connector\nAfter=network-online.target\n\n[Service]\nType=simple\nExecStart=${[node, ...args].map(unitQuote).join(' ')}\nRestart=on-failure\nRestartSec=5\n\n[Install]\nWantedBy=default.target\n`,
+      content: `[Unit]\nDescription=MayPlane personal computer connector\nAfter=network-online.target\n\n[Service]\nType=simple\nExecStart=${[node, ...args].map(unitQuote).join(' ')}\nRestart=on-failure\nRestartSec=5\n\n[Install]\nWantedBy=default.target\n`,
       install: [
         ['systemctl', ['--user', 'daemon-reload']],
         [
           'systemctl',
-          ['--user', 'enable', '--now', 'ezdeploy-connector.service'],
+          ['--user', 'enable', '--now', 'mayplane-connector.service'],
         ],
       ],
       stop: [
         [
           'systemctl',
-          ['--user', 'disable', '--now', 'ezdeploy-connector.service'],
+          ['--user', 'disable', '--now', 'mayplane-connector.service'],
         ],
       ],
       afterRemove: [['systemctl', ['--user', 'daemon-reload']]],
@@ -75,17 +75,17 @@ export function connectorServicePlan(
         home,
         'Library',
         'LaunchAgents',
-        'app.ezdeploy.connector.plist',
+        'app.mayplane.connector.plist',
       ),
       target = `gui/${uid}`;
     return {
       path,
-      content: `<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd"><plist version="1.0"><dict><key>Label</key><string>app.ezdeploy.connector</string><key>ProgramArguments</key><array>${[node, ...args].map((a) => `<string>${xml(a)}</string>`).join('')}</array><key>EnvironmentVariables</key><dict><key>PATH</key><string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string></dict><key>RunAtLoad</key><true/><key>KeepAlive</key><dict><key>SuccessfulExit</key><false/></dict><key>ThrottleInterval</key><integer>10</integer><key>StandardOutPath</key><string>${xml(join(directory, 'connector.log'))}</string><key>StandardErrorPath</key><string>${xml(join(directory, 'connector.log'))}</string></dict></plist>`,
+      content: `<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd"><plist version="1.0"><dict><key>Label</key><string>app.mayplane.connector</string><key>ProgramArguments</key><array>${[node, ...args].map((a) => `<string>${xml(a)}</string>`).join('')}</array><key>EnvironmentVariables</key><dict><key>PATH</key><string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string></dict><key>RunAtLoad</key><true/><key>KeepAlive</key><dict><key>SuccessfulExit</key><false/></dict><key>ThrottleInterval</key><integer>10</integer><key>StandardOutPath</key><string>${xml(join(directory, 'connector.log'))}</string><key>StandardErrorPath</key><string>${xml(join(directory, 'connector.log'))}</string></dict></plist>`,
       beforeInstall: [
-        ['launchctl', ['bootout', `${target}/app.ezdeploy.connector`]],
+        ['launchctl', ['bootout', `${target}/app.mayplane.connector`]],
       ],
       install: [['launchctl', ['bootstrap', target, path]]],
-      stop: [['launchctl', ['bootout', `${target}/app.ezdeploy.connector`]]],
+      stop: [['launchctl', ['bootout', `${target}/app.mayplane.connector`]]],
       afterRemove: [],
     };
   }
@@ -108,13 +108,13 @@ export function connectorServicePlan(
       install: [
         [
           'schtasks.exe',
-          ['/Create', '/TN', 'ezdeploy-connector', '/XML', path, '/F'],
+          ['/Create', '/TN', 'mayplane-connector', '/XML', path, '/F'],
         ],
-        ['schtasks.exe', ['/Run', '/TN', 'ezdeploy-connector']],
+        ['schtasks.exe', ['/Run', '/TN', 'mayplane-connector']],
       ],
       stop: [
-        ['schtasks.exe', ['/End', '/TN', 'ezdeploy-connector']],
-        ['schtasks.exe', ['/Delete', '/TN', 'ezdeploy-connector', '/F']],
+        ['schtasks.exe', ['/End', '/TN', 'mayplane-connector']],
+        ['schtasks.exe', ['/Delete', '/TN', 'mayplane-connector', '/F']],
       ],
       afterRemove: [],
     };

@@ -939,7 +939,7 @@ export function createAccounts(
           error: {
             code: -32001,
             message:
-              'Аккаунт требует повторной авторизации в настройках ezdeploy',
+              'Аккаунт требует повторной авторизации в настройках mayplane',
           },
         });
       }

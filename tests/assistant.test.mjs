@@ -30,7 +30,7 @@ const context = {
   omitted: 0,
 };
 function fixture(t, env = '') {
-  const dir = mkdtempSync(join(tmpdir(), 'ez-ai-'));
+  const dir = mkdtempSync(join(tmpdir(), 'mayplane-ai-'));
   const store = openStore(dir, randomBytes(32));
   t.after(() => {
     store.close();
@@ -320,11 +320,11 @@ test('recipe selection creates scoped configuration and rejects invented command
     context,
     p,
   );
-  const compose = JSON.parse(compiled.files['ezdeploy.compose.yaml']);
-  assert.deepEqual(compose.services.app.ports, ['${EZDEPLOY_HTTP_PORT}:3000']);
+  const compose = JSON.parse(compiled.files['mayplane.compose.yaml']);
+  assert.deepEqual(compose.services.app.ports, ['${MAYPLANE_HTTP_PORT}:3000']);
   assert.equal(compose.services.app.build.args.VITE_API_URL, '${VITE_API_URL}');
   assert.match(
-    compiled.files['ezdeploy.Dockerfile'],
+    compiled.files['mayplane.Dockerfile'],
     /ENV VITE_API_URL=\$VITE_API_URL/,
   );
   for (const modified of [
@@ -350,7 +350,7 @@ test('recipe selection creates scoped configuration and rejects invented command
       },
       py,
       { kind: 'bot' },
-    ).files['backend/ezdeploy.Dockerfile'],
+    ).files['backend/mayplane.Dockerfile'],
     /"python","-m","app.main"/,
   );
 });
@@ -430,11 +430,11 @@ test('automatic deploy runs prepared recipe, chooses a free port and publishes H
   const { store, p } = fixture(t, 'BOT_TOKEN=present');
   const calls = [],
     writes = [];
-  const root = `/opt/ezdeploy/${p.id}/repo`;
+  const root = `/opt/mayplane/${p.id}/repo`;
   const config = {
     services: {
       app: {
-        build: { context: root, dockerfile: 'ezdeploy.Dockerfile' },
+        build: { context: root, dockerfile: 'mayplane.Dockerfile' },
         volumes: [{ type: 'volume', source: 'data' }],
         ports: [{ published: '18081' }],
       },
@@ -465,7 +465,7 @@ test('automatic deploy runs prepared recipe, chooses a free port and publishes H
   assert.equal(deployed.httpPort, 18081);
   assert.equal(deployed.publicUrl, 'http://203.0.113.10:18081');
   assert.equal(deployed.deploymentChecks.httpStatus, 200);
-  assert.ok(writes.some((f) => f.path.endsWith('/ezdeploy.Dockerfile')));
+  assert.ok(writes.some((f) => f.path.endsWith('/mayplane.Dockerfile')));
   assert.ok(calls.some((s) => s.includes('up -d --build')));
   assert.ok(calls.some((s) => s.includes(sha)));
 });
@@ -483,7 +483,7 @@ test('automatic Compose blocks host access and domain setup preserves an existin
   assert.equal(domainName('app.example.com\n{ evil }'), '');
   const writes = [];
   p.httpPort = 18080;
-  p.secret.generatedFiles = { 'ezdeploy.compose.yaml': '{}' };
+  p.secret.generatedFiles = { 'mayplane.compose.yaml': '{}' };
   p.domain = 'app.example.com';
   await publishEndpoint({}, p, {
     store,
@@ -509,7 +509,7 @@ for (const failReload of [false, true])
     const { store, p } = fixture(t);
     p.domain = 'new.example.com';
     p.httpPort = 18081;
-    p.secret.generatedFiles = { 'ezdeploy.compose.yaml': '{}' };
+    p.secret.generatedFiles = { 'mayplane.compose.yaml': '{}' };
     store.save('projects', {
       ...p,
       id: randomUUID(),

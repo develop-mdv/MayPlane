@@ -53,13 +53,13 @@ export function createNativeSessions({ openProcess, connectors }) {
         'initialize',
         provider === 'codex'
           ? {
-              clientInfo: { name: 'ezdeploy_history', version: '0.3.0' },
+              clientInfo: { name: 'mayplane_history', version: '0.3.0' },
               capabilities: { experimentalApi: true },
             }
           : {
               protocolVersion: 1,
               clientCapabilities: {},
-              clientInfo: { name: 'ezdeploy_history', version: '0.3.0' },
+              clientInfo: { name: 'mayplane_history', version: '0.3.0' },
             },
       );
       if (provider === 'codex') rpc.notify('initialized');
@@ -68,7 +68,7 @@ export function createNativeSessions({ openProcess, connectors }) {
       if (/paginated_threads|not supported yet/.test(error.message))
         throw Object.assign(
           new Error(
-            'CLI Codex не поддерживает формат истории приложения. Обновите CLI или используйте встроенный CLI настольного Codex через EZDEPLOY_CODEX_BIN.',
+            'CLI Codex не поддерживает формат истории приложения. Обновите CLI или используйте встроенный CLI настольного Codex через MAYPLANE_CODEX_BIN.',
           ),
           { status: 409 },
         );

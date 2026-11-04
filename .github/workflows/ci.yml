@@ -1,4 +1,4 @@
-name: Check ezdeploy
+name: Check MayPlane
 on:
   push:
   pull_request:

@@ -182,7 +182,7 @@ export default function WorkspaceMain() {
         <div className="brand-row">
           <button
             className="brand"
-            aria-label="ezdeploy — главная"
+            aria-label="MayPlane — главная"
             onClick={() => {
               setSelectedSession(null);
               setScope('all');
@@ -193,7 +193,7 @@ export default function WorkspaceMain() {
               <Command size={19} />
             </span>
             <span>
-              ezdeploy<span className="brand-period">.</span>
+              MayPlane<span className="brand-period">.</span>
             </span>
           </button>
           <button

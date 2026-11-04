@@ -1,10 +1,18 @@
 import { DatabaseSync } from 'node:sqlite';
-import { mkdirSync } from 'node:fs';
+import { mkdirSync, existsSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { seal, unseal } from './security.mjs';
 export function openStore(directory, key) {
   mkdirSync(directory, { recursive: true, mode: 0o700 });
-  const db = new DatabaseSync(join(directory, 'ezdeploy.sqlite'));
+  const databasePath = join(directory, 'mayplane.sqlite');
+  if (
+    !existsSync(databasePath) &&
+    readdirSync(directory).some((name) => /\.sqlite(?:3)?$/i.test(name))
+  )
+    throw new Error(
+      'В каталоге данных найдена база с другим именем. Остановите панель, создайте резервную копию и переименуйте основную базу в mayplane.sqlite. Новая пустая база не создана.',
+    );
+  const db = new DatabaseSync(databasePath);
   db.exec(`PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000;
  CREATE TABLE IF NOT EXISTS servers (id TEXT PRIMARY KEY, data TEXT NOT NULL, secret TEXT NOT NULL);
  CREATE TABLE IF NOT EXISTS settings (id TEXT PRIMARY KEY, data TEXT NOT NULL, secret TEXT NOT NULL);

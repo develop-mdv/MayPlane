@@ -5,6 +5,6 @@ COPY runner/ ./runner/
 COPY lib/environment.mjs lib/env-requirements.mjs lib/project-name.mjs lib/job-actions.mjs lib/agent-path.mjs ./lib/
 RUN mkdir /data && chown node:node /data
 USER node
-ENV HOST=0.0.0.0 PORT=8788 EZDEPLOY_DATA_DIR=/data
+ENV HOST=0.0.0.0 PORT=8788 MAYPLANE_DATA_DIR=/data
 EXPOSE 8788
 CMD ["node", "runner/server.mjs"]

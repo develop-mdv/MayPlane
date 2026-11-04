@@ -18,7 +18,7 @@ import { createWorkflowRunner, saveWorkflow } from '../runner/workflows.mjs';
 import { parseEnvDocument } from '../lib/environment.mjs';
 
 function fixture(t) {
-  const dir = mkdtempSync(join(tmpdir(), 'ez-adoption-'));
+  const dir = mkdtempSync(join(tmpdir(), 'mayplane-adoption-'));
   const store = openStore(dir, randomBytes(32));
   t.after(() => {
     store.close();
@@ -86,18 +86,18 @@ function fixture(t) {
   };
   f.run = async (_c, script, options = {}) => {
     f.commands.push(script);
-    if (script.includes('# ezdeploy:discover-docker'))
+    if (script.includes('# mayplane:discover-docker'))
       return f.containers.map((c) => JSON.stringify(c)).join('\n');
-    if (script.includes('# ezdeploy:discover-systemd')) return f.units;
-    if (script.includes('# ezdeploy:discover-directory'))
+    if (script.includes('# mayplane:discover-systemd')) return f.units;
+    if (script.includes('# mayplane:discover-directory'))
       return '/srv/unmanaged';
-    if (script.includes('# ezdeploy:inspect-git'))
+    if (script.includes('# mayplane:inspect-git'))
       return (
         '/srv/app\nhttps://userinfo:git-secret@github.com/owner/app.git\nmain\n' +
         'c'.repeat(40) +
         '\n'
       );
-    if (script.includes('# ezdeploy:inspect-selected-containers'))
+    if (script.includes('# mayplane:inspect-selected-containers'))
       return JSON.stringify(
         f.containers.map((c, i) => ({
           Id: c.id,
@@ -113,13 +113,13 @@ function fixture(t) {
           HostConfig: { RestartPolicy: { Name: 'unless-stopped' } },
         })),
       );
-    if (script.includes('# ezdeploy:inspect-selected-unit'))
+    if (script.includes('# mayplane:inspect-selected-unit'))
       return '[Service]\nExecStart=/srv/service/app\n';
-    if (script.includes('# ezdeploy:inspect-selected-environment'))
+    if (script.includes('# mayplane:inspect-selected-environment'))
       return Buffer.from(
         'API_TOKEN=systemd-secret-value\0MODE=production\0',
       ).toString('base64');
-    if (script.includes('# ezdeploy:read-adoption-file')) {
+    if (script.includes('# mayplane:read-adoption-file')) {
       const path = Object.keys(f.files).find((p) =>
         script.includes("'" + p + "'"),
       );

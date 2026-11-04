@@ -10,7 +10,7 @@ import { openStore } from '../runner/store.mjs';
 import { createApp } from '../runner/server.mjs';
 
 test('outbound connector pairs once, authenticates reconnect, clamps metrics, isolates processes and revokes access', async (t) => {
-  const directory = mkdtempSync(join(tmpdir(), 'ezdeploy-connectors-')),
+  const directory = mkdtempSync(join(tmpdir(), 'mayplane-connectors-')),
     store = openStore(directory, randomBytes(32)),
     token = randomBytes(32).toString('hex');
   const { server, hub } = createApp({ store, token, engine: {} });

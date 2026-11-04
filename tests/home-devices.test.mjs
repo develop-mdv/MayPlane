@@ -118,7 +118,7 @@ test('autostart plans use the current user and quote paths without placing crede
 });
 
 async function fixture(t, { oldOpenCode = false } = {}) {
-  const dir = mkdtempSync(join(tmpdir(), 'ez-home-')),
+  const dir = mkdtempSync(join(tmpdir(), 'mayplane-home-')),
     store = openStore(dir, randomBytes(32)),
     machineId = randomUUID(),
     calls = [],

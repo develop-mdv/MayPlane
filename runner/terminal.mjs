@@ -21,7 +21,7 @@ export function attachTerminals(
     noServer: true,
     maxPayload: 16384,
     perMessageDeflate: false,
-    handleProtocols: () => 'ezdeploy-terminal',
+    handleProtocols: () => 'mayplane-terminal',
   });
   const prune = () => {
     for (const [key, value] of tickets)
@@ -57,7 +57,7 @@ export function attachTerminals(
       .split(',')
       .map((v) => v.trim());
     const credential =
-      protocols.length === 2 && protocols[0] === 'ezdeploy-terminal'
+      protocols.length === 2 && protocols[0] === 'mayplane-terminal'
         ? protocols[1]
         : '';
     const entry = tickets.get(credential);

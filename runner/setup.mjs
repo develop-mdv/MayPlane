@@ -6,9 +6,9 @@ if (existsSync('.env.runner')) {
 }
 writeFileSync(
   '.env.runner',
-  `EZDEPLOY_TOKEN=${randomBytes(32).toString('hex')}\nEZDEPLOY_ENCRYPTION_KEY=${randomBytes(32).toString('hex')}\nHOST=127.0.0.1\nPORT=8788\nALLOWED_ORIGINS=http://localhost:3000,http://127.0.0.1:3000,https://ezdeploy-control.steady-wren-0539.chatgpt.site\nEZDEPLOY_PUBLIC_URL=\n`,
+  `MAYPLANE_TOKEN=${randomBytes(32).toString('hex')}\nMAYPLANE_ENCRYPTION_KEY=${randomBytes(32).toString('hex')}\nHOST=127.0.0.1\nPORT=8788\nALLOWED_ORIGINS=http://localhost:3000,http://127.0.0.1:3000\nMAYPLANE_PUBLIC_URL=\n`,
   { mode: 0o600, flag: 'wx' },
 );
 console.log(
-  'Создан .env.runner. Ключ доступа находится в EZDEPLOY_TOKEN. Не публикуйте этот файл.',
+  'Создан .env.runner. Ключ доступа находится в MAYPLANE_TOKEN. Не публикуйте этот файл.',
 );

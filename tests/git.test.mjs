@@ -10,7 +10,7 @@ import { createEngine } from '../runner/engine.mjs';
 import { createGithub, repositoryName } from '../runner/github.mjs';
 import { compose, workspaceOf } from '../runner/ssh.mjs';
 function fixture(t) {
-  const dir = mkdtempSync(join(tmpdir(), 'ez-git-'));
+  const dir = mkdtempSync(join(tmpdir(), 'mayplane-git-'));
   const store = openStore(dir, randomBytes(32));
   t.after(() => {
     store.close();
@@ -188,7 +188,7 @@ for (const failGit of [false, true])
       assert.ok(env > cleanup);
       assert.equal(calls[env].value, 'TOKEN=build-only-secret');
       assert.match(compose(p), /nested'\ndocker compose/);
-      assert.equal(workspaceOf(p), `/opt/ezdeploy/${p.id}/repo/nested`);
+      assert.equal(workspaceOf(p), `/opt/mayplane/${p.id}/repo/nested`);
       assert.ok(calls.some((c) => c.script?.endsWith(' build')));
       assert.ok(!calls.some((c) => c.script?.includes('up -d')));
     } else assert.ok(!calls.some((c) => c.path?.endsWith('/.env')));

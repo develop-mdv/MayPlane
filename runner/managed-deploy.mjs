@@ -54,9 +54,9 @@ export async function prepareGeneratedFiles(
     p.secret.env =
       p.secret.env
         .split(/\r?\n/)
-        .filter((l) => !/^\s*(?:export\s+)?EZDEPLOY_HTTP_PORT\s*=/.test(l))
+        .filter((l) => !/^\s*(?:export\s+)?MAYPLANE_HTTP_PORT\s*=/.test(l))
         .join('\n')
-        .replace(/\n*$/, '\n') + `EZDEPLOY_HTTP_PORT=${port}\n`;
+        .replace(/\n*$/, '\n') + `MAYPLANE_HTTP_PORT=${port}\n`;
     p.envKeys = envEntries(p.secret.env).map((e) => e[0]);
   }
   for (const [relative, content] of Object.entries(files)) {
@@ -221,7 +221,7 @@ export async function publishEndpoint(
       (
         await run(
           client,
-          'docker inspect --format \'{{index .Config.Labels "ezdeploy.managed-proxy"}}\' ezdeploy-proxy 2>/dev/null || true',
+          'docker inspect --format \'{{index .Config.Labels "mayplane.managed-proxy"}}\' mayplane-proxy 2>/dev/null || true',
           { timeout: 10000 },
         )
       ).trim() === 'true';
@@ -261,12 +261,12 @@ export async function publishEndpoint(
         .filter((r) => r.domain && Number.isInteger(r.port))
         .map((r) => `${r.domain} {\n reverse_proxy 127.0.0.1:${r.port}\n}`)
         .join('\n\n') + '\n';
-    const root = '/opt/ezdeploy-proxy';
+    const root = '/opt/mayplane-proxy';
     await run(
       client,
-      `test ! -e ${q(root)} || test -f ${q(root + '/.managed-by-ezdeploy')}; install -d -m 700 ${q(root)}; test ! -L ${q(root + '/Caddyfile.next')}`,
+      `test ! -e ${q(root)} || test -f ${q(root + '/.managed-by-mayplane')}; install -d -m 700 ${q(root)}; test ! -L ${q(root + '/Caddyfile.next')}`,
     );
-    await put(client, root + '/.managed-by-ezdeploy', 'ezdeploy\n');
+    await put(client, root + '/.managed-by-mayplane', 'mayplane\n');
     await put(client, root + '/Caddyfile.next', config);
     await run(
       client,
@@ -286,13 +286,13 @@ export async function publishEndpoint(
       try {
         await run(
           client,
-          'docker exec ezdeploy-proxy caddy reload --config /etc/caddy/Caddyfile --adapter caddyfile',
+          'docker exec mayplane-proxy caddy reload --config /etc/caddy/Caddyfile --adapter caddyfile',
           { timeout: 30000 },
         );
       } catch (e) {
         await run(
           client,
-          `mv ${q(root + '/Caddyfile.previous')} ${q(root + '/Caddyfile')}; docker exec ezdeploy-proxy caddy reload --config /etc/caddy/Caddyfile --adapter caddyfile`,
+          `mv ${q(root + '/Caddyfile.previous')} ${q(root + '/Caddyfile')}; docker exec mayplane-proxy caddy reload --config /etc/caddy/Caddyfile --adapter caddyfile`,
           { timeout: 30000 },
         );
         throw e;
@@ -300,7 +300,7 @@ export async function publishEndpoint(
     } else
       await run(
         client,
-        `docker run -d --name ezdeploy-proxy --label ezdeploy.managed-proxy=true --restart unless-stopped --network host -v ${q(root + ':/etc/caddy:ro')} -v ezdeploy-caddy-data:/data -v ezdeploy-caddy-config:/config caddy:2`,
+        `docker run -d --name mayplane-proxy --label mayplane.managed-proxy=true --restart unless-stopped --network host -v ${q(root + ':/etc/caddy:ro')} -v mayplane-caddy-data:/data -v mayplane-caddy-config:/config caddy:2`,
         { timeout: 180000 },
       );
     p.managedDomain = domain;
@@ -322,12 +322,12 @@ export async function removeManagedEndpoint(
   { store, run, put, log },
 ) {
   if (!p.managedDomain) return;
-  const root = '/opt/ezdeploy-proxy';
+  const root = '/opt/mayplane-proxy';
   const managed =
     (
       await run(
         client,
-        'docker inspect --format \'{{index .Config.Labels "ezdeploy.managed-proxy"}}\' ezdeploy-proxy 2>/dev/null || true',
+        'docker inspect --format \'{{index .Config.Labels "mayplane.managed-proxy"}}\' mayplane-proxy 2>/dev/null || true',
       )
     ).trim() === 'true';
   assert(
@@ -360,7 +360,7 @@ export async function removeManagedEndpoint(
       .join('\n\n') || '{\n admin localhost:2019\n}\n';
   await run(
     client,
-    `test -f ${q(root + '/.managed-by-ezdeploy')}; test ! -L ${q(root + '/Caddyfile.next')}; test ! -L ${q(root + '/Caddyfile.previous')}`,
+    `test -f ${q(root + '/.managed-by-mayplane')}; test ! -L ${q(root + '/Caddyfile.next')}; test ! -L ${q(root + '/Caddyfile.previous')}`,
   );
   await put(client, root + '/Caddyfile.next', config);
   await run(
@@ -375,13 +375,13 @@ export async function removeManagedEndpoint(
   try {
     await run(
       client,
-      'docker exec ezdeploy-proxy caddy reload --config /etc/caddy/Caddyfile --adapter caddyfile',
+      'docker exec mayplane-proxy caddy reload --config /etc/caddy/Caddyfile --adapter caddyfile',
       { timeout: 30000 },
     );
   } catch (error) {
     await run(
       client,
-      `mv ${q(root + '/Caddyfile.previous')} ${q(root + '/Caddyfile')}; docker exec ezdeploy-proxy caddy reload --config /etc/caddy/Caddyfile --adapter caddyfile`,
+      `mv ${q(root + '/Caddyfile.previous')} ${q(root + '/Caddyfile')}; docker exec mayplane-proxy caddy reload --config /etc/caddy/Caddyfile --adapter caddyfile`,
       { timeout: 30000 },
     );
     throw error;

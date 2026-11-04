@@ -45,7 +45,7 @@ def safe_path(path):
     path = os.path.normpath(path)
     roots = ('/opt/', '/srv/', '/home/', '/root/', '/var/lib/', '/var/log/', '/var/cache/', '/etc/', '/usr/local/')
     require(path.startswith(roots) and path not in [r.rstrip('/') for r in roots], 'Нужен отдельный каталог приложения: ' + path)
-    denied = ['/root/.ssh', '/etc/ssh', '/etc/passwd', '/etc/shadow', '/etc/group', '/etc/gshadow', '/etc/sudoers', '/etc/sudoers.d', '/etc/docker', '/etc/systemd', '/var/lib/docker', '/var/lib/containerd', '/opt/ezdeploy-migrations', '/opt/ezdeploy-backups']
+    denied = ['/root/.ssh', '/etc/ssh', '/etc/passwd', '/etc/shadow', '/etc/group', '/etc/gshadow', '/etc/sudoers', '/etc/sudoers.d', '/etc/docker', '/etc/systemd', '/var/lib/docker', '/var/lib/containerd', '/opt/mayplane-migrations', '/opt/mayplane-backups']
     require(not any(inside(path, d) for d in denied), 'Системный или общий каталог нельзя переносить целиком: ' + path)
     return path
 
@@ -308,7 +308,7 @@ def preflight(data):
         issues.append('Архитектуры серверов различаются')
     reserve = 256 * 1024 * 1024
     required = inv['bytes'] * 3 + reserve
-    if shutil.disk_usage(closest('/opt/ezdeploy-migrations')).free < required:
+    if shutil.disk_usage(closest('/opt/mayplane-migrations')).free < required:
         issues.append('Недостаточно места на /opt: нужно не менее ' + str(required) + ' байт с резервом для копии и распаковки')
     disk_needs = {}
     for d in inv['datasets']:
@@ -415,7 +415,7 @@ def preflight(data):
 
 def workdir(job):
     require(re.fullmatch('[a-f0-9-]{36}', job), 'Некорректный идентификатор переноса')
-    return '/opt/ezdeploy-migrations/' + job
+    return '/opt/mayplane-migrations/' + job
 
 def save_json(path, value):
     with open(path + '.tmp', 'w', encoding='utf8') as f:
@@ -448,7 +448,7 @@ def source_fence(inv, job, enable):
                 f.write(job)
         for unit in inv['units']:
             directory = '/etc/systemd/system/' + unit + '.d'
-            dropin = directory + '/zz-ezdeploy-migration-' + job + '.conf'
+            dropin = directory + '/zz-mayplane-migration-' + job + '.conf'
             if enable:
                 os.makedirs(directory, mode=0o755, exist_ok=True)
                 with open(dropin, 'x') as f:
@@ -531,7 +531,7 @@ def snapshot(data):
         files.append(archive)
     if inv['runtime'] == 'docker':
         for i, c in enumerate(inv['containers']):
-            tag = 'ezdeploy-migration-' + job + ':c' + str(i)
+            tag = 'mayplane-migration-' + job + ':c' + str(i)
             docker('commit', c['Id'], tag)
             details = json.loads(docker('image', 'inspect', tag))[0]
             image = details['Id']
@@ -570,7 +570,7 @@ def container_spec(c, image, label, stop_signal=''):
     config['Image'] = image['id']
     if stop_signal:
         config['StopSignal'] = stop_signal
-    config['Labels'] = {**(config.get('Labels') or {}), 'ezdeploy.migration': label}
+    config['Labels'] = {**(config.get('Labels') or {}), 'mayplane.migration': label}
     h = copy.deepcopy(c['HostConfig'])
     h['RestartPolicy'] = {'Name': 'no', 'MaximumRetryCount': 0}
     h.pop('ContainerIDFile', None)
@@ -614,9 +614,9 @@ def restore(data):
         journal['images'] = images
         record()
         for name, v in inv['volumes'].items():
-            labels = {**(v.get('Labels') or {}), 'ezdeploy.migration': job}
+            labels = {**(v.get('Labels') or {}), 'mayplane.migration': job}
             volume = api('/volumes/create', {'Name': name, 'Driver': 'local', 'Labels': labels})
-            require((volume.get('Labels') or {}).get('ezdeploy.migration') == job, 'Том уже принадлежит другому приложению')
+            require((volume.get('Labels') or {}).get('mayplane.migration') == job, 'Том уже принадлежит другому приложению')
             journal['volumes'].append(name)
             record()
     for d in inv['datasets']:
@@ -640,7 +640,7 @@ def restore(data):
     if inv['runtime'] == 'docker':
         for name, network in inv['networks'].items():
             config = copy.deepcopy(network)
-            config['Labels'] = {**(config.get('Labels') or {}), 'ezdeploy.migration': job}
+            config['Labels'] = {**(config.get('Labels') or {}), 'mayplane.migration': job}
             result = api('/networks/create', config)
             journal['networks'].append(result['Id'])
             record()
@@ -663,7 +663,7 @@ def target_journal(job):
 def target_owned(inv, job, journal):
     if inv['runtime'] == 'docker':
         actual = inspect(journal['containers'])
-        require(len(actual) == len(inv['containers']) and all((c['Config'].get('Labels') or {}).get('ezdeploy.migration') == job for c in actual), 'Состав целевой копии изменился')
+        require(len(actual) == len(inv['containers']) and all((c['Config'].get('Labels') or {}).get('mayplane.migration') == job for c in actual), 'Состав целевой копии изменился')
     else:
         for path, expected in journal.get('configHashes', inv['configHashes']).items():
             with open(path, 'rb') as f:
@@ -880,7 +880,7 @@ def conflict_plan(data, check_space=True):
     inv['fingerprint'] = fingerprint_inventory(inv)
     needed = inv['bytes'] * 3 + 256 * 1024 * 1024
     if check_space:
-        require(shutil.disk_usage(closest('/opt/ezdeploy-migrations')).free >= needed + incoming['bytes'] * 3, 'Недостаточно места для архива прежней копии и переноса')
+        require(shutil.disk_usage(closest('/opt/mayplane-migrations')).free >= needed + incoming['bytes'] * 3, 'Недостаточно места для архива прежней копии и переноса')
     require(inv['datasets'] or inv.get('containers') or inv.get('networks') or inv.get('units'), 'Не удалось определить конфликтующие ресурсы')
     # Resource identities and file hashes must still match when approval is used.
     trees = {} if requires_stop else {d['key']: digest(tree(d['source'])) for d in inv['datasets']}
@@ -964,7 +964,7 @@ def archive_conflicts(data, prepared_root=False):
         if d.get('volume'):
             continue
         # Rename on the same filesystem, keeping the original in addition to the verified archive.
-        destination = d['source'] + '.ezdeploy-archive-' + job
+        destination = d['source'] + '.mayplane-archive-' + job
         require(not os.path.lexists(destination), 'Резервный путь уже существует: ' + destination)
         require(tree(d['source']) == backup['trees'][d['key']], 'Данные изменились перед перемещением в архив')
         persist({'path': d['source'], 'archivedPath': destination})
@@ -1053,7 +1053,7 @@ def main(request):
     if action == 'reserve':
         return {'path': prepare_dir(data['job'])}
     if action == 'source-space':
-        require(shutil.disk_usage(closest('/opt/ezdeploy-migrations')).free > data['bytes'] + 256 * 1024 * 1024, 'На исходном сервере недостаточно места для резервной копии')
+        require(shutil.disk_usage(closest('/opt/mayplane-migrations')).free > data['bytes'] + 256 * 1024 * 1024, 'На исходном сервере недостаточно места для резервной копии')
         return {'ok': True}
     require(action in methods, 'Неизвестная операция переноса')
     return methods[action](data)

@@ -29,7 +29,7 @@ test('server editing validates SSH before committing and preserves linked projec
     });
   });
   await new Promise((resolve) => ssh.listen(0, '127.0.0.1', resolve));
-  const dir = mkdtempSync(join(tmpdir(), 'ez-server-edit-'));
+  const dir = mkdtempSync(join(tmpdir(), 'mayplane-server-edit-'));
   const key = randomBytes(32);
   const store = openStore(dir, key);
   const id = randomUUID();
@@ -76,7 +76,7 @@ test('server editing validates SSH before committing and preserves linked projec
       new Promise((r) => ssh.close(r)),
     ]);
     store.close();
-    assert.ok(dir.startsWith(join(tmpdir(), 'ez-server-edit-')));
+    assert.ok(dir.startsWith(join(tmpdir(), 'mayplane-server-edit-')));
     rmSync(dir, { recursive: true, force: true });
   });
   assert.equal((await request({ name: 'denied' }, 'wrong')).status, 401);
@@ -139,7 +139,7 @@ test('server editing validates SSH before committing and preserves linked projec
       assert.equal(store.get('servers', id).status, 'online');
       assert.deepEqual(store.get('projects', project.id), project);
       assert.ok(!JSON.stringify(store.snapshot()).includes(password));
-      assert.ok(!readFileSync(join(dir, 'ezdeploy.sqlite')).includes(password));
+      assert.ok(!readFileSync(join(dir, 'mayplane.sqlite')).includes(password));
       const reopened = openStore(dir, key);
       assert.equal(reopened.get('servers', id).secret.password, password);
       reopened.close();

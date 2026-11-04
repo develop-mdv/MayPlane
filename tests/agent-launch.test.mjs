@@ -26,7 +26,7 @@ test(
   'non-interactive native install is found without npm or sourcing a profile; reinstall is idempotent',
   { skip: !existsSync(bash) },
   (t) => {
-    const home = mkdtempSync(join(tmpdir(), 'ez-agent-path-'));
+    const home = mkdtempSync(join(tmpdir(), 'mayplane-agent-path-'));
     t.after(() => rmSync(home, { recursive: true, force: true }));
     mkdirSync(join(home, '.opencode', 'bin'), { recursive: true });
     const executable = join(home, '.opencode', 'bin', 'opencode');
@@ -61,7 +61,7 @@ test(
     assert.equal(existsSync(join(home, 'profile-was-sourced')), false);
     const missing = invoke(
       'agent',
-      '/ezdeploy-definitely-missing-test-directory',
+      '/mayplane-definitely-missing-test-directory',
     );
     assert.notEqual(missing.status, 0);
     assert.equal(missing.stdout, '');

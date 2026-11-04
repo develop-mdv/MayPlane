@@ -139,8 +139,8 @@ export function WorkflowPanel({
           )}
           {editing && (
             <p className="detail-copy">
-              Команды выполняются в Bash с переменными EZDEPLOY_PROJECT_DIR,
-              EZDEPLOY_REPO_DIR, EZDEPLOY_DATA_DIR и окружением проекта.
+              Команды выполняются в Bash с переменными MAYPLANE_PROJECT_DIR,
+              MAYPLANE_REPO_DIR, MAYPLANE_DATA_DIR и окружением проекта.
               Сохранение не запускает команды.
             </p>
           )}

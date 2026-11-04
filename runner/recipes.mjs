@@ -256,7 +256,7 @@ export function compileRecipe(input, context, project) {
     else {
       assert(build, 'Для сборки сайта нужен build script');
       const dist = safePath(input.distDir || 'dist', { dot: true });
-      dockerfile += `FROM nginx:stable-alpine\nCOPY --from=build /app/${dist}/ /usr/share/nginx/html/\nCOPY ezdeploy.nginx.conf /etc/nginx/conf.d/default.conf\n`;
+      dockerfile += `FROM nginx:stable-alpine\nCOPY --from=build /app/${dist}/ /usr/share/nginx/html/\nCOPY mayplane.nginx.conf /etc/nginx/conf.d/default.conf\n`;
     }
   } else if (input.runtime === 'python') {
     assert(
@@ -325,7 +325,7 @@ export function compileRecipe(input, context, project) {
             'COPY ' + JSON.stringify([path, '/usr/share/nginx/html/' + path]),
         )
         .join('\n') +
-      '\nCOPY ezdeploy.nginx.conf /etc/nginx/conf.d/default.conf\n';
+      '\nCOPY mayplane.nginx.conf /etc/nginx/conf.d/default.conf\n';
   } else if (input.runtime === 'go') {
     assert(context.paths.includes(join(workdir, 'go.mod')), 'go.mod не найден');
     const go =
@@ -337,11 +337,11 @@ export function compileRecipe(input, context, project) {
       context.paths.includes(join(workdir, 'Dockerfile')),
       'Dockerfile отсутствует',
     );
-  result.composeFile = join(workdir, 'ezdeploy.compose.yaml');
+  result.composeFile = join(workdir, 'mayplane.compose.yaml');
   const service = {
     build: {
       context: '.',
-      dockerfile: dockerfile ? 'ezdeploy.Dockerfile' : 'Dockerfile',
+      dockerfile: dockerfile ? 'mayplane.Dockerfile' : 'Dockerfile',
       ...(publicKeys.length
         ? {
             args: Object.fromEntries(
@@ -360,7 +360,7 @@ export function compileRecipe(input, context, project) {
             HOST: '0.0.0.0',
             HOSTNAME: '0.0.0.0',
           },
-          ports: [`\${EZDEPLOY_HTTP_PORT}:${appPort}`],
+          ports: [`\${MAYPLANE_HTTP_PORT}:${appPort}`],
         }
       : {}),
   };
@@ -371,9 +371,9 @@ export function compileRecipe(input, context, project) {
       2,
     ) + '\n';
   if (dockerfile)
-    result.files[join(workdir, 'ezdeploy.Dockerfile')] = dockerfile;
+    result.files[join(workdir, 'mayplane.Dockerfile')] = dockerfile;
   if (['static', 'node-static'].includes(input.runtime))
-    result.files[join(workdir, 'ezdeploy.nginx.conf')] =
+    result.files[join(workdir, 'mayplane.nginx.conf')] =
       'server { listen 80; server_name _; root /usr/share/nginx/html; index index.html; location / { try_files $uri $uri/ /index.html; } }\n';
   for (const file of Object.keys(result.files))
     assert(

@@ -13,7 +13,7 @@ spec.loader.exec_module(host)
 
 class MigrationFilesystemTests(unittest.TestCase):
     def setUp(self):
-        self.temp = tempfile.TemporaryDirectory(prefix='ezdeploy-migration-test-')
+        self.temp = tempfile.TemporaryDirectory(prefix='mayplane-migration-test-')
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
         self.source = self.root / 'source'
@@ -162,7 +162,7 @@ class MigrationFilesystemTests(unittest.TestCase):
     def test_loaded_image_identity_survives_different_docker_stores_but_content_must_match(self):
         import json
         source={'Id':'sha256:'+'a'*64,'Os':'linux','Architecture':'amd64','Config':{'Env':['KEY=hidden'],'Cmd':['run']},'RootFS':{'Type':'layers','Layers':['sha256:one','sha256:two']}}
-        expected={'id':source['Id'],'tag':'ezdeploy-migration-fixture:c0','contentFingerprint':host.image_content_fingerprint(source)}
+        expected={'id':source['Id'],'tag':'mayplane-migration-fixture:c0','contentFingerprint':host.image_content_fingerprint(source)}
         target={**copy.deepcopy(source),'Id':'sha256:'+'b'*64}
         with patch.object(host,'docker',return_value=json.dumps([target])):
             self.assertEqual(host.loaded_image(expected)['id'],target['Id'])
@@ -174,7 +174,7 @@ class MigrationFilesystemTests(unittest.TestCase):
             with self.assertRaises(host.MigrationError):host.loaded_image(expected)
 
     def test_system_paths_cannot_be_migrated_as_application_data(self):
-        for path in ['/etc','/etc/ssh','/root/.ssh','/var/lib/docker','/opt/ezdeploy-migrations/id','/srv/../etc']:
+        for path in ['/etc','/etc/ssh','/root/.ssh','/var/lib/docker','/opt/mayplane-migrations/id','/srv/../etc']:
             with self.subTest(path=path),self.assertRaises(host.MigrationError):host.safe_path(path)
         self.assertEqual(host.safe_path('/opt/app'),'/opt/app')
 
@@ -193,7 +193,7 @@ class MigrationFilesystemTests(unittest.TestCase):
             result = host.archive_conflicts({'inventory':inv,'resolution':resolution,'job':'fixture'})
         self.assertTrue(result['archived'])
         self.assertFalse(self.source.exists())
-        preserved = Path(str(self.source) + '.ezdeploy-archive-fixture')
+        preserved = Path(str(self.source) + '.mayplane-archive-fixture')
         self.assertTrue(preserved.exists())
         for location in [root / 'verified-data', preserved]:
             db = sqlite3.connect(location / 'app.sqlite')
@@ -220,7 +220,7 @@ class MigrationFilesystemTests(unittest.TestCase):
                 host.archive_conflicts({'inventory':inv,'resolution':resolution,'job':'fixture'})
             docker.assert_not_called()
         self.assertEqual(self.source.joinpath('data').read_text(),'original')
-        self.assertFalse(Path(str(self.source)+'.ezdeploy-archive-fixture').exists())
+        self.assertFalse(Path(str(self.source)+'.mayplane-archive-fixture').exists())
 
     def test_conflict_approval_rejects_drift_without_creating_archive(self):
         root = self.root/'archive'

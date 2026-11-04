@@ -768,15 +768,15 @@ if (
   try {
     process.loadEnvFile('.env.runner');
   } catch {}
-  const token = process.env.EZDEPLOY_TOKEN;
-  const key = process.env.EZDEPLOY_ENCRYPTION_KEY;
+  const token = process.env.MAYPLANE_TOKEN;
+  const key = process.env.MAYPLANE_ENCRYPTION_KEY;
   assert(token?.length >= 32, 'Выполните npm run runner:setup');
   assert(
     /^[a-f0-9]{64}$/i.test(key || ''),
-    'Задайте EZDEPLOY_ENCRYPTION_KEY: 32 байта в hex',
+    'Задайте MAYPLANE_ENCRYPTION_KEY: 32 байта в hex',
   );
   const store = openStore(
-    process.env.EZDEPLOY_DATA_DIR || '.runner-data',
+    process.env.MAYPLANE_DATA_DIR || '.runner-data',
     Buffer.from(key, 'hex'),
   );
   const { server, engine, terminals, hub } = createApp({
@@ -785,15 +785,15 @@ if (
     origins: (process.env.ALLOWED_ORIGINS || 'http://localhost:3000')
       .split(',')
       .map((s) => s.trim()),
-    publicUrl: process.env.EZDEPLOY_PUBLIC_URL || '',
-    legacyApi: process.env.EZDEPLOY_LEGACY_API === 'true',
+    publicUrl: process.env.MAYPLANE_PUBLIC_URL || '',
+    legacyApi: process.env.MAYPLANE_LEGACY_API === 'true',
   });
   server.listen(
     Number(process.env.PORT || 8788),
     process.env.HOST || '127.0.0.1',
     () =>
       console.log(
-        `ezdeploy runner: ${process.env.HOST || '127.0.0.1'}:${process.env.PORT || 8788}`,
+        `MayPlane runner: ${process.env.HOST || '127.0.0.1'}:${process.env.PORT || 8788}`,
       ),
   );
   async function shutdown() {

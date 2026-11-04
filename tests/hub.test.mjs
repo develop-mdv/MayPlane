@@ -235,7 +235,7 @@ function fakeVersion(provider, code = 0, errors = '', version = '1.0.0') {
 }
 
 async function fixture(t, options = {}) {
-  const dir = mkdtempSync(join(tmpdir(), 'ezdeploy-hub-')),
+  const dir = mkdtempSync(join(tmpdir(), 'mayplane-hub-')),
     key = randomBytes(32),
     store = openStore(dir, key),
     token = randomBytes(32).toString('hex'),

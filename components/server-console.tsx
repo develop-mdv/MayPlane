@@ -164,7 +164,7 @@ function ConsoleBody({
             `/api/servers/${server.id}/terminal`,
         );
         url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:';
-        client = new WebSocket(url, ['ezdeploy-terminal', ticket.ticket]);
+        client = new WebSocket(url, ['mayplane-terminal', ticket.ticket]);
         socket.current = client;
         client.binaryType = 'arraybuffer';
         connectTimeout = setTimeout(() => {

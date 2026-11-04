@@ -10,7 +10,7 @@ import { createApp } from '../runner/server.mjs';
 import { migrationOptions } from '../runner/migration.mjs';
 
 function fixture(t, scenario = 'success') {
-  const dir = mkdtempSync(join(tmpdir(), 'ez-migration-v2-'));
+  const dir = mkdtempSync(join(tmpdir(), 'mayplane-migration-v2-'));
   const store = openStore(dir, randomBytes(32));
   const sid = randomUUID(),
     tid = randomUUID(),
@@ -65,8 +65,8 @@ function fixture(t, scenario = 'success') {
     datasets: [
       {
         key: 'path-0',
-        source: '/opt/ezdeploy/' + pid,
-        target: '/opt/ezdeploy/' + pid,
+        source: '/opt/mayplane/' + pid,
+        target: '/opt/mayplane/' + pid,
         kind: 'directory',
         bytes: 5000,
       },
@@ -106,7 +106,7 @@ function fixture(t, scenario = 'success') {
         assert.equal(phase, 'stopped');
         return {
           files: ['path-0.tar', 'images.tar', 'manifest.json'].map(
-            (f) => '/opt/ezdeploy-migrations/' + data.job + '/' + f,
+            (f) => '/opt/mayplane-migrations/' + data.job + '/' + f,
           ),
           entries: 8,
         };
@@ -155,7 +155,7 @@ function fixture(t, scenario = 'success') {
     await engine.drain();
     store.close();
     assert.ok(
-      resolve(dir).startsWith(resolve(tmpdir()) + sep + 'ez-migration-v2-'),
+      resolve(dir).startsWith(resolve(tmpdir()) + sep + 'mayplane-migration-v2-'),
     );
     rmSync(dir, { recursive: true, force: true });
   });

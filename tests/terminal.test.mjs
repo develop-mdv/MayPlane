@@ -56,7 +56,7 @@ test('terminal: real SSH PTY, input, resize, ticket binding and disconnect clean
     );
   });
   await new Promise((r) => ssh.listen(0, '127.0.0.1', r));
-  const dir = mkdtempSync(join(tmpdir(), 'ez-terminal-'));
+  const dir = mkdtempSync(join(tmpdir(), 'mayplane-terminal-'));
   const store = openStore(dir, randomBytes(32));
   const id = randomUUID();
   const origin = 'http://localhost:3000';
@@ -105,7 +105,7 @@ test('terminal: real SSH PTY, input, resize, ticket binding and disconnect clean
   const open = (key, site = origin, target = id) => {
     const ws = new WebSocket(
       base.replace('http', 'ws') + `/api/servers/${target}/terminal`,
-      ['ezdeploy-terminal', key],
+      ['mayplane-terminal', key],
       { origin: site },
     );
     sockets.push(ws);

@@ -24,7 +24,7 @@ const transfer = (provider, id, operation, value) =>
   );
 export async function removeBrokerProfile(provider, id) {
   profileId(id);
-  const base = resolve(os.homedir(), '.ezdeploy', 'agent-profiles', provider);
+  const base = resolve(os.homedir(), '.mayplane', 'agent-profiles', provider);
   const target = resolve(profilePaths(provider, id).root);
   assert(relative(base, target) === id, 'Некорректный каталог авторизации');
   await rm(target, {
@@ -82,7 +82,7 @@ export async function codexBroker(id, auth, onLogin) {
   });
   try {
     await rpc.request('initialize', {
-      clientInfo: { name: 'ezdeploy_accounts', version: '0.3.0' },
+      clientInfo: { name: 'mayplane_accounts', version: '0.3.0' },
     });
     rpc.notify('initialized');
   } catch (error) {

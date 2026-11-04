@@ -1653,7 +1653,7 @@ function ConnectionForm({ ws, onDone }: { ws: Workspace; onDone: () => void }) {
           type="password"
           name="token"
           autoComplete="off"
-          placeholder="EZDEPLOY_TOKEN"
+          placeholder="MAYPLANE_TOKEN"
           required
           minLength={32}
         />
@@ -2305,7 +2305,7 @@ function ProjectDetailBody({
           </p>
           <div className="inline-notice">
             У исполнителя должны быть публичный HTTPS-адрес и
-            EZDEPLOY_PUBLIC_URL. Новый секрет заменит прежний: обновите его в
+            MAYPLANE_PUBLIC_URL. Новый секрет заменит прежний: обновите его в
             GitHub.
           </div>
           <Button
@@ -2503,7 +2503,7 @@ export function LogViewer({
     );
     const a = document.createElement('a');
     a.href = url;
-    a.download = `ezdeploy-${mode === 'jobs' ? job?.id : project}.log`;
+    a.download = `mayplane-${mode === 'jobs' ? job?.id : project}.log`;
     a.click();
     setTimeout(() => URL.revokeObjectURL(url), 1000);
   }

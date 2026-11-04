@@ -166,8 +166,8 @@ function candidatePublic(c, p, store) {
         other.id !== p.id &&
         other.serverId === p.serverId &&
         (other.adoption?.resources?.some((r) => c.resources.includes(r)) ||
-          c.name === 'ez_' + other.id ||
-          c.directory === '/opt/ezdeploy/' + other.id + '/repo'),
+          c.name === 'mayplane_' + other.id ||
+          c.directory === '/opt/mayplane/' + other.id + '/repo'),
     );
   const { containers: _containers, ...data } = c;
   return { ...data, ...(linked ? { linkedProject: linked.name } : {}) };
@@ -257,7 +257,7 @@ export function createAdoption(store, overrides = {}) {
           ? ''
           : await run(
               client,
-              `# ezdeploy:discover-docker\nif command -v docker >/dev/null 2>&1; then ${bound ? `ids=${q(bound.resources.filter(dockerId).join(' '))}` : "ids=$(docker ps -aq --no-trunc | sed -n '1,150p')"}; if [ -n "$ids" ]; then docker inspect --format ${q(template)} $ids; fi; fi`,
+              `# mayplane:discover-docker\nif command -v docker >/dev/null 2>&1; then ${bound ? `ids=${q(bound.resources.filter(dockerId).join(' '))}` : "ids=$(docker ps -aq --no-trunc | sed -n '1,150p')"}; if [ -n "$ids" ]; then docker inspect --format ${q(template)} $ids; fi; fi`,
               { timeout: 20000, limit: 1500000 },
             );
       containers = linesJson(out);
@@ -270,7 +270,7 @@ export function createAdoption(store, overrides = {}) {
           ? ''
           : await run(
               client,
-              `# ezdeploy:discover-systemd\nif command -v systemctl >/dev/null 2>&1; then ${bound ? `units=${q(serviceName(bound.unit) ? bound.unit : '')}` : "units=$(systemctl list-units --type=service --all --no-pager --plain --no-legend | awk '{print $1}' | sed -n '1,150p')"}; if [ -n "$units" ]; then systemctl show --no-pager --property=Id,Description,ActiveState,SubState,MainPID,WorkingDirectory,FragmentPath,User -- $units; fi; fi`,
+              `# mayplane:discover-systemd\nif command -v systemctl >/dev/null 2>&1; then ${bound ? `units=${q(serviceName(bound.unit) ? bound.unit : '')}` : "units=$(systemctl list-units --type=service --all --no-pager --plain --no-legend | awk '{print $1}' | sed -n '1,150p')"}; if [ -n "$units" ]; then systemctl show --no-pager --property=Id,Description,ActiveState,SubState,MainPID,WorkingDirectory,FragmentPath,User -- $units; fi; fi`,
               { timeout: 20000, limit: 500000 },
             );
       units = systemdRecords(out).filter(
@@ -313,7 +313,7 @@ export function createAdoption(store, overrides = {}) {
     ) {
       const exists = await run(
         client,
-        `# ezdeploy:discover-directory\nif [ -d ${q(directory)} ]; then realpath -- ${q(directory)}; fi`,
+        `# mayplane:discover-directory\nif [ -d ${q(directory)} ]; then realpath -- ${q(directory)}; fi`,
         { timeout: 10000 },
       );
       if (exists.trim() === directory)
@@ -341,7 +341,7 @@ export function createAdoption(store, overrides = {}) {
     try {
       const out = await run(
         client,
-        `# ezdeploy:inspect-git\nif command -v git >/dev/null 2>&1 && git -C ${q(directory)} rev-parse --show-toplevel >/dev/null 2>&1; then git -C ${q(directory)} rev-parse --show-toplevel; git -C ${q(directory)} remote get-url origin 2>/dev/null || printf '\\n'; git -C ${q(directory)} symbolic-ref --short -q HEAD || printf 'HEAD\\n'; git -C ${q(directory)} rev-parse HEAD; fi`,
+        `# mayplane:inspect-git\nif command -v git >/dev/null 2>&1 && git -C ${q(directory)} rev-parse --show-toplevel >/dev/null 2>&1; then git -C ${q(directory)} rev-parse --show-toplevel; git -C ${q(directory)} remote get-url origin 2>/dev/null || printf '\\n'; git -C ${q(directory)} symbolic-ref --short -q HEAD || printf 'HEAD\\n'; git -C ${q(directory)} rev-parse HEAD; fi`,
         { timeout: 10000, limit: 12000 },
       );
       const [root, repo, branch, commit] = out.trim().split(/\r?\n/);
@@ -360,7 +360,7 @@ export function createAdoption(store, overrides = {}) {
     if (!path?.startsWith('/') || hasControl(path)) return null;
     const out = await run(
       client,
-      `# ezdeploy:read-adoption-file\nif [ -f ${q(path)} ] && [ ! -L ${q(path)} ] && [ "$(realpath -- ${q(path)})" = ${q(posix.normalize(path))} ]; then size=$(wc -c < ${q(path)}); if [ "$size" -le ${limit} ]; then printf 'FILE:'; base64 -w0 -- ${q(path)}; fi; fi`,
+      `# mayplane:read-adoption-file\nif [ -f ${q(path)} ] && [ ! -L ${q(path)} ] && [ "$(realpath -- ${q(path)})" = ${q(posix.normalize(path))} ]; then size=$(wc -c < ${q(path)}); if [ "$size" -le ${limit} ]; then printf 'FILE:'; base64 -w0 -- ${q(path)}; fi; fi`,
       { timeout: 10000, limit: limit * 2 },
     );
     return out.startsWith('FILE:')
@@ -449,7 +449,7 @@ export function createAdoption(store, overrides = {}) {
     if (['compose', 'docker'].includes(current.runtime)) {
       const raw = await run(
         client,
-        `# ezdeploy:inspect-selected-containers\ndocker inspect ${current.resources.map(q).join(' ')}`,
+        `# mayplane:inspect-selected-containers\ndocker inspect ${current.resources.map(q).join(' ')}`,
         { timeout: 20000, limit: 2000000 },
       );
       const inspected = JSON.parse(raw);
@@ -470,14 +470,14 @@ export function createAdoption(store, overrides = {}) {
     } else if (current.runtime === 'systemd') {
       configuration.unit = await run(
         client,
-        `# ezdeploy:inspect-selected-unit\nsystemctl cat -- ${q(current.unit)}`,
+        `# mayplane:inspect-selected-unit\nsystemctl cat -- ${q(current.unit)}`,
         { timeout: 10000, limit: 150000 },
       );
       if (current.pid > 1) {
         try {
           const raw = await run(
             client,
-            `# ezdeploy:inspect-selected-environment\nbase64 -w0 -- /proc/${current.pid}/environ`,
+            `# mayplane:inspect-selected-environment\nbase64 -w0 -- /proc/${current.pid}/environ`,
             { timeout: 10000, limit: 100000 },
           );
           envByService.push({
@@ -670,7 +670,7 @@ export function createAdoption(store, overrides = {}) {
         containers.every(
           (c) =>
             a.resources.includes(c.Id) &&
-            c.Config.Labels?.['ezdeploy.migration'] === a.migrationId,
+            c.Config.Labels?.['mayplane.migration'] === a.migrationId,
         ),
       'Состав перенесённых контейнеров изменился',
       409,

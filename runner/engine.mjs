@@ -322,7 +322,7 @@ export function createEngine(store, overrides = {}) {
       if (job.type === 'provision') {
         await run(
           client,
-          `. /etc/os-release; test "$ID" = ubuntu && ( test "$VERSION_ID" = 24.04 || test "$VERSION_ID" = 26.04 ) || { echo 'Поддерживается Ubuntu 24.04 или 26.04'; exit 1; }; export DEBIAN_FRONTEND=noninteractive; apt-get update; apt-get install -y docker.io docker-compose-v2 git ca-certificates tar; systemctl enable --now docker; install -d -m 700 /opt/ezdeploy /opt/ezdeploy-backups; docker compose version`,
+          `. /etc/os-release; test "$ID" = ubuntu && ( test "$VERSION_ID" = 24.04 || test "$VERSION_ID" = 26.04 ) || { echo 'Поддерживается Ubuntu 24.04 или 26.04'; exit 1; }; export DEBIAN_FRONTEND=noninteractive; apt-get update; apt-get install -y docker.io docker-compose-v2 git ca-certificates tar; systemctl enable --now docker; install -d -m 700 /opt/mayplane /opt/mayplane-backups; docker compose version`,
           { log },
         );
         Object.assign(server, await metrics(client));
@@ -337,7 +337,7 @@ export function createEngine(store, overrides = {}) {
           log('Готовим сервер: Docker, Compose и Git.');
           await run(
             client,
-            `. /etc/os-release; test "$ID" = ubuntu && ( test "$VERSION_ID" = 24.04 || test "$VERSION_ID" = 26.04 ) || { echo 'Поддерживается Ubuntu 24.04 или 26.04'; exit 1; }; export DEBIAN_FRONTEND=noninteractive; apt-get update; apt-get install -y docker.io docker-compose-v2 git ca-certificates tar; systemctl enable --now docker; install -d -m 700 /opt/ezdeploy /opt/ezdeploy-backups; docker compose version`,
+            `. /etc/os-release; test "$ID" = ubuntu && ( test "$VERSION_ID" = 24.04 || test "$VERSION_ID" = 26.04 ) || { echo 'Поддерживается Ubuntu 24.04 или 26.04'; exit 1; }; export DEBIAN_FRONTEND=noninteractive; apt-get update; apt-get install -y docker.io docker-compose-v2 git ca-certificates tar; systemctl enable --now docker; install -d -m 700 /opt/mayplane /opt/mayplane-backups; docker compose version`,
             { log },
           );
           Object.assign(server, await metrics(client));
@@ -361,10 +361,10 @@ export function createEngine(store, overrides = {}) {
           'GitHub-подключение не найдено',
         );
         if (gitConnection) repositoryName(project.repo);
-        const authPath = '/opt/ezdeploy/.auth/' + job.id;
+        const authPath = '/opt/mayplane/.auth/' + job.id;
         await run(
           client,
-          `command -v git; docker compose version; install -d -m 700 ${q(root)} /opt/ezdeploy/.auth`,
+          `command -v git; docker compose version; install -d -m 700 ${q(root)} /opt/mayplane/.auth`,
           { log },
         );
         try {

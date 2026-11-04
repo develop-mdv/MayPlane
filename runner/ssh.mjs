@@ -10,11 +10,11 @@ import { createHash } from 'node:crypto';
 import { pipeline } from 'node:stream/promises';
 import { q, assert } from './security.mjs';
 const { Client } = ssh2;
-export const rootOf = (p) => `/opt/ezdeploy/${p.id}`;
+export const rootOf = (p) => `/opt/mayplane/${p.id}`;
 export const workspaceOf = (p) =>
   posix.join(rootOf(p), 'repo', posix.dirname(p.composeFile));
 export const compose = (p) =>
-  `cd ${q(workspaceOf(p))}\ndocker compose --project-name ${q('ez_' + p.id)} --env-file .env -f ${q(posix.basename(p.composeFile))}`;
+  `cd ${q(workspaceOf(p))}\ndocker compose --project-name ${q('mayplane_' + p.id)} --env-file .env -f ${q(posix.basename(p.composeFile))}`;
 export async function fingerprint(server) {
   return new Promise((resolve, reject) => {
     const client = new Client();
@@ -106,7 +106,7 @@ export async function run(
   return new Promise((resolve, reject) => {
     // Keep timeout as the SSH session leader so SSH signals reach its process group.
     client.exec(
-      `exec timeout --signal=TERM --kill-after=10s ${Math.max(1, Math.ceil(timeout / 1000))} bash -c ${q('IFS= read -r -d "" __ezdeploy_script && eval "$__ezdeploy_script" </dev/null')}`,
+      `exec timeout --signal=TERM --kill-after=10s ${Math.max(1, Math.ceil(timeout / 1000))} bash -c ${q('IFS= read -r -d "" __mayplane_script && eval "$__mayplane_script" </dev/null')}`,
       (err, stream) => {
         if (err) return reject(signal?.aborted ? cancellationError() : err);
         let output = '',

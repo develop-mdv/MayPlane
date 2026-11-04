@@ -11,12 +11,12 @@ import { projectNamePattern, isProjectName } from '../lib/project-name.mjs';
 import { createApp } from '../runner/server.mjs';
 import { compose, rootOf } from '../runner/ssh.mjs';
 function fixture() {
-  const dir = mkdtempSync(join(tmpdir(), 'ez-instances-'));
+  const dir = mkdtempSync(join(tmpdir(), 'mayplane-instances-'));
   const key = randomBytes(32);
   const cleanup = () => {
     assert.ok(
-      resolve(dir).startsWith(resolve(tmpdir()) + '\\ez-instances-') ||
-        resolve(dir).startsWith(resolve(tmpdir()) + '/ez-instances-'),
+      resolve(dir).startsWith(resolve(tmpdir()) + '\\mayplane-instances-') ||
+        resolve(dir).startsWith(resolve(tmpdir()) + '/mayplane-instances-'),
     );
     rmSync(dir, { recursive: true, force: true });
   };
@@ -44,7 +44,7 @@ test('legacy name uniqueness migrates atomically, preserving IDs, encrypted valu
     key,
   );
   t.after(cleanup);
-  const old = new DatabaseSync(join(dir, 'ezdeploy.sqlite'));
+  const old = new DatabaseSync(join(dir, 'mayplane.sqlite'));
   old.exec(
     'CREATE TABLE servers (id TEXT PRIMARY KEY,data TEXT NOT NULL,secret TEXT NOT NULL);CREATE TABLE projects (id TEXT PRIMARY KEY,server_id TEXT NOT NULL REFERENCES servers(id),name TEXT NOT NULL UNIQUE,data TEXT NOT NULL,secret TEXT NOT NULL);CREATE TABLE jobs(id TEXT PRIMARY KEY,created_at TEXT NOT NULL,data TEXT NOT NULL);',
   );

@@ -9,7 +9,7 @@ import { configureConnectorService } from './connector-service.mjs';
 
 if (process.argv.includes('--help')) {
   console.log(
-    'ezdeploy connector\n  --url https://panel.example.com  Адрес панели\n  --pair  Подключиться с новым одноразовым кодом\n  --install-service  Включить автозапуск после подключения\n  --uninstall-service  Отключить автозапуск\n  --data-dir <path>  Отдельный профиль подключения',
+    'MayPlane connector\n  --url https://panel.example.com  Адрес панели\n  --pair  Подключиться с новым одноразовым кодом\n  --install-service  Включить автозапуск после подключения\n  --uninstall-service  Отключить автозапуск\n  --data-dir <path>  Отдельный профиль подключения',
   );
   process.exit(0);
 }
@@ -19,7 +19,7 @@ const arg = (name) => {
   return i >= 0 ? process.argv[i + 1] : undefined;
 };
 const directory =
-  arg('--data-dir') || join(os.homedir(), '.ezdeploy-connector');
+  arg('--data-dir') || join(os.homedir(), '.mayplane-connector');
 const configPath = join(directory, 'connection.json');
 if (
   process.argv.includes('--install-service') ||
@@ -84,7 +84,7 @@ function connect() {
   };
   let interval;
   socket.on('open', () => {
-    console.log('ezdeploy: защищённое соединение с панелью открыто');
+    console.log('MayPlane: защищённое соединение с панелью открыто');
     send({ type: 'metrics', metrics: localMetrics() });
     interval = setInterval(
       () => send({ type: 'metrics', metrics: localMetrics() }),

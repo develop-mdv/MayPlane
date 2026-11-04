@@ -47,11 +47,11 @@ export default defineConfig(async () => {
   // Wrangler snapshots its log path while the Cloudflare plugin is imported.
   const { cloudflare } = await import('@cloudflare/vite-plugin');
 
-  let localRunnerToken = process.env.EZDEPLOY_TOKEN;
+  let localRunnerToken = process.env.MAYPLANE_TOKEN;
   try {
     localRunnerToken ||= parseEnv(
       readFileSync('.env.runner', 'utf8'),
-    ).EZDEPLOY_TOKEN;
+    ).MAYPLANE_TOKEN;
   } catch {}
   const runnerProxy: Record<string, ProxyOptions> | undefined = localRunnerToken
     ? {
@@ -94,7 +94,7 @@ export default defineConfig(async () => {
         config: localBindingConfig,
       }),
       {
-        name: 'ezdeploy:runner-websocket-route',
+        name: 'mayplane:runner-websocket-route',
         configureServer(server: ViteDevServer) {
           if (runnerProxy) reserveRunnerUpgrades(server.httpServer);
         },

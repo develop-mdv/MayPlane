@@ -72,7 +72,7 @@ test('SSH input and shell quoting resist injected commands', () => {
   assert.equal(q("foo'bar"), "'foo'\\''bar'");
 });
 test('migration rejects data outside the project and external resources', () => {
-  const root = '/opt/ezdeploy/p1';
+  const root = '/opt/mayplane/p1';
   const safe = {
     services: {
       app: { volumes: [{ type: 'bind', source: root + '/repo/data' }] },

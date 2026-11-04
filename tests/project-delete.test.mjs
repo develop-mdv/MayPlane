@@ -8,7 +8,7 @@ import { openStore } from '../runner/store.mjs';
 import { createApp } from '../runner/server.mjs';
 
 async function fixture(t) {
-  const dir = mkdtempSync(join(tmpdir(), 'ez-panel-delete-'));
+  const dir = mkdtempSync(join(tmpdir(), 'mayplane-panel-delete-'));
   const store = openStore(dir, randomBytes(32));
   const sid = randomUUID(),
     pid = randomUUID();

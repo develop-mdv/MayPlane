@@ -175,7 +175,7 @@ export function localProcess({
     provider === 'codex' &&
     nativeDesktop === true &&
     !profileId &&
-    !process.env.EZDEPLOY_CODEX_BIN
+    !process.env.MAYPLANE_CODEX_BIN
       ? desktopCodex()
       : null;
   if (operation === 'credential-clear') {
@@ -201,7 +201,7 @@ export function localProcess({
         operation,
         args,
         undefined,
-        desktop || process.env[`EZDEPLOY_${provider.toUpperCase()}_BIN`],
+        desktop || process.env[`MAYPLANE_${provider.toUpperCase()}_BIN`],
         profileId,
       ),
     ];
@@ -259,10 +259,10 @@ export function localProcess({
     if (
       native &&
       existsSync(native) &&
-      !process.env[`EZDEPLOY_${provider.toUpperCase()}_BIN`]
+      !process.env[`MAYPLANE_${provider.toUpperCase()}_BIN`]
     )
       executable = native;
-    else if (script && !process.env[`EZDEPLOY_${provider.toUpperCase()}_BIN`]) {
+    else if (script && !process.env[`MAYPLANE_${provider.toUpperCase()}_BIN`]) {
       executable = process.execPath;
       args = [script, ...args];
     }
@@ -270,9 +270,9 @@ export function localProcess({
   if (
     process.platform === 'win32' &&
     operation !== 'install' &&
-    process.env[`EZDEPLOY_${provider.toUpperCase()}_BIN`]
+    process.env[`MAYPLANE_${provider.toUpperCase()}_BIN`]
   )
-    executable = process.env[`EZDEPLOY_${provider.toUpperCase()}_BIN`];
+    executable = process.env[`MAYPLANE_${provider.toUpperCase()}_BIN`];
   else if (desktop && process.platform === 'win32') executable = desktop;
   const env = { ...process.env, NO_COLOR: '1' };
   if (profileId) {
@@ -305,7 +305,7 @@ export function localProcess({
     env.OPENCODE_PERMISSION = JSON.stringify({ '*': 'ask' });
   // Infrastructure credentials never enter the agent environment.
   for (const name of Object.keys(env))
-    if (/^(EZDEPLOY_|ALLOWED_ORIGINS$)/.test(name)) delete env[name];
+    if (/^(MAYPLANE_|ALLOWED_ORIGINS$)/.test(name)) delete env[name];
   const child = spawn(executable, args, {
     cwd: cwd || os.homedir(),
     env,

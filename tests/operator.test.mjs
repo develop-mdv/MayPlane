@@ -16,16 +16,16 @@ import {
 
 const recipe = {
   summary: 'Arbitrary runtime',
-  deploy: 'custom-compiler build && systemctl start "app-$EZDEPLOY_PROJECT_ID"',
-  stop: 'systemctl stop "app-$EZDEPLOY_PROJECT_ID"',
-  remove: 'systemctl disable --now "app-$EZDEPLOY_PROJECT_ID"',
-  check: 'systemctl is-active "app-$EZDEPLOY_PROJECT_ID"',
-  logs: 'journalctl -u "app-$EZDEPLOY_PROJECT_ID" -n 50 --no-pager',
+  deploy: 'custom-compiler build && systemctl start "app-$MAYPLANE_PROJECT_ID"',
+  stop: 'systemctl stop "app-$MAYPLANE_PROJECT_ID"',
+  remove: 'systemctl disable --now "app-$MAYPLANE_PROJECT_ID"',
+  check: 'systemctl is-active "app-$MAYPLANE_PROJECT_ID"',
+  logs: 'journalctl -u "app-$MAYPLANE_PROJECT_ID" -n 50 --no-pager',
   files: { 'repo/custom.conf': 'mode=production' },
   env: [],
 };
 function fixture(t, env = 'API_TOKEN=app-secret-value') {
-  const dir = mkdtempSync(join(tmpdir(), 'ez-operator-'));
+  const dir = mkdtempSync(join(tmpdir(), 'mayplane-operator-'));
   const store = openStore(dir, randomBytes(32));
   t.after(() => {
     store.close();
@@ -341,7 +341,7 @@ test('private checkout removes temporary Git authentication before lifecycle com
     'deploy',
     () => {},
   );
-  assert.ok(f.writes.some((w) => w.path.startsWith('/opt/ezdeploy/.auth/')));
+  assert.ok(f.writes.some((w) => w.path.startsWith('/opt/mayplane/.auth/')));
   assert.ok(
     f.commands.findIndex((s) => s.startsWith('rm -f --')) <
       f.commands.findIndex((s) => s.includes(recipe.deploy)),

@@ -33,7 +33,7 @@ export function Modal({
         <DialogHeader>
           <DialogTitle>{title}</DialogTitle>
           <DialogDescription>
-            {description || 'Рабочее пространство ezdeploy'}
+            {description || 'Рабочее пространство MayPlane'}
           </DialogDescription>
         </DialogHeader>
         {children}

@@ -31,7 +31,7 @@ async function apiRequest<T>(
   });
   const result = (await response
     .json()
-    .catch(() => ({ error: 'Адрес не является API ezdeploy' }))) as T & {
+    .catch(() => ({ error: 'Адрес не является API mayplane' }))) as T & {
     error?: string;
   };
   if (!response.ok)
@@ -43,7 +43,7 @@ async function apiRequest<T>(
       !Array.isArray(state.servers) ||
       !Array.isArray(state.jobs)
     )
-      throw new Error('Адрес не является API ezdeploy');
+      throw new Error('Адрес не является API mayplane');
   }
   return result;
 }

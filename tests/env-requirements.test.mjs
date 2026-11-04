@@ -139,7 +139,7 @@ test('Compose inference respects required/default syntax, escaped variables, con
 });
 
 test('real Docker Compose uses fallback values when optional fields are left blank', (t) => {
-  const dir = mkdtempSync(join(tmpdir(), 'ez-env-defaults-'));
+  const dir = mkdtempSync(join(tmpdir(), 'mayplane-env-defaults-'));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   const p = project('ACCESS_TOKEN=synthetic-token\nPORT=\nLOG_LEVEL=\n');
   updateEnvDefinitions(p, definitions);
@@ -171,7 +171,7 @@ test('real Docker Compose uses fallback values when optional fields are left bla
 });
 
 test('owner state exposes classification without secret values; deploy accepts empty optional and rejects missing required', async (t) => {
-  const dir = mkdtempSync(join(tmpdir(), 'ez-env-api-'));
+  const dir = mkdtempSync(join(tmpdir(), 'mayplane-env-api-'));
   const store = openStore(dir, randomBytes(32));
   t.after(() => {
     store.close();

@@ -12,7 +12,7 @@ import { saveWorkflow } from '../runner/workflows.mjs';
 import { operationSignal, cancellationError } from '../runner/cancellation.mjs';
 
 function fixture() {
-  const dir = mkdtempSync(join(tmpdir(), 'ez-cancellation-'));
+  const dir = mkdtempSync(join(tmpdir(), 'mayplane-cancellation-'));
   const store = openStore(dir, randomBytes(32));
   const server = {
     id: randomUUID(),
@@ -43,7 +43,7 @@ function fixture() {
     close() {
       store.close();
       assert.ok(
-        resolve(dir).startsWith(resolve(tmpdir()) + sep + 'ez-cancellation-'),
+        resolve(dir).startsWith(resolve(tmpdir()) + sep + 'mayplane-cancellation-'),
       );
       rmSync(dir, { recursive: true, force: true });
     },
@@ -199,9 +199,9 @@ for (const workflow of [false, true])
         await started.promise;
         engine.cancel(job.id);
         await engine.drain();
-        assert.match(scripts.at(-1), /^rm -f -- '\/opt\/ezdeploy\/\.auth\//);
+        assert.match(scripts.at(-1), /^rm -f -- '\/opt\/mayplane\/\.auth\//);
         assert.equal(writes.length, 1);
-        assert.ok(writes[0].startsWith('/opt/ezdeploy/.auth/'));
+        assert.ok(writes[0].startsWith('/opt/mayplane/.auth/'));
         assert.equal(f.store.get('jobs', job.id).outcome, 'cancelled');
         assert.ok(
           !f.store

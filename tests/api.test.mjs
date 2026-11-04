@@ -9,7 +9,7 @@ import { createApp } from '../runner/server.mjs';
 import { createEngine } from '../runner/engine.mjs';
 
 test('authenticated API persists encrypted data and verifies GitHub deliveries', async (t) => {
-  const dir = mkdtempSync(join(tmpdir(), 'ezdeploy-test-'));
+  const dir = mkdtempSync(join(tmpdir(), 'mayplane-test-'));
   const key = randomBytes(32);
   const store = openStore(dir, key);
   const token = 'test-only-' + randomBytes(32).toString('hex');
@@ -100,7 +100,7 @@ test('authenticated API persists encrypted data and verifies GitHub deliveries',
     assert.deepEqual(state.projects[0].envKeys, ['TOKEN', 'PORT']);
     assert.ok(!JSON.stringify(state).includes('hidden-api-secret'));
     assert.ok(
-      !readFileSync(join(dir, 'ezdeploy.sqlite')).includes('hidden-api-secret'),
+      !readFileSync(join(dir, 'mayplane.sqlite')).includes('hidden-api-secret'),
     );
     assert.equal(
       store.get('projects', project.id).secret.env,

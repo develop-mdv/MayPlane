@@ -31,7 +31,7 @@ export async function inspectRepository(
       res = await fetcher('https://api.github.com/repos/' + name + path, {
         headers: {
           Accept: 'application/vnd.github+json',
-          'User-Agent': 'ezdeploy',
+          'User-Agent': 'mayplane',
           'X-GitHub-Api-Version': '2022-11-28',
           ...(token ? { Authorization: 'Bearer ' + token } : {}),
         },

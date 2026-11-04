@@ -229,7 +229,7 @@ export default function Dashboard() {
             <span className="brand-mark">
               <Terminal size={22} />
             </span>
-            ezdeploy<span className="brand-dot">.</span>
+            MayPlane<span className="brand-dot">.</span>
           </Link>
           <div className="workspace">
             <div className="workspace-icon">D</div>
@@ -711,7 +711,7 @@ export default function Dashboard() {
                   : 'Подключите серверную часть'}
               </h2>
               <p>
-                Исполнитель — серверная часть ezdeploy. Он подключается к вашим
+                Исполнитель — серверная часть MayPlane. Он подключается к вашим
                 VPS по SSH, собирает проекты, запускает контейнеры и передаёт
                 логи и консоль в панель. Один исполнитель управляет всеми
                 серверами.
@@ -774,7 +774,7 @@ export default function Dashboard() {
                 [
                   '04',
                   'Включите автодеплой',
-                  'Откройте проект → CI/CD. Включите автодеплой, создайте секрет и добавьте webhook в GitHub: Settings → Webhooks, тип application/json, событие Push. Исполнитель должен быть доступен GitHub по HTTPS; задайте EZDEPLOY_PUBLIC_URL.',
+                  'Откройте проект → CI/CD. Включите автодеплой, создайте секрет и добавьте webhook в GitHub: Settings → Webhooks, тип application/json, событие Push. Исполнитель должен быть доступен GitHub по HTTPS; задайте MAYPLANE_PUBLIC_URL.',
                 ],
                 [
                   '05',
@@ -784,7 +784,7 @@ export default function Dashboard() {
                 [
                   '06',
                   'Сохраните доступы',
-                  'Резервируйте .runner-data и EZDEPLOY_ENCRYPTION_KEY вместе. Без ключа нельзя расшифровать сохранённые секреты.',
+                  'Резервируйте .runner-data и MAYPLANE_ENCRYPTION_KEY вместе. Без ключа нельзя расшифровать сохранённые секреты.',
                 ],
               ].map(([n, t, d]) => (
                 <section className="help-card" key={n}>
@@ -796,7 +796,7 @@ export default function Dashboard() {
             </div>
           )}
           <footer className="page-footer">
-            <span>ezdeploy · меньше рутины, больше кода</span>
+            <span>MayPlane · меньше рутины, больше кода</span>
             <span>
               <span className="online-dot" />
               {connection

@@ -14,7 +14,7 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: 'ezdeploy — рабочее пространство',
+  title: 'MayPlane — рабочее пространство',
   description:
     'Проекты, диалоги с Codex и OpenCode и ваши серверы в одном рабочем пространстве.',
 };

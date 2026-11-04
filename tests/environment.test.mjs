@@ -123,7 +123,7 @@ test(
   'Docker Compose receives literal field values and retains imported interpolation',
   { skip: docker.status !== 0 },
   () => {
-    const dir = mkdtempSync(join(tmpdir(), 'ezdeploy-env-compose-'));
+    const dir = mkdtempSync(join(tmpdir(), 'mayplane-env-compose-'));
     try {
       const values = [
         '$HOME ${USER} $$',
@@ -157,7 +157,7 @@ test(
         [
           'compose',
           '--project-name',
-          'ezdeploy-env-test',
+          'mayplane-env-test',
           '--env-file',
           join(dir, '.env'),
           '-f',
@@ -179,7 +179,7 @@ test(
       assert.equal(environment.ESCAPED, '$BASE');
       assert.equal(environment.MIX, '$BASE/host/edited');
     } finally {
-      assert.ok(dir.startsWith(join(tmpdir(), 'ezdeploy-env-compose-')));
+      assert.ok(dir.startsWith(join(tmpdir(), 'mayplane-env-compose-')));
       rmSync(dir, { recursive: true, force: true });
     }
   },

@@ -368,8 +368,8 @@ export function createHub(
         if (provider === 'codex') {
           await runtime.rpc.request('initialize', {
             clientInfo: {
-              name: 'ezdeploy',
-              title: 'ezdeploy',
+              name: 'mayplane',
+              title: 'mayplane',
               version: '0.2.0',
             },
             ...(accountId || session?.nativeSource
@@ -426,7 +426,7 @@ export function createHub(
           const result = await runtime.rpc.request('initialize', {
             protocolVersion: 1,
             clientCapabilities: {},
-            clientInfo: { name: 'ezdeploy', version: '0.2.0' },
+            clientInfo: { name: 'mayplane', version: '0.2.0' },
           });
           if (session) {
             assert(
