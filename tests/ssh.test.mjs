@@ -77,7 +77,7 @@ test('SSH verifies pinned host key, authenticates and captures command status', 
   }
 });
 
-for (const behavior of ['term', 'kill', 'no-exit-status'])
+for (const behavior of ['term', 'delayed-term', 'kill', 'no-exit-status'])
   test(`SSH cancellation: ${behavior}`, { timeout: 8000 }, async (t) => {
     const rsa = generateKeyPairSync('rsa', {
       modulusLength: 2048,
@@ -97,8 +97,12 @@ for (const behavior of ['term', 'kill', 'no-exit-status'])
           session.on('signal', (_accept, _reject, info) => {
             received.push(info.name);
             if (behavior === 'kill' && info.name !== 'KILL') return;
-            if (behavior !== 'no-exit-status') stream.exit(info.name);
-            stream.end();
+            const exit = () => {
+              if (behavior !== 'no-exit-status') stream.exit(info.name);
+              stream.end();
+            };
+            if (behavior === 'delayed-term') setTimeout(exit, 100);
+            else exit();
           });
           session.on('exec', (accept) => {
             stream = accept();
@@ -142,7 +146,8 @@ for (const behavior of ['term', 'kill', 'no-exit-status'])
       const result = run(client, 'long-command', {
         signal: controller.signal,
         timeout: 5000,
-        cancellationGrace: 25,
+        // Use the production grace period: a real SSH round trip and remote
+        // cleanup can exceed a 25ms test-only deadline, especially on Linux CI.
       });
       const rejection = assert.rejects(result, {
         code:
