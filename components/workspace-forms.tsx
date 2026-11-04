@@ -80,7 +80,7 @@ export function NewProject({
               <option key={m.id} value={m.id}>
                 {m.name} ·{' '}
                 {m.transport === 'local'
-                  ? 'Этот компьютер'
+                  ? 'Хост панели'
                   : m.region || m.host}
               </option>
             ))}

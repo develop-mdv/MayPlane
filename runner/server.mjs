@@ -755,7 +755,7 @@ export function createApp({
     origins,
   });
   const editServer = createServerEditor(store, engine, terminals);
-  const hub = createHub(server, store, hubOptions);
+  const hub = createHub(server, store, { publicUrl, ...hubOptions });
   server.once('close', () => hub.close());
   server.requestTimeout = 30000;
   server.headersTimeout = 10000;

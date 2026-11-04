@@ -5,6 +5,14 @@ import { createInterface } from 'node:readline/promises';
 import { WebSocket } from 'ws';
 import { localMetrics, localProcess, projectPath } from './machine-process.mjs';
 import { assert } from './security.mjs';
+import { configureConnectorService } from './connector-service.mjs';
+
+if (process.argv.includes('--help')) {
+  console.log(
+    'ezdeploy connector\n  --url https://panel.example.com  Адрес панели\n  --pair  Подключиться с новым одноразовым кодом\n  --install-service  Включить автозапуск после подключения\n  --uninstall-service  Отключить автозапуск\n  --data-dir <path>  Отдельный профиль подключения',
+  );
+  process.exit(0);
+}
 
 const arg = (name) => {
   const i = process.argv.indexOf(name);
@@ -13,12 +21,30 @@ const arg = (name) => {
 const directory =
   arg('--data-dir') || join(os.homedir(), '.ezdeploy-connector');
 const configPath = join(directory, 'connection.json');
+if (
+  process.argv.includes('--install-service') ||
+  process.argv.includes('--uninstall-service')
+) {
+  try {
+    configureConnectorService(
+      process.argv.includes('--install-service') ? 'install' : 'remove',
+      directory,
+    );
+  } catch (e) {
+    console.error(e.message);
+    process.exit(1);
+  }
+  process.exit(0);
+}
 let config;
 try {
   config = JSON.parse(readFileSync(configPath, 'utf8'));
 } catch {}
+const { connectorEndpoint } = await import('../lib/machine-connection.mjs');
 const url = new URL(
-  arg('--url') || config?.url || 'ws://127.0.0.1:8788/api/connector',
+  connectorEndpoint(
+    arg('--url') || config?.url || 'ws://127.0.0.1:8788/api/connector',
+  ),
 );
 assert(
   url.protocol === 'wss:' ||
@@ -103,6 +129,7 @@ function connect() {
           profileFormat: message.profileFormat,
           profileVendor: message.profileVendor,
           profileCredential: message.profileCredential,
+          nativeDesktop: message.nativeDesktop === true,
         });
         processes.set(message.id, childProcess);
         for (const type of ['stdout', 'stderr'])
@@ -134,7 +161,11 @@ function connect() {
     }
   });
   socket.on('error', () => {});
-  socket.on('close', () => {
+  socket.on('close', (code) => {
+    if (code === 4009) {
+      stopped = true;
+      console.log('Подключение передано другому экземпляру коннектора.');
+    }
     clearInterval(interval);
     for (const p of processes.values()) p.close();
     processes.clear();

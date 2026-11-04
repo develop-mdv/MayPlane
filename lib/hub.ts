@@ -22,6 +22,8 @@ export type AgentSession = {
   reasoning?: string;
   accountId?: string | null;
   profileId?: string;
+  nativeSource?: boolean;
+  nativeSyncedAt?: string;
   authError?: string | null;
   mode: string;
   status:
@@ -80,6 +82,8 @@ export type HubSnapshot = {
   projects: HubProject[];
   sessions: AgentSession[];
   localMachineId?: string;
+  host?: { name: string; platform: string; username: string };
+  connection?: { connectorUrl: string | null };
 };
 export type AgentAccount = {
   id: string;

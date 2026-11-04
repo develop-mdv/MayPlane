@@ -13,6 +13,7 @@ export type Server = {
   transport?: 'ssh' | 'local' | 'connector';
   platform?: string;
   homePath?: string;
+  hostname?: string;
   consoleUrl?: string;
   ipv4?: string;
   ipv6?: string;

@@ -7,7 +7,8 @@ import { projectPath } from './machine-process.mjs';
 
 export function attachConnectors(server, store) {
   const peers = new Map(),
-    pairing = new Map();
+    pairing = new Map(),
+    tickets = new Map();
   let closed = false;
   const wss = new WebSocketServer({
     noServer: true,
@@ -46,7 +47,16 @@ export function attachConnectors(server, store) {
       const id = machine?.id || randomUUID();
       const token = machine ? null : randomBytes(32).toString('base64url');
       const peer = { ws, streams: new Map(), alive: true, id };
-      peers.get(id)?.ws.close();
+      const previous = peers.get(id);
+      if (previous) {
+        for (const stream of previous.streams.values())
+          stream.events.emit(
+            'error',
+            new Error('Подключение заменено другим коннектором'),
+          );
+        previous.streams.clear();
+        previous.ws.close(4009, 'Подключение заменено');
+      }
       peers.set(id, peer);
       if (!machine)
         store.save(
@@ -69,6 +79,10 @@ export function attachConnectors(server, store) {
           { connectorToken: token },
         );
       send(ws, { type: 'paired', machineId: id, ...(token ? { token } : {}) });
+      if (pair) {
+        pair.status = 'paired';
+        pair.machineId = id;
+      }
       ws.on('pong', () => {
         peer.alive = true;
       });
@@ -114,6 +128,8 @@ export function attachConnectors(server, store) {
                 ? m.networkTx
                 : null,
             checkedAt: new Date().toISOString(),
+            hostname: String(m.hostname || '').slice(0, 200),
+            username: String(m.username || '').slice(0, 200),
           });
           if (typeof m.homePath === 'string') {
             try {
@@ -174,6 +190,8 @@ export function attachConnectors(server, store) {
   const timer = setInterval(() => {
     for (const [key, p] of pairing)
       if (p.expires < Date.now()) pairing.delete(key);
+    for (const [id, p] of tickets)
+      if (p.expires + 300000 < Date.now()) tickets.delete(id);
     for (const peer of peers.values()) {
       if (!peer.alive) peer.ws.terminate();
       else {
@@ -191,8 +209,37 @@ export function attachConnectors(server, store) {
         'Укажите имя компьютера',
       );
       const code = randomBytes(24).toString('base64url');
-      pairing.set(code, { name: name.trim(), expires: Date.now() + 300000 });
-      return { code, expiresIn: 300 };
+      const ticket = {
+        id: randomUUID(),
+        name: name.trim(),
+        expires: Date.now() + 300000,
+        status: 'pending',
+      };
+      pairing.set(code, ticket);
+      tickets.set(ticket.id, ticket);
+      return {
+        code,
+        expiresIn: 300,
+        pairingId: ticket.id,
+        expiresAt: ticket.expires,
+      };
+    },
+    pairStatus(id, cancel = false) {
+      const ticket = tickets.get(id);
+      assert(ticket, 'Подключение не найдено или истекло', 404);
+      if (
+        ticket.status === 'pending' &&
+        (cancel || ticket.expires <= Date.now())
+      ) {
+        ticket.status = cancel ? 'cancelled' : 'expired';
+        for (const [key, value] of pairing)
+          if (value === ticket) pairing.delete(key);
+      }
+      return {
+        status: ticket.status,
+        machineId: ticket.machineId || null,
+        expiresAt: ticket.expires,
+      };
     },
     connected: (id) => peers.has(id),
     revoke(id) {

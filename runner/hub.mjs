@@ -13,6 +13,8 @@ import { assert, redact } from './security.mjs';
 import { machineHome, separateServices } from './workspace-model.mjs';
 import { agentVersion, agentError } from './agent-status.mjs';
 import { createAccounts } from './accounts.mjs';
+import { connectorEndpoint } from '../lib/machine-connection.mjs';
+import { createNativeSessions } from './native-sessions.mjs';
 import {
   createModelCatalog,
   codexModels,
@@ -39,9 +41,13 @@ export function createHub(
     openProcess = machineProcess,
     resolveHome = machineHome,
     accountOptions = {},
+    publicUrl = '',
   } = {},
 ) {
   const connectors = attachConnectors(server, store);
+  const connectorUrl = publicUrl ? connectorEndpoint(publicUrl) : null;
+  const nativeSessions = createNativeSessions({ openProcess, connectors });
+  const nativeChanges = new Set();
   const runtimes = new Map(),
     tasks = new Map(),
     refreshing = new Set();
@@ -334,6 +340,7 @@ export function createHub(
           provider,
           operation: 'agent',
           cwd,
+          nativeDesktop: !!session?.nativeSource,
           ...(profileId ? { profileId } : {}),
         },
         connectors,
@@ -365,7 +372,9 @@ export function createHub(
               title: 'ezdeploy',
               version: '0.2.0',
             },
-            ...(accountId ? { capabilities: { experimentalApi: true } } : {}),
+            ...(accountId || session?.nativeSource
+              ? { capabilities: { experimentalApi: true } }
+              : {}),
           });
           runtime.rpc.notify('initialized');
           if (accountId) await accounts.authenticate(runtime.rpc, accountId);
@@ -374,7 +383,12 @@ export function createHub(
               refreshToken: false,
             });
             assert(
-              auth.account || auth.requiresOpenaiAuth === false,
+              auth.account ||
+                auth.requiresOpenaiAuth === false ||
+                (session.nativeModelProvider &&
+                  !['openai', 'openai_chatgpt_plan'].includes(
+                    session.nativeModelProvider,
+                  )),
               'Для Codex нужна авторизация. Добавьте аккаунт в Настройках и выберите его под полем сообщения.',
               403,
             );
@@ -390,6 +404,9 @@ export function createHub(
               )?.defaultReasoning;
             }
             const params = {
+              ...(session.nativeModelProvider
+                ? { modelProvider: session.nativeModelProvider }
+                : {}),
               cwd,
               approvalPolicy: 'on-request',
               sandbox:
@@ -537,7 +554,49 @@ export function createHub(
       })),
       localMachineId: store.list('servers').find((s) => s.transport === 'local')
         ?.id,
+      host: {
+        name: os.hostname(),
+        platform: process.platform,
+        username: os.userInfo().username,
+      },
+      connection: { connectorUrl },
     };
+  }
+  async function syncNative(session, allowLegacy = false, mode) {
+    assert(
+      (session.nativeSource || allowLegacy) && !session.profileId,
+      'Этот чат уже хранится в панели',
+    );
+    assert(
+      !nativeChanges.has(session.id) &&
+        !['running', 'connecting', 'approval'].includes(session.status),
+      'Дождитесь завершения работы диалога',
+      409,
+    );
+    nativeChanges.add(session.id);
+    try {
+      runtimes.get(session.id)?.rpc?.close();
+      const data = await nativeSessions.read(
+        machine(session.machineId),
+        session.provider,
+        session.nativeId,
+        session.cwd,
+      );
+      return updateSession(session.id, (s) => {
+        s.nativeSource = true;
+        s.nativeModelProvider = data.modelProvider;
+        if (s.cwd !== data.cwd) s.projectId = null;
+        s.cwd = data.cwd;
+        if (allowLegacy && s.provider === 'codex' && mode) s.mode = mode;
+        s.secret.messages = data.messages;
+        s.secret.approvals = [];
+        s.authError = null;
+        s.secret.errorMessage = null;
+        s.nativeSyncedAt = now();
+      });
+    } finally {
+      nativeChanges.delete(session.id);
+    }
   }
   async function sample(id) {
     assert(!refreshing.has(id), 'Проверка уже выполняется', 409);
@@ -695,16 +754,26 @@ export function createHub(
       send(snapshot());
       return true;
     }
-    if (path === '/api/hub/local' && method === 'POST') {
+    if (
+      ['/api/hub/local', '/api/hub/host'].includes(path) &&
+      method === 'POST'
+    ) {
+      assert(
+        body.name === undefined ||
+          (typeof body.name === 'string' &&
+            body.name.trim() &&
+            body.name.length <= 64),
+        'Название хоста: от 1 до 64 символов',
+      );
       let m = store.list('servers').find((s) => s.transport === 'local');
       if (!m) {
         m = {
           id: randomUUID(),
-          name: os.hostname(),
+          name: body.name?.trim() || `Хост панели · ${os.hostname()}`,
           host: '127.0.0.1',
           port: 0,
           username: os.userInfo().username,
-          region: 'Этот компьютер',
+          region: 'Хост панели',
           transport: 'local',
           ...localMetrics(),
         };
@@ -715,6 +784,124 @@ export function createHub(
     }
     if (path === '/api/hub/pair' && method === 'POST') {
       send(connectors.pair(body.name), 201);
+      return true;
+    }
+    const nativeMatch = path.match(
+      /^\/api\/hub\/machines\/([a-f0-9-]+)\/agents\/(codex|opencode)\/native-sessions$/,
+    );
+    if (nativeMatch && method === 'POST') {
+      const m = machine(nativeMatch[1]);
+      const result = await nativeSessions.list(m, nativeMatch[2], {
+        cursor: body.cursor || null,
+        cwd: body.cwd,
+      });
+      send({
+        ...result,
+        sessions: result.sessions.map((s) => ({
+          ...s,
+          importedSessionId:
+            sessions().find(
+              (r) =>
+                r.machineId === m.id &&
+                r.provider === nativeMatch[2] &&
+                r.nativeId === s.nativeId &&
+                r.nativeSource &&
+                !r.profileId,
+            )?.id || null,
+        })),
+      });
+      return true;
+    }
+    if (path === '/api/hub/sessions/import' && method === 'POST') {
+      assert(
+        body.mode === undefined ||
+          ['read-only', 'workspace-write'].includes(body.mode),
+        'Некорректный режим доступа',
+      );
+      const m = machine(body.machineId),
+        provider = body.provider;
+      assert(
+        body.stopped === true,
+        'Завершите активный ход в исходном приложении и подтвердите переход',
+      );
+      const key = JSON.stringify([m.id, provider, body.nativeId]);
+      assert(!nativeChanges.has(key), 'Этот диалог уже подключается', 409);
+      nativeChanges.add(key);
+      try {
+        const existing = sessions().find(
+          (s) =>
+            s.machineId === m.id &&
+            s.provider === provider &&
+            s.nativeId === body.nativeId &&
+            !s.profileId,
+        );
+        if (existing) {
+          assert(
+            !['running', 'connecting', 'approval'].includes(existing.status),
+            'Диалог уже выполняется в панели',
+            409,
+          );
+          send(
+            publicRecord(
+              await syncNative(
+                {
+                  ...load(existing.id, 'session'),
+                  cwd: body.cwd || existing.cwd,
+                },
+                true,
+                body.mode,
+              ),
+            ),
+          );
+          return true;
+        }
+        const data = await nativeSessions.read(
+          m,
+          provider,
+          body.nativeId,
+          body.cwd,
+        );
+        const samePath = (path) =>
+          m.platform === 'win32'
+            ? path?.toLowerCase() === data.cwd.toLowerCase()
+            : path === data.cwd;
+        const project = records('workspace').find(
+          (p) => p.machineId === m.id && samePath(p.path),
+        );
+        const session = {
+          id: randomUUID(),
+          recordType: 'session',
+          machineId: m.id,
+          provider,
+          projectId: project?.id || null,
+          cwd: data.cwd,
+          nativeId: data.nativeId,
+          nativeModelProvider: data.modelProvider,
+          accountId: null,
+          model: '',
+          reasoning: '',
+          mode:
+            provider === 'codex' ? body.mode || 'read-only' : 'workspace-write',
+          title: data.title,
+          customTitle: true,
+          nativeSource: true,
+          nativeSyncedAt: now(),
+          status: 'idle',
+          archived: false,
+          createdAt: now(),
+          updatedAt: now(),
+          secret: { messages: data.messages, approvals: [] },
+        };
+        save(session);
+        send(publicRecord(session), 201);
+        return true;
+      } finally {
+        nativeChanges.delete(key);
+      }
+    }
+    const pairing = path.match(/^\/api\/hub\/pair\/([a-f0-9-]+)$/);
+    if (pairing && ['GET', 'DELETE'].includes(method)) {
+      send(connectors.pairStatus(pairing[1], method === 'DELETE'));
       return true;
     }
     if (path === '/api/hub/projects' && method === 'POST') {
@@ -853,6 +1040,11 @@ export function createHub(
       send(publicRecord(session), 201);
       return true;
     }
+    const syncMatch = path.match(/^\/api\/hub\/sessions\/([a-f0-9-]+)\/sync$/);
+    if (syncMatch && method === 'POST') {
+      send(publicRecord(await syncNative(load(syncMatch[1], 'session'))));
+      return true;
+    }
     const sm = path.match(
       /^\/api\/hub\/sessions\/([a-f0-9-]+)(?:\/(message|stop|approval))?$/,
     );
@@ -871,6 +1063,11 @@ export function createHub(
         return true;
       }
       if (!sm[2] && method === 'PATCH') {
+        assert(
+          !nativeChanges.has(s.id),
+          'Дождитесь синхронизации диалога',
+          409,
+        );
         const accountChanged =
           Object.hasOwn(body, 'accountId') &&
           (body.accountId || null) !== (s.accountId || null);
@@ -905,6 +1102,7 @@ export function createHub(
             );
             s.profileId = s.id;
             s.nativeId = null;
+            s.nativeSource = false;
           }
           s.accountId = accountId;
           s.model = '';
@@ -975,6 +1173,11 @@ export function createHub(
               ? load(s.projectId, 'workspace').path
               : await resolveHome(machine(s.machineId)));
           s.projectId = target?.id || null;
+          assert(
+            !s.nativeSource || !target || target.path === oldCwd,
+            'Диалог машины продолжает работу в исходной папке. Выберите проект с той же папкой.',
+            409,
+          );
           s.cwd = target?.path || oldCwd;
           if (s.cwd !== oldCwd && s.secret.messages.length)
             s.secret.messages.push({
@@ -991,6 +1194,15 @@ export function createHub(
         return true;
       }
       if (method === 'POST' && sm[2] === 'message') {
+        assert(
+          !nativeChanges.has(s.id),
+          'Дождитесь синхронизации истории',
+          409,
+        );
+        if (s.nativeSource) {
+          await syncNative(s);
+          s.secret = load(s.id, 'session').secret;
+        }
         assert(!modelChanges.has(s.id), 'Дождитесь сохранения модели', 409);
         assert(!s.archived, 'Восстановите диалог из архива', 409);
         assert(
@@ -1396,6 +1608,7 @@ export function createHub(
     handle,
     connectors,
     close() {
+      nativeSessions.close();
       if (closed) return;
       closed = true;
       modelCatalog.close();

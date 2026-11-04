@@ -39,6 +39,7 @@ import { ServerConsole } from './server-console';
 import { agentPathSetup } from '@/lib/agent-path.mjs';
 import { networkRates } from '@/lib/network-metrics.mjs';
 import { AccountSelect } from './agent-accounts';
+import { automaticConnectorEndpoint } from '@/lib/machine-connection.mjs';
 
 const available = (s: Server) => ['online', 'needs_setup'].includes(s.status);
 const pct = (v: number | null | undefined) =>
@@ -456,130 +457,283 @@ export function PairComputer({
     [busy, setBusy] = useState(false),
     [error, setError] = useState('');
   const [expires, setExpires] = useState(0);
+  const [expiresAt, setExpiresAt] = useState(0),
+    [pairId, setPairId] = useState(''),
+    [kind, setKind] = useState('computer'),
+    [hostName, setHostName] = useState('Хост панели');
   useEffect(() => {
-    if (!expires) return;
+    if (!expiresAt) return;
     const timer = setInterval(
-      () => setExpires((v) => Math.max(0, v - 1)),
+      () => setExpires(Math.max(0, Math.ceil((expiresAt - Date.now()) / 1000))),
       1000,
     );
     return () => clearInterval(timer);
-  }, [!!expires]);
+  }, [expiresAt]);
   const [endpoint, setEndpoint] = useState('');
+  const [addressError, setAddressError] = useState('');
   useEffect(() => {
-    const url = new URL(ws.connection?.url || window.location.origin);
-    url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:';
-    url.pathname = '/api/connector';
-    setEndpoint(url.href);
-  }, [ws.connection]);
+    if (code) return;
+    try {
+      setEndpoint(
+        automaticConnectorEndpoint({
+          publicUrl: hub.data.connection?.connectorUrl,
+          apiUrl: ws.connection?.url,
+          pageOrigin: window.location.origin,
+        }),
+      );
+      setAddressError('');
+    } catch (e) {
+      setEndpoint('');
+      setAddressError((e as Error).message);
+    }
+  }, [ws.connection, hub.data.connection?.connectorUrl, code]);
+  useEffect(() => {
+    if (!pairId) return;
+    let live = true,
+      inFlight = false;
+    const poll = async () => {
+      if (inFlight) return;
+      inFlight = true;
+      try {
+        const state = await hub.api<{
+          status: string;
+          machineId: string | null;
+        }>(`/hub/pair/${pairId}`);
+        if (!live) return;
+        if (state.status === 'paired') {
+          live = false;
+          onPaired();
+          await ws.action('/hub', {}, 'GET');
+          await hub.refresh();
+        }
+      } catch (e) {
+        if (live) setError((e as Error).message);
+      } finally {
+        inFlight = false;
+      }
+    };
+    const timer = setInterval(poll, 1800);
+    void poll();
+    return () => {
+      live = false;
+      clearInterval(timer);
+    };
+  }, [pairId, hub.api, hub.refresh, onPaired, ws.action]);
   return (
     <Modal
-      title="Подключить компьютер"
+      title="Подключить машину"
       description="Windows, macOS или Linux. Исходящее подключение работает за NAT без открытых портов."
       onClose={onClose}
     >
       <div className="hub-form">
-        <div className="connection-choice">
-          <Monitor size={24} />
-          <div>
-            <strong>Этот компьютер</strong>
-            <p>Машина, на которой запущен runner панели.</p>
-          </div>
+        <div className="segmented-control">
           <button
-            className="hub-button"
-            disabled={busy}
-            onClick={async () => {
-              setBusy(true);
-              try {
-                await ws.action('/hub/local');
-                await hub.refresh();
-                onPaired();
-              } catch (e) {
-                setError((e as Error).message);
-              } finally {
-                setBusy(false);
-              }
-            }}
+            type="button"
+            className={kind === 'computer' ? 'active' : ''}
+            onClick={() => setKind('computer')}
           >
-            Добавить
+            ПК, Mac mini или локальный сервер
+          </button>
+          <button
+            type="button"
+            className={kind === 'host' ? 'active' : ''}
+            onClick={() => setKind('host')}
+          >
+            Хост панели
           </button>
         </div>
-        <div className="divider-label">или другой компьютер</div>
-        <Field label="Название">
-          <input
-            value={name}
-            onChange={(e) => setName(e.target.value)}
-            maxLength={64}
-          />
-        </Field>
-        {!code ? (
-          <button
-            className="hub-button primary"
-            disabled={busy || !name.trim()}
-            onClick={async () => {
-              setBusy(true);
-              try {
-                const r = await hub.mutate<{ code: string; expiresIn: number }>(
-                  '/pair',
-                  { name },
-                );
-                setCode(r.code);
-                setExpires(r.expiresIn);
-              } catch (e) {
-                setError((e as Error).message);
-              } finally {
-                setBusy(false);
-              }
-            }}
-          >
-            <Link2 size={16} />
-            Создать код подключения
-          </button>
+        {kind === 'host' ? (
+          <>
+            <Field label="Название хоста">
+              <input
+                value={hostName}
+                onChange={(e) => setHostName(e.target.value)}
+                maxLength={64}
+              />
+            </Field>
+            <div className="connection-choice">
+              <Monitor size={24} />
+              <div>
+                <strong>
+                  Хост панели · {hub.data.host?.name || 'сервер панели'}
+                </strong>
+                <p>
+                  На этой машине работает серверная часть панели. Агенты будут
+                  работать с её файлами, от пользователя{' '}
+                  {hub.data.host?.username || 'панели'}.
+                </p>
+              </div>
+              <button
+                className="hub-button"
+                disabled={busy || !!hub.data.localMachineId || !hostName.trim()}
+                onClick={async () => {
+                  setBusy(true);
+                  try {
+                    await ws.action('/hub/host', { name: hostName });
+                    await hub.refresh();
+                    onPaired();
+                  } catch (e) {
+                    setError((e as Error).message);
+                  } finally {
+                    setBusy(false);
+                  }
+                }}
+              >
+                {hub.data.localMachineId ? 'Уже добавлен' : 'Добавить хост'}
+              </button>
+            </div>
+            <p className="hub-note">
+              Это не компьютер, с которого открыт браузер. Если панель размещена
+              на VPS, здесь добавится VPS.
+            </p>
+          </>
         ) : (
           <>
-            <div className="pair-steps">
-              <p>
-                <b>1</b>Откройте копию ezdeploy на компьютере с Node.js 24+ и
-                установите зависимости: <code>npm ci</code>.
-              </p>
-              <p>
-                <b>2</b>Запустите коннектор. Адрес должен быть доступен с
-                компьютера.
-              </p>
+            <p className="hub-note">
+              Компьютер подключается к сайту сам. После этого его проекты,
+              агенты и локальные модели доступны из панели с любого устройства.
+              Машина должна оставаться включённой.
+            </p>
+            <Field label="Название">
+              <input
+                value={name}
+                onChange={(e) => setName(e.target.value)}
+                maxLength={64}
+              />
+            </Field>
+            <Field
+              label="Адрес подключения"
+              hint="Определён автоматически по адресу панели. Менять его вручную не нужно."
+            >
               <div className="copy-code">
-                <code>npm run connector -- --url {endpoint} --pair</code>
-                <CopyButton
-                  value={`npm run connector -- --url ${endpoint} --pair`}
+                <input
+                  aria-label="Адрес подключения компьютера"
+                  value={endpoint}
+                  readOnly
+                  disabled
+                  placeholder="Адрес подключения недоступен"
                 />
+                {!!endpoint && (
+                  <CopyButton
+                    value={endpoint}
+                    label="Скопировать адрес подключения"
+                  />
+                )}
               </div>
-              <p>
-                <b>3</b>Вставьте этот одноразовый код, когда коннектор его
-                запросит.
-              </p>
-              <div className="pair-code">
-                <code>{expires ? code : 'Код истёк'}</code>
-                {!!expires && <CopyButton value={code} />}
-              </div>
-              <small>
-                Код действует {Math.floor(expires / 60)}:
-                {String(expires % 60).padStart(2, '0')}. После подключения
-                доступ можно отозвать.
-              </small>
-            </div>
+            </Field>
+            <ErrorText error={addressError} />
             {endpoint.startsWith('ws://') && (
               <p className="hub-note">
-                Для другого компьютера укажите доступный HTTPS/WSS-адрес панели.
-                Адрес 127.0.0.1 работает только на этой машине.
+                Панель открыта локально: этот адрес работает только на том же
+                компьютере. Для другого ПК откройте панель по её доступному
+                HTTPS-адресу.
               </p>
             )}
-            <button
-              className="hub-button"
-              onClick={() => {
-                setCode('');
-                setExpires(0);
-              }}
-            >
-              Создать новый код
-            </button>
+            {!code ? (
+              <button
+                className="hub-button primary"
+                disabled={busy || !name.trim() || !endpoint || !!addressError}
+                onClick={async () => {
+                  setBusy(true);
+                  try {
+                    const r = await hub.mutate<{
+                      code: string;
+                      expiresIn: number;
+                      pairingId: string;
+                      expiresAt: number;
+                    }>('/pair', { name });
+                    setCode(r.code);
+                    setExpires(r.expiresIn);
+                    setExpiresAt(r.expiresAt);
+                    setPairId(r.pairingId);
+                  } catch (e) {
+                    setError((e as Error).message);
+                  } finally {
+                    setBusy(false);
+                  }
+                }}
+              >
+                <Link2 size={16} />
+                Создать код подключения
+              </button>
+            ) : (
+              <>
+                <div className="pair-steps">
+                  <p>
+                    <b>1</b>На подключаемой машине установите Node.js 24+ и
+                    получите коннектор:
+                  </p>
+                  <div className="copy-code">
+                    <code>
+                      git clone https://github.com/develop-mdv/ezdeploy.git
+                      <br />
+                      cd ezdeploy
+                      <br />
+                      npm ci
+                    </code>
+                    <CopyButton
+                      value={
+                        'git clone https://github.com/develop-mdv/ezdeploy.git\ncd ezdeploy\nnpm ci'
+                      }
+                    />
+                  </div>
+                  <p>
+                    <b>2</b>Запустите коннектор. Адрес должен быть доступен с
+                    компьютера.
+                  </p>
+                  <div className="copy-code">
+                    <code>npm run connector -- --url {endpoint} --pair</code>
+                    <CopyButton
+                      value={`npm run connector -- --url ${endpoint} --pair`}
+                    />
+                  </div>
+                  <p>
+                    <b>3</b>Вставьте этот одноразовый код, когда коннектор его
+                    запросит.
+                  </p>
+                  <div className="pair-code">
+                    <code>{expires ? code : 'Код истёк'}</code>
+                    {!!expires && <CopyButton value={code} />}
+                  </div>
+                  <small>
+                    Ожидаем подключение. Код действует{' '}
+                    {Math.floor(expires / 60)}:
+                    {String(expires % 60).padStart(2, '0')}. После подключения
+                    доступ можно отозвать.
+                  </small>
+                </div>
+                {endpoint.startsWith('ws://') && (
+                  <p className="hub-note">
+                    Для другого компьютера укажите доступный HTTPS/WSS-адрес
+                    панели. Адрес 127.0.0.1 работает только на этой машине.
+                  </p>
+                )}
+                <button
+                  className="hub-button"
+                  onClick={async () => {
+                    try {
+                      if (pairId)
+                        await hub.mutate(`/pair/${pairId}`, {}, 'DELETE');
+                    } catch (e) {
+                      setError((e as Error).message);
+                      return;
+                    }
+                    setCode('');
+                    setExpires(0);
+                    setExpiresAt(0);
+                    setPairId('');
+                  }}
+                >
+                  Создать новый код
+                </button>
+              </>
+            )}
+            <p className="hub-note">
+              Коннектор запускается от вашего пользователя, видит его
+              Codex/OpenCode и рабочие папки. Локальная модель подключается к
+              агенту на этом же компьютере; её API не нужно публиковать в
+              интернете.
+            </p>
           </>
         )}
         <ErrorText error={error} />
@@ -1221,12 +1375,32 @@ export function MachinesPanel({
               </p>
             </section>
           </div>
+          {machine.transport === 'connector' && (
+            <section className="detail-card">
+              <h2>Постоянное подключение</h2>
+              <p className="hub-note">
+                В каталоге ezdeploy на этой машине остановите ручной коннектор
+                (Ctrl+C) и включите автозапуск для своего пользователя. Машина
+                должна оставаться включённой.
+              </p>
+              <div className="copy-code">
+                <code>npm run connector -- --install-service</code>
+                <CopyButton value="npm run connector -- --install-service" />
+              </div>
+              <p className="hub-note">
+                Отключение:{' '}
+                <code>npm run connector -- --uninstall-service</code>.
+                Автозапуск действует после входа пользователя в ОС. Отзыв
+                доступа в панели отдельно блокирует ключ подключения.
+              </p>
+            </section>
+          )}
           <div className="section-heading">
             <div>
               <h2>Агенты на машине</h2>
               <p>Установка, личный аккаунт и готовность к работе.</p>
             </div>
-            <span className="muted">Учётные данные остаются на машине</span>
+            <span className="muted">Аккаунт панели или профиль машины</span>
           </div>
           <div className="agents-grid">
             {(['codex', 'opencode'] as const).map((p) => (
@@ -1275,7 +1449,7 @@ export function MachinesPanel({
                 disabled={!ws.connection}
               >
                 <Monitor size={16} />
-                Подключить ПК
+                Подключить машину
               </button>
               <button
                 className="hub-button primary"
@@ -1331,12 +1505,14 @@ export function MachinesPanel({
                   </div>
                   <h3>{m.name}</h3>
                   <p>
-                    {m.region || 'Свой сервер'}
+                    {m.transport === 'local'
+                      ? 'Хост панели'
+                      : m.region || 'Свой сервер'}
                     <span>·</span>
                     {m.transport === 'connector'
                       ? 'Коннектор'
                       : m.transport === 'local'
-                        ? 'Локально'
+                        ? 'На сервере панели'
                         : 'SSH'}
                   </p>
                   <code className="machine-host">
@@ -1399,7 +1575,7 @@ export function MachinesPanel({
                 onClick={onPair}
                 disabled={!ws.connection}
               >
-                Начать с этого компьютера
+                Подключить ПК или хост панели
               </button>
             </div>
           )}

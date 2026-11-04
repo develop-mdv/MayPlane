@@ -40,6 +40,7 @@ import { NewProject, SettingsPanel } from './workspace-forms';
 import { MachinesPanel, PairComputer, ServerForm } from './machines-panel';
 import { ProjectNavigation, ChatActions } from './project-navigation';
 import { ServicesPanel } from './services-panel';
+import { NativeSessionImport } from './native-session-import';
 import { CopyButton, ErrorText, Field, Modal, Submit, Toast } from './hub-ui';
 
 type View = 'chat' | 'projects' | 'services' | 'servers' | 'settings';
@@ -52,6 +53,7 @@ export default function WorkspaceMain() {
     [scope, setScope] = useState('all');
   const [newProject, setNewProject] = useState(false),
     [newSession, setNewSession] = useState(false),
+    [importSession, setImportSession] = useState(false),
     [sessionProject, setSessionProject] = useState<string | null>(null),
     [serverForm, setServerForm] = useState<Machine | 'new' | null>(null),
     [pair, setPair] = useState(false),
@@ -569,6 +571,14 @@ export default function WorkspaceMain() {
                     </button>
                   )}
                   <button
+                    className="hub-button"
+                    disabled={!connected || !ws.data.servers.length}
+                    onClick={() => setImportSession(true)}
+                  >
+                    <Monitor size={15} />
+                    Продолжить с компьютера
+                  </button>
+                  <button
                     className="hub-button primary"
                     disabled={!connected}
                     onClick={() => startSession()}
@@ -746,6 +756,17 @@ export default function WorkspaceMain() {
           }}
           onCreated={(s) => {
             setNewSession(false);
+            openSession(s);
+          }}
+        />
+      )}
+      {importSession && (
+        <NativeSessionImport
+          hub={hub}
+          machines={ws.data.servers}
+          onClose={() => setImportSession(false)}
+          onOpened={(s) => {
+            setImportSession(false);
             openSession(s);
           }}
         />

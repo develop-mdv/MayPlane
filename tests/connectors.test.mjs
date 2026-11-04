@@ -43,6 +43,14 @@ test('outbound connector pairs once, authenticates reconnect, clamps metrics, is
     paired = JSON.parse(message.toString());
   assert.equal(paired.type, 'paired');
   assert.ok(paired.token);
+  const pairingState = await (
+    await fetch(base + '/api/hub/pair/' + pair.pairingId, {
+      headers: { Authorization: `Bearer ${token}` },
+    })
+  ).json();
+  assert.equal(pairingState.status, 'paired');
+  assert.equal(pairingState.machineId, paired.machineId);
+  assert.ok(!JSON.stringify(pairingState).includes(paired.token));
   assert.ok(!JSON.stringify(store.snapshot()).includes(paired.token));
   ws.send(
     JSON.stringify({

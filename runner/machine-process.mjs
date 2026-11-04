@@ -1,4 +1,4 @@
-import { spawn } from 'node:child_process';
+import { spawn, execFileSync } from 'node:child_process';
 import { PassThrough } from 'node:stream';
 import { existsSync, statfsSync, readFileSync } from 'node:fs';
 import { dirname, join, isAbsolute, win32 } from 'node:path';
@@ -27,6 +27,44 @@ export const providers = {
     args: ['acp'],
   },
 };
+let desktopLookup;
+function desktopCodex() {
+  if (desktopLookup && desktopLookup.expires > Date.now())
+    return desktopLookup.path;
+  let path;
+  if (process.platform === 'darwin')
+    path = [
+      join(os.homedir(), 'Applications/Codex.app/Contents/Resources/codex'),
+      '/Applications/Codex.app/Contents/Resources/codex',
+    ].find(existsSync);
+  if (process.platform === 'win32')
+    try {
+      const base = execFileSync(
+        join(
+          process.env.SystemRoot || 'C:\\Windows',
+          'System32/WindowsPowerShell/v1.0/powershell.exe',
+        ),
+        [
+          '-NoProfile',
+          '-NonInteractive',
+          '-Command',
+          'Get-AppxPackage -Name OpenAI.Codex | Select-Object -ExpandProperty InstallLocation',
+        ],
+        {
+          windowsHide: true,
+          encoding: 'utf8',
+          timeout: 5000,
+          stdio: ['ignore', 'pipe', 'ignore'],
+        },
+      ).trim();
+      if (base && isAbsolute(base)) {
+        const candidate = join(base, 'app/resources/codex.exe');
+        if (existsSync(candidate)) path = candidate;
+      }
+    } catch {}
+  desktopLookup = { path, expires: Date.now() + 60000 };
+  return path;
+}
 
 export function projectPath(value, platform = 'linux') {
   assert(
@@ -114,6 +152,7 @@ export function localProcess({
   profileFormat,
   profileVendor,
   profileCredential,
+  nativeDesktop,
 }) {
   if (profileId) {
     validateProfileId(profileId);
@@ -132,6 +171,13 @@ export function localProcess({
           ? 'credential-import'
           : 'credential-clear';
   let { executable, args } = processSpec(provider, operation);
+  const desktop =
+    provider === 'codex' &&
+    nativeDesktop === true &&
+    !profileId &&
+    !process.env.EZDEPLOY_CODEX_BIN
+      ? desktopCodex()
+      : null;
   if (operation === 'credential-clear') {
     assert(
       typeof profileVendor === 'string' &&
@@ -155,7 +201,7 @@ export function localProcess({
         operation,
         args,
         undefined,
-        process.env[`EZDEPLOY_${provider.toUpperCase()}_BIN`],
+        desktop || process.env[`EZDEPLOY_${provider.toUpperCase()}_BIN`],
         profileId,
       ),
     ];
@@ -227,6 +273,7 @@ export function localProcess({
     process.env[`EZDEPLOY_${provider.toUpperCase()}_BIN`]
   )
     executable = process.env[`EZDEPLOY_${provider.toUpperCase()}_BIN`];
+  else if (desktop && process.platform === 'win32') executable = desktop;
   const env = { ...process.env, NO_COLOR: '1' };
   if (profileId) {
     for (const name of Object.keys(env))
@@ -405,6 +452,8 @@ export function localMetrics() {
     status: 'online',
     platform: os.platform(),
     homePath: os.homedir(),
+    hostname: os.hostname(),
+    username: os.userInfo().username,
     cpu,
     memory: Math.round(100 * (1 - os.freemem() / total)),
     disk,

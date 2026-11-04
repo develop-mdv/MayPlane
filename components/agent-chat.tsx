@@ -533,6 +533,31 @@ export function AgentChat({
   const messages = detail?.messages || [];
   return (
     <div className="chat-layout">
+      {session?.nativeSource && (
+        <div className="native-chat-notice">
+          <span>
+            Диалог машины · перед продолжением остановите ход в CLI или
+            приложении. История перечитывается перед отправкой.
+          </span>
+          <button
+            className="text-button"
+            disabled={sending || activeSession(live) || disabled}
+            onClick={async () => {
+              setSending(true);
+              try {
+                await hub.mutate(`/sessions/${session.id}/sync`);
+                await reload();
+              } catch (e) {
+                setError((e as Error).message);
+              } finally {
+                setSending(false);
+              }
+            }}
+          >
+            Синхронизировать
+          </button>
+        </div>
+      )}
       <div
         className="chat-scroll"
         ref={scroller}
