@@ -9,6 +9,7 @@ import { posix } from 'node:path';
 import { createHash } from 'node:crypto';
 import { pipeline } from 'node:stream/promises';
 import { q, assert } from './security.mjs';
+import { resourceMetrics, formatBytes } from '../lib/machine-metrics.mjs';
 const { Client } = ssh2;
 export const rootOf = (p) => `/opt/mayplane/${p.id}`;
 export const workspaceOf = (p) =>
@@ -290,17 +291,29 @@ export async function copyFile(source, target, path) {
 export async function metrics(client) {
   let output = await run(
     client,
-    `read _ u n s idle rest < /proc/stat; total=$(awk '/^cpu /{for(i=2;i<=NF;i++) s+=$i;print s}' /proc/stat); idle=$((idle)); sleep 1; read _ u2 n2 s2 idle2 rest2 < /proc/stat; total2=$(awk '/^cpu /{for(i=2;i<=NF;i++) s+=$i;print s}' /proc/stat); echo "CPU:$((100*(total2-total-idle2+idle)/(total2-total)))"; free -m | awk '/Mem:/{printf "MEM:%.0f\\nRAM:%s\\n",100*($2-$7)/$2,$2}'; df -P / | awk 'NR==2 {gsub("%","",$5); print "DISK:"$5}'; echo "CORES:$(nproc)"; if docker compose version >/dev/null 2>&1; then echo 'DOCKER:yes'; else echo 'DOCKER:no'; fi`,
+    `cpu_snapshot() { awk '/^cpu / {for(i=2;i<=9;i++) total+=$i; printf "%.0f %.0f\\n",total,$5+$6}' /proc/stat; }
+read total idle < <(cpu_snapshot)
+sleep 1
+read total2 idle2 < <(cpu_snapshot)
+if [ "$total2" -gt "$total" ]; then echo "CPU:$((100*(total2-total-idle2+idle)/(total2-total)))"; fi
+awk '/^MemTotal:/ {t=$2*1024} /^MemAvailable:/ {a=$2*1024;have=1} /^MemFree:/ {f=$2*1024} END {if(t>0) {if(!have)a=f; printf "MEM_TOTAL:%.0f\\nMEM_USED:%.0f\\nMEM_AVAILABLE:%.0f\\n",t,t-a,a}}' /proc/meminfo
+df -Pk / | awk 'NR==2 && $2>0 {printf "DISK_TOTAL:%.0f\\nDISK_USED:%.0f\\nDISK_AVAILABLE:%.0f\\n",$2*1024,$3*1024,$4*1024}'
+echo "CORES:$(nproc)"
+if docker compose version >/dev/null 2>&1; then echo 'DOCKER:yes'; else echo 'DOCKER:no'; fi`,
     { timeout: 20000 },
   );
   output += await run(
     client,
     `printf 'UPTIME:'; cut -d ' ' -f 1 /proc/uptime
-ip -4 -o addr show scope global 2>/dev/null | awk 'NR==1 {split($4,a,"/"); print "IPV4:"a[1]}'
-ip -6 -o addr show scope global 2>/dev/null | awk 'NR==1 {split($4,a,"/"); print "IPV6:"a[1]}'
+ip -4 -o addr show scope global 2>/dev/null | awk 'NR==1 {split($4,a,"/"); print "IPV4:"a[1]}' || true
+ip -6 -o addr show scope global 2>/dev/null | awk 'NR==1 {split($4,a,"/"); print "IPV6:"a[1]}' || true
 awk -F '[: ]+' 'NR>2 && $2!="lo" {rx+=$3;tx+=$11} END {printf "RX:%.0f\\nTX:%.0f\\n",rx,tx}' /proc/net/dev`,
     { timeout: 10000 },
   );
+  return parseMetricsOutput(output);
+}
+
+export function parseMetricsOutput(output) {
   const m = Object.fromEntries(
     output
       .trim()
@@ -310,10 +323,19 @@ awk -F '[: ]+' 'NR>2 && $2!="lo" {rx+=$3;tx+=$11} END {printf "RX:%.0f\\nTX:%.0f
         return [l.slice(0, index), l.slice(index + 1)];
       }),
   );
+  const numeric = (key) => (m[key]?.trim() ? Number(m[key]) : null);
+  const resources = resourceMetrics({
+    cpu: numeric('CPU'),
+    cpuCores: numeric('CORES'),
+    memoryTotalBytes: numeric('MEM_TOTAL'),
+    memoryUsedBytes: numeric('MEM_USED'),
+    memoryAvailableBytes: numeric('MEM_AVAILABLE'),
+    diskTotalBytes: numeric('DISK_TOTAL'),
+    diskUsedBytes: numeric('DISK_USED'),
+    diskAvailableBytes: numeric('DISK_AVAILABLE'),
+  });
   return {
-    cpu: Number(m.CPU),
-    memory: Number(m.MEM),
-    disk: Number(m.DISK),
+    ...resources,
     platform: 'linux',
     ipv4: m.IPV4 || '',
     ipv6: m.IPV6 || '',
@@ -321,7 +343,7 @@ awk -F '[: ]+' 'NR>2 && $2!="lo" {rx+=$3;tx+=$11} END {printf "RX:%.0f\\nTX:%.0f
     networkRx: m.RX === undefined ? null : Number(m.RX),
     networkTx: m.TX === undefined ? null : Number(m.TX),
     status: m.DOCKER === 'yes' ? 'online' : 'needs_setup',
-    specs: `${m.CORES} vCPU · ${Math.round(Number(m.RAM) / 1024)} GB RAM · Linux`,
+    specs: `${resources.cpuCores ?? '—'} vCPU · ${formatBytes(resources.memoryTotalBytes)} RAM · Linux`,
     checkedAt: new Date().toISOString(),
   };
 }

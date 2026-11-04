@@ -61,13 +61,23 @@ test('outbound connector pairs once, authenticates reconnect, clamps metrics, is
         memory: -3,
         disk: 42,
         specs: '8 CPU · Windows',
+        cpuCores: 8,
+        memoryTotalBytes: 8589934592,
+        memoryUsedBytes: 2147483648,
+        memoryAvailableBytes: 6442450944,
+        diskTotalBytes: 100,
+        diskUsedBytes: 101,
       },
     }),
   );
   await new Promise((r) => setTimeout(r, 40));
   const m = store.get('servers', paired.machineId);
   assert.equal(m.cpu, 100);
-  assert.equal(m.memory, 0);
+  assert.equal(m.memory, 25);
+  assert.equal(m.memoryUsedBytes, 2147483648);
+  assert.equal(m.cpuCores, 8);
+  assert.equal(m.diskUsedBytes, null);
+  assert.equal(m.history.at(-1).memoryTotalBytes, 8589934592);
   assert.equal(m.status, 'online');
   async function rejected(key, origin) {
     const socket = new WebSocket(url, {

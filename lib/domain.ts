@@ -9,6 +9,13 @@ export type Status =
   | 'offline'
   | 'needs_setup';
 export type Server = {
+  cpuCores?: number | null;
+  memoryUsedBytes?: number | null;
+  memoryTotalBytes?: number | null;
+  memoryAvailableBytes?: number | null;
+  diskUsedBytes?: number | null;
+  diskTotalBytes?: number | null;
+  diskAvailableBytes?: number | null;
   agentAccounts?: { codex?: string | null; opencode?: string | null };
   transport?: 'ssh' | 'local' | 'connector';
   platform?: string;
@@ -25,6 +32,14 @@ export type Server = {
     cpu: number | null;
     memory: number | null;
     disk: number | null;
+    cpuCores?: number | null;
+    memoryUsedBytes?: number | null;
+    memoryTotalBytes?: number | null;
+    memoryAvailableBytes?: number | null;
+    diskUsedBytes?: number | null;
+    diskTotalBytes?: number | null;
+    diskAvailableBytes?: number | null;
+    uptime?: number | null;
     networkRx?: number | null;
     networkTx?: number | null;
   }[];

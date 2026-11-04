@@ -15,6 +15,8 @@ import { agentVersion, agentError } from './agent-status.mjs';
 import { createAccounts } from './accounts.mjs';
 import { connectorEndpoint } from '../lib/machine-connection.mjs';
 import { createNativeSessions } from './native-sessions.mjs';
+import { metricSample } from '../lib/machine-metrics.mjs';
+import { createAgentLimits, sessionUsage } from './agent-limits.mjs';
 import {
   createModelCatalog,
   codexModels,
@@ -30,7 +32,7 @@ const authorizationError = (message = '') =>
 const signInHelp =
   'Сервис отклонил авторизацию. Проверьте выбранный аккаунт в настройках и повторите вход.';
 const publicRecord = (record) => {
-  const { secret, ...rest } = record;
+  const { secret: _secret, ...rest } = record;
   return rest;
 };
 
@@ -50,12 +52,19 @@ export function createHub(
   const nativeChanges = new Set();
   const runtimes = new Map(),
     tasks = new Map(),
-    refreshing = new Set();
+    refreshing = new Map();
   let closed = false;
   const modelCatalog = createModelCatalog({
     openProcess,
     connectors,
     isClosed: () => closed,
+    prepareAccount: (...args) => accounts.prepare(...args),
+    authenticateAccount: (...args) => accounts.authenticate(...args),
+    refreshAccount: (...args) => accounts.refresh(...args),
+  });
+  const agentLimits = createAgentLimits({
+    openProcess,
+    connectors,
     prepareAccount: (...args) => accounts.prepare(...args),
     authenticateAccount: (...args) => accounts.authenticate(...args),
     refreshAccount: (...args) => accounts.refresh(...args),
@@ -66,6 +75,7 @@ export function createHub(
     ...accountOptions,
     onChanged: (id) => {
       modelCatalog.invalidateAccount(id);
+      agentLimits.invalidateAccount(id);
       for (const r of runtimes.values())
         if (
           r.accountId === id &&
@@ -174,6 +184,19 @@ export function createHub(
   function onMessage(runtime, message) {
     const { method, params: p = {}, id } = message;
     if (
+      method === 'account/rateLimits/updated' &&
+      id === undefined &&
+      runtime.limitsAuthenticated
+    )
+      agentLimits.update(
+        runtime.machineId,
+        runtime.provider,
+        runtime.accountId,
+        p,
+      );
+    if (method === 'account/updated' && runtime.limitsAuthenticated)
+      agentLimits.invalidateMachine(runtime.machineId, runtime.provider);
+    if (
       method === 'account/chatgptAuthTokens/refresh' &&
       id !== undefined &&
       runtime.accountId
@@ -270,6 +293,16 @@ export function createHub(
       addMessage(sid, 'system', p.error?.message || 'Ошибка агента');
     if (method === 'session/update') {
       const u = p.update || {};
+      if (
+        u.sessionUpdate === 'usage_update' &&
+        !u._meta?.['opencode/child-session']
+      ) {
+        const usage = sessionUsage(u);
+        if (usage)
+          updateSession(sid, (s) => {
+            s.secret.usage = usage;
+          });
+      }
       if (u.sessionUpdate === 'config_option_update')
         runtime.modelState = { configOptions: u.configOptions };
       if (
@@ -378,6 +411,7 @@ export function createHub(
           });
           runtime.rpc.notify('initialized');
           if (accountId) await accounts.authenticate(runtime.rpc, accountId);
+          runtime.limitsAuthenticated = true;
           if (session) {
             const auth = await runtime.rpc.request('account/read', {
               refreshToken: false,
@@ -599,8 +633,16 @@ export function createHub(
     }
   }
   async function sample(id) {
-    assert(!refreshing.has(id), 'Проверка уже выполняется', 409);
-    refreshing.add(id);
+    if (refreshing.has(id)) return refreshing.get(id);
+    const pending = sampleMachine(id);
+    refreshing.set(id, pending);
+    try {
+      return await pending;
+    } finally {
+      if (refreshing.get(id) === pending) refreshing.delete(id);
+    }
+  }
+  async function sampleMachine(id) {
     const m = machine(id);
     const identity = (value) =>
       JSON.stringify([
@@ -635,6 +677,13 @@ export function createHub(
             'cpu',
             'memory',
             'disk',
+            'cpuCores',
+            'memoryUsedBytes',
+            'memoryTotalBytes',
+            'memoryAvailableBytes',
+            'diskUsedBytes',
+            'diskTotalBytes',
+            'diskAvailableBytes',
             'status',
             'platform',
             'ipv4',
@@ -652,14 +701,7 @@ export function createHub(
         Object.assign(current, measured);
         current.history = [
           ...(current.history || []),
-          {
-            at: current.checkedAt,
-            cpu: current.cpu,
-            memory: current.memory,
-            disk: current.disk,
-            networkRx: current.networkRx,
-            networkTx: current.networkTx,
-          },
+          metricSample(current),
         ].slice(-120);
         saveMachine(current);
       }
@@ -676,8 +718,6 @@ export function createHub(
         saveMachine(current);
       }
       throw error;
-    } finally {
-      refreshing.delete(id);
     }
   }
   async function task(m, provider, operation) {
@@ -719,6 +759,7 @@ export function createHub(
           if (r.machineId === m.id && r.provider === provider) r.rpc?.close();
         modelCatalog.invalidate(m.id, provider);
         accounts.invalidateMachine(m.id);
+        agentLimits.invalidateMachine(m.id, provider);
       }
       p.close();
     };
@@ -1057,6 +1098,7 @@ export function createHub(
             s.cwd ||
             (s.projectId ? load(s.projectId, 'workspace').path : undefined),
           messages: s.secret.messages,
+          usage: s.secret.usage || null,
           errorMessage: s.secret.errorMessage || null,
           approvals: s.secret.approvals,
         });
@@ -1445,7 +1487,7 @@ export function createHub(
       }
     }
     const am = path.match(
-      /^\/api\/hub\/machines\/([a-f0-9-]+)\/agents\/(codex|opencode)(?:\/(install|login|logout|models|account))?$/,
+      /^\/api\/hub\/machines\/([a-f0-9-]+)\/agents\/(codex|opencode)(?:\/(install|login|logout|models|limits|account))?$/,
     );
     if (am) {
       const m = machine(am[1]),
@@ -1459,10 +1501,11 @@ export function createHub(
           if (r.machineId === m.id && r.provider === provider && !r.sessionId)
             r.rpc?.close();
         modelCatalog.invalidate(m.id, provider);
+        agentLimits.invalidateMachine(m.id, provider);
         send({ ok: true, accountId });
         return true;
       }
-      if (method === 'POST' && am[3] === 'models') {
+      if (method === 'POST' && ['models', 'limits'].includes(am[3])) {
         const session = body.sessionId ? load(body.sessionId, 'session') : null;
         const project = body.projectId
           ? load(body.projectId, 'workspace')
@@ -1476,6 +1519,25 @@ export function createHub(
           !project || project.machineId === m.id,
           'Проект находится на другой машине',
         );
+        const accountId = Object.hasOwn(body, 'accountId')
+          ? body.accountId
+          : session
+            ? session.accountId || null
+            : m.agentAccounts?.[provider] || null;
+        assert(
+          accountId == null || typeof accountId === 'string',
+          'Некорректный аккаунт',
+        );
+        if (accountId) accounts.connected(accountId, provider);
+        if (am[3] === 'limits') {
+          const limits = await agentLimits.get(m, provider, {
+            accountId,
+            refresh: body.refresh === true,
+          });
+          if (accountId) accounts.connected(accountId, provider);
+          send(limits);
+          return true;
+        }
         const cwd = projectPath(
           session?.cwd || project?.path || (await resolveHome(m)),
           m.platform || 'linux',
@@ -1537,6 +1599,7 @@ export function createHub(
         const r = await (await runtimeFor(m, provider)).ready;
         await r.rpc.request('account/logout');
         r.rpc.close();
+        agentLimits.invalidateMachine(m.id, provider);
         send({ ok: true });
         return true;
       }
@@ -1562,7 +1625,12 @@ export function createHub(
       const t = tasks.get(tm[1]);
       assert(t, 'Операция не найдена. Проверьте установку на машине.', 404);
       if (method === 'GET') {
-        const { process, timer, secrets, ...data } = t;
+        const {
+          process: _process,
+          timer: _timer,
+          secrets: _secrets,
+          ...data
+        } = t;
         send(data);
         return true;
       }
@@ -1612,6 +1680,7 @@ export function createHub(
       if (closed) return;
       closed = true;
       modelCatalog.close();
+      agentLimits.close();
       accounts.close();
       clearInterval(sampler);
       for (const r of runtimes.values()) r.rpc?.close();

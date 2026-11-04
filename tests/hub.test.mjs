@@ -168,6 +168,19 @@ function fakeAgent(provider, calls, onClose = () => {}) {
               accessToken: 'must-not-leak',
             },
           });
+        else if (m.method === 'account/rateLimits/read')
+          respond({
+            rateLimits: {
+              limitId: 'codex',
+              primary: {
+                usedPercent: 25,
+                windowDurationMins: 300,
+                resetsAt: Math.floor(Date.now() / 1000) + 3600,
+              },
+              secondary: null,
+              accessToken: 'must-not-leak',
+            },
+          });
         else if (m.method === 'model/list')
           respond({
             data: m.params.cursor
@@ -327,6 +340,174 @@ async function waitFor(read, predicate) {
   }
   throw new Error('Timed out');
 }
+
+test('quota API authenticates the owner, resolves the chat account before machine defaults and keeps live updates isolated', async (t) => {
+  const f = await fixture(t, {
+    accountOptions: fakeAccountBrokers(),
+    allowAnyMachine: true,
+  });
+  const account = async (name) =>
+    (
+      await f.request('/accounts', 'POST', {
+        provider: 'codex',
+        name,
+        method: 'api',
+        apiKey: 'private-key-' + name,
+      })
+    ).json();
+  const personal = await account('Personal'),
+    work = await account('Work');
+  await f.request(`/machines/${f.machineId}/agents/codex/account`, 'POST', {
+    accountId: work.id,
+  });
+  const chat = await (
+    await f.request('/sessions', 'POST', {
+      machineId: f.machineId,
+      provider: 'codex',
+      accountId: personal.id,
+      mode: 'read-only',
+    })
+  ).json();
+  const path = `/machines/${f.machineId}/agents/codex/limits`;
+  assert.equal((await f.request(path, 'POST', {}, 'wrong')).status, 401);
+  const first = await (
+    await f.request(path, 'POST', { sessionId: chat.id })
+  ).json();
+  assert.equal(first.accountId, personal.id);
+  assert.equal(first.status, 'available');
+  assert.ok(!JSON.stringify(first).includes('must-not-leak'));
+  assert.equal(
+    (await (await f.request(path, 'POST', {})).json()).accountId,
+    work.id,
+  );
+  assert.ok(
+    !f.calls.some((c) =>
+      ['thread/start', 'turn/start', 'session/new', 'session/prompt'].includes(
+        c.method,
+      ),
+    ),
+  );
+  assert.equal(
+    (
+      await f.request(
+        `/machines/${f.machineId}/agents/opencode/limits`,
+        'POST',
+        { sessionId: chat.id },
+      )
+    ).status,
+    400,
+  );
+  const secondMachine = randomUUID();
+  f.store.save(
+    'servers',
+    { ...f.store.list('servers')[0], id: secondMachine },
+    {},
+  );
+  assert.equal(
+    (
+      await f.request(
+        `/machines/${secondMachine}/agents/codex/limits`,
+        'POST',
+        { sessionId: chat.id },
+      )
+    ).status,
+    400,
+  );
+  await f.request(`/sessions/${chat.id}/message`, 'POST', {
+    message: 'Read-only test prompt',
+  });
+  await waitFor(
+    async () => (await f.request(`/sessions/${chat.id}`)).json(),
+    (s) => s.status === 'approval',
+  );
+  f.processes
+    .at(-1)
+    .emit({
+      method: 'account/rateLimits/updated',
+      params: {
+        rateLimits: {
+          limitId: 'codex',
+          primary: {
+            usedPercent: 60,
+            windowDurationMins: 300,
+            resetsAt: Math.floor(Date.now() / 1000) + 3600,
+          },
+        },
+      },
+    });
+  assert.equal(
+    (await (await f.request(path, 'POST', { sessionId: chat.id })).json())
+      .buckets[0].primary.usedPercent,
+    60,
+  );
+  assert.equal(
+    (await (await f.request(path, 'POST', {})).json()).buckets[0].primary
+      .usedPercent,
+    25,
+  );
+});
+
+test('OpenCode context and cost updates persist privately and never masquerade as subscription quota', async (t) => {
+  const f = await fixture(t);
+  const chat = await (
+    await f.request('/sessions', 'POST', {
+      machineId: f.machineId,
+      provider: 'opencode',
+      mode: 'workspace-write',
+    })
+  ).json();
+  await f.request(`/sessions/${chat.id}/message`, 'POST', {
+    message: 'Inspect test folder',
+  });
+  await waitFor(
+    async () => (await f.request(`/sessions/${chat.id}`)).json(),
+    (s) => s.status === 'approval',
+  );
+  const agent = f.processes.at(-1);
+  agent.emit({
+    method: 'session/update',
+    params: {
+      sessionId: 'native-acp',
+      update: {
+        sessionUpdate: 'usage_update',
+        used: 1540,
+        size: 200000,
+        cost: { amount: 0.012, currency: 'USD' },
+        token: 'must-not-leak',
+      },
+    },
+  });
+  const detail = await (await f.request(`/sessions/${chat.id}`)).json();
+  assert.equal(detail.usage.used, 1540);
+  assert.equal(detail.usage.size, 200000);
+  assert.equal(detail.usage.cost.amount, 0.012);
+  const stored = f.store.db
+    .prepare('SELECT data FROM settings WHERE id=?')
+    .get(chat.id);
+  assert.ok(!stored.data.includes('0.012'));
+  agent.emit({
+    method: 'session/update',
+    params: {
+      update: {
+        sessionUpdate: 'usage_update',
+        used: 99,
+        size: 100,
+        _meta: { 'opencode/child-session': { id: 'child' } },
+      },
+    },
+  });
+  assert.equal(
+    (await (await f.request(`/sessions/${chat.id}`)).json()).usage.used,
+    1540,
+  );
+  const quota = await (
+    await f.request(`/machines/${f.machineId}/agents/opencode/limits`, 'POST', {
+      sessionId: chat.id,
+    })
+  ).json();
+  assert.equal(quota.status, 'unsupported');
+  assert.deepEqual(quota.buckets, []);
+});
 
 test('hub authenticates, pins session context and encrypts conversations; Codex approvals unblock exactly one action', async (t) => {
   const f = await fixture(t);

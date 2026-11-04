@@ -28,6 +28,7 @@ import {
 import { CopyButton, ErrorText, Field, Modal, Submit } from './hub-ui';
 import { AgentModelSelector, ChatModelSettings } from './agent-model-selector';
 import { AccountSelect } from './agent-accounts';
+import { AgentLimitsControl } from './agent-limits';
 const chatDrafts = new WeakMap<object, Map<string, string>>();
 
 export function NewSession({
@@ -212,6 +213,16 @@ export function NewSession({
             setModel(m);
             setReasoning(r);
           }}
+        />
+        <AgentLimitsControl
+          hub={hub}
+          machineId={selectedMachine?.id || ''}
+          provider={provider}
+          accountId={
+            accountChoice === '__default'
+              ? selectedMachine?.agentAccounts?.[provider] || null
+              : accountChoice || null
+          }
         />
         {provider === 'codex' ? (
           <Field label="Доступ к рабочей папке">
@@ -801,6 +812,16 @@ export function AgentChat({
                     ? 'Только чтение'
                     : 'Права по запросу'}
                 </span>
+                <AgentLimitsControl
+                  key={`${session.id}:${live?.accountId || 'native'}`}
+                  hub={hub}
+                  machineId={session.machineId}
+                  provider={session.provider}
+                  accountId={live?.accountId || null}
+                  sessionId={session.id}
+                  usage={detail?.usage}
+                  disabled={disabled}
+                />
               </div>
               {activeSession(live) ? (
                 <button

@@ -64,9 +64,42 @@ export type AgentApproval = {
   };
 };
 export type SessionDetail = AgentSession & {
+  usage?: {
+    used: number;
+    size: number;
+    cost: { amount: number; currency: string } | null;
+    updatedAt: string;
+  } | null;
   errorMessage?: string | null;
   messages: AgentMessage[];
   approvals: AgentApproval[];
+};
+export type LimitWindow = {
+  usedPercent: number;
+  windowDurationMins: number | null;
+  resetsAt: string | null;
+};
+export type AgentLimits = {
+  machineId: string;
+  provider: AgentProvider;
+  accountId: string | null;
+  status: 'available' | 'unsupported' | 'unauthenticated' | 'unavailable';
+  reason?: 'provider' | 'api-key' | 'sign-in' | 'unavailable';
+  fetchedAt: string;
+  stale?: boolean;
+  availableResets: number | null;
+  buckets: {
+    id: string;
+    name: string;
+    planType: string | null;
+    primary: LimitWindow | null;
+    secondary: LimitWindow | null;
+    credits: {
+      unlimited: boolean;
+      hasCredits: boolean | null;
+      balance: number | null;
+    } | null;
+  }[];
 };
 export type HubSnapshot = {
   accounts?: AgentAccount[];

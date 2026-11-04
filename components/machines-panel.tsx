@@ -1,5 +1,5 @@
 'use client';
-import { useEffect, useRef, useState } from 'react';
+import { lazy, Suspense, useEffect, useRef, useState } from 'react';
 import {
   Server as ServerIcon,
   Monitor,
@@ -11,9 +11,6 @@ import {
   EyeOff,
   Terminal,
   RefreshCw,
-  Cpu,
-  MemoryStick,
-  HardDrive,
   Network,
   ShieldCheck,
   Download,
@@ -37,96 +34,16 @@ import {
 import { Field, Modal, Submit, CopyButton, ErrorText } from './hub-ui';
 import { ServerConsole } from './server-console';
 import { agentPathSetup } from '@/lib/agent-path.mjs';
-import { networkRates } from '@/lib/network-metrics.mjs';
+import { formatBytes, resourceSummary } from '@/lib/machine-metrics.mjs';
+const MachineMetrics = lazy(() =>
+  import('./machine-metrics').then((m) => ({ default: m.MachineMetrics })),
+);
 import { AccountSelect } from './agent-accounts';
 import { automaticConnectorEndpoint } from '@/lib/machine-connection.mjs';
 
 const available = (s: Server) => ['online', 'needs_setup'].includes(s.status);
 const pct = (v: number | null | undefined) =>
   v == null ? '—' : `${Math.round(v)}%`;
-function Metric({
-  label,
-  value,
-  history,
-  color,
-  icon: Icon,
-  suffix = '%',
-}: {
-  label: string;
-  value: number | null | undefined;
-  history: (number | null | undefined)[];
-  color: string;
-  icon: typeof Cpu;
-  suffix?: string;
-}) {
-  const valid = history
-    .map((v, i) =>
-      v == null
-        ? null
-        : [
-            (i * 300) / Math.max(1, history.length - 1),
-            72 - Math.max(0, Math.min(100, v)) * 0.62,
-          ],
-    )
-    .filter(Boolean) as number[][];
-  const line = valid.map((p) => p.join(',')).join(' ');
-  return (
-    <div className="metric-card">
-      <div>
-        <span>
-          <Icon size={15} />
-          {label}
-        </span>
-        <strong>{value == null ? '—' : `${Math.round(value)}${suffix}`}</strong>
-      </div>
-      <svg
-        viewBox="0 0 300 80"
-        role="img"
-        aria-label={`${label}: ${value == null ? 'нет данных' : value + suffix}`}
-        preserveAspectRatio="none"
-      >
-        <defs>
-          <linearGradient id={`fill-${label}`} x1="0" y1="0" x2="0" y2="1">
-            <stop offset="0%" stopColor={color} stopOpacity=".2" />
-            <stop offset="100%" stopColor={color} stopOpacity="0" />
-          </linearGradient>
-        </defs>
-        <path
-          d="M0 20H300M0 45H300M0 70H300"
-          stroke="currentColor"
-          strokeOpacity=".06"
-          fill="none"
-        />
-        {valid.length > 1 ? (
-          <>
-            <polygon
-              points={`${valid[0][0]},80 ${line} ${valid[valid.length - 1][0]},80`}
-              fill={`url(#fill-${label})`}
-            />
-            <polyline
-              points={line}
-              fill="none"
-              stroke={color}
-              strokeWidth="2"
-              vectorEffect="non-scaling-stroke"
-            />
-          </>
-        ) : (
-          <text
-            x="150"
-            y="48"
-            textAnchor="middle"
-            fill="currentColor"
-            opacity=".4"
-            fontSize="11"
-          >
-            Накапливаем измерения
-          </text>
-        )}
-      </svg>
-    </div>
-  );
-}
 function AddressRow({ label, value }: { label: string; value?: string }) {
   return (
     <div className="address-row">
@@ -138,77 +55,6 @@ function AddressRow({ label, value }: { label: string; value?: string }) {
     </div>
   );
 }
-function NetworkMetric({
-  history,
-}: {
-  history: NonNullable<Server['history']>;
-}) {
-  const rates = networkRates(history),
-    last = rates.at(-1),
-    max = Math.max(1, ...rates.flatMap((r) => [r.rx || 0, r.tx || 0]));
-  return (
-    <div className="metric-card network-metric">
-      <div>
-        <span>
-          <Network size={15} />
-          Сеть
-        </span>
-        <strong>
-          {last?.rx == null ? '—' : `${Math.round(last.rx)} KB/s`}
-        </strong>
-      </div>
-      <svg
-        viewBox="0 0 300 80"
-        preserveAspectRatio="none"
-        role="img"
-        aria-label="Скорость входящего и исходящего трафика"
-      >
-        <path
-          d="M0 20H300M0 45H300M0 70H300"
-          stroke="currentColor"
-          strokeOpacity=".06"
-        />
-        {rates.length > 1 ? (
-          (['rx', 'tx'] as const).map((name, i) => (
-            <polyline
-              key={name}
-              points={rates
-                .map((r, index) =>
-                  r[name] == null
-                    ? ''
-                    : `${(index * 300) / Math.max(1, rates.length - 1)},${72 - ((r[name] || 0) / max) * 60}`,
-                )
-                .filter(Boolean)
-                .join(' ')}
-              stroke={i ? '#9daed9' : '#83c9c5'}
-              fill="none"
-              strokeWidth="2"
-              vectorEffect="non-scaling-stroke"
-            />
-          ))
-        ) : (
-          <text
-            x="150"
-            y="48"
-            textAnchor="middle"
-            fill="currentColor"
-            opacity=".4"
-            fontSize="11"
-          >
-            Накапливаем измерения
-          </text>
-        )}
-      </svg>
-      <div className="network-legend">
-        <span>↓ входящий</span>
-        <span>
-          ↑ {last?.tx == null ? 'нет данных' : Math.round(last.tx) + ' KB/s'}
-        </span>
-      </div>
-    </div>
-  );
-}
-
 export function ServerForm({
   ws,
   existing,
@@ -1149,7 +995,6 @@ export function MachinesPanel({
       clearInterval(timer);
     };
   }, [selectedId, api]);
-  const history = machine?.history || [];
   return (
     <div className="hub-page machines-page" ref={pageRef}>
       {machine ? (
@@ -1216,40 +1061,11 @@ export function MachinesPanel({
               )}
             </div>
           </div>
-          <div className="metrics-heading">
-            <h2>Состояние машины</h2>
-            <span>
-              <i className="live-dot" />
-              Обновление каждые 10 секунд
-              {machine.checkedAt
-                ? ` · ${new Date(machine.checkedAt).toLocaleTimeString('ru', { hour: '2-digit', minute: '2-digit', second: '2-digit' })}`
-                : ''}
-            </span>
-          </div>
-          <div className="metrics-grid">
-            <Metric
-              label="Процессор"
-              value={machine.cpu}
-              history={history.map((x) => x.cpu)}
-              color="#95d5b2"
-              icon={Cpu}
-            />
-            <Metric
-              label="Память"
-              value={machine.memory}
-              history={history.map((x) => x.memory)}
-              color="#b3acf2"
-              icon={MemoryStick}
-            />
-            <Metric
-              label="Диск"
-              value={machine.disk}
-              history={history.map((x) => x.disk)}
-              color="#e3bf89"
-              icon={HardDrive}
-            />
-            <NetworkMetric history={history} />
-          </div>
+          <Suspense
+            fallback={<p className="metrics-help">Загрузка графиков…</p>}
+          >
+            <MachineMetrics key={machine.id} machine={machine} />
+          </Suspense>
           <ErrorText error={error} />
           <div className="machine-details-grid">
             <section className="detail-card">
@@ -1346,6 +1162,37 @@ export function MachinesPanel({
                 value={machine.username || 'Владелец коннектора'}
               />
               <AddressRow
+                label="Ядра процессора"
+                value={
+                  machine.cpuCores ? `${machine.cpuCores} vCPU` : undefined
+                }
+              />
+              <AddressRow
+                label="Оперативная память"
+                value={
+                  machine.memoryTotalBytes
+                    ? formatBytes(machine.memoryTotalBytes)
+                    : undefined
+                }
+              />
+              <AddressRow
+                label="Объём диска"
+                value={
+                  machine.diskTotalBytes
+                    ? formatBytes(machine.diskTotalBytes)
+                    : undefined
+                }
+              />
+              <AddressRow
+                label="Диск измерения"
+                value={
+                  machine.transport === 'local' ||
+                  machine.transport === 'connector'
+                    ? 'Том домашней папки'
+                    : 'Корневой том /'
+                }
+              />
+              <AddressRow
                 label="Время работы"
                 value={
                   machine.uptime
@@ -1358,7 +1205,7 @@ export function MachinesPanel({
                 value={
                   machine.networkRx == null
                     ? undefined
-                    : `${(machine.networkRx / 1073741824).toFixed(2)} GB`
+                    : formatBytes(machine.networkRx)
                 }
               />
               <AddressRow
@@ -1366,7 +1213,7 @@ export function MachinesPanel({
                 value={
                   machine.networkTx == null
                     ? undefined
-                    : `${(machine.networkTx / 1073741824).toFixed(2)} GB`
+                    : formatBytes(machine.networkTx)
                 }
               />
               <p className="hub-note">
@@ -1520,15 +1367,22 @@ export function MachinesPanel({
                   </code>
                   <div className="mini-metrics">
                     {[
-                      { label: 'CPU', value: m.cpu },
-                      { label: 'RAM', value: m.memory },
-                      { label: 'Диск', value: m.disk },
+                      { label: 'CPU', value: m.cpu, kind: 'cpu' as const },
+                      {
+                        label: 'RAM',
+                        value: m.memory,
+                        kind: 'memory' as const,
+                      },
+                      { label: 'Диск', value: m.disk, kind: 'disk' as const },
                     ].map((x) => (
                       <div key={x.label}>
                         <span>
                           {x.label}
                           <b>{pct(x.value)}</b>
                         </span>
+                        <small className="mini-metric-capacity">
+                          {resourceSummary(m, x.kind)}
+                        </small>
                         <div>
                           <i
                             style={{

@@ -3,6 +3,7 @@ import { PassThrough } from 'node:stream';
 import { existsSync, statfsSync, readFileSync } from 'node:fs';
 import { dirname, join, isAbsolute, win32 } from 'node:path';
 import os from 'node:os';
+import { resourceMetrics } from '../lib/machine-metrics.mjs';
 import { connect } from './ssh.mjs';
 import { assert } from './security.mjs';
 import { posixAgentCommand } from './agent-launch.mjs';
@@ -414,6 +415,15 @@ export async function machineProcess(machine, options, connectors) {
 let previousCpu;
 export function localMetrics() {
   const total = os.totalmem();
+  let available = os.freemem();
+  if (process.platform === 'linux') {
+    try {
+      const match = readFileSync('/proc/meminfo', 'utf8').match(
+        /^MemAvailable:\s+(\d+) kB/m,
+      );
+      if (match) available = Number(match[1]) * 1024;
+    } catch {}
+  }
   const cpus = os.cpus();
   const current = cpus.reduce(
     (s, c) => ({
@@ -428,10 +438,14 @@ export function localMetrics() {
       ? Math.round(100 * (1 - (current.idle - previousCpu.idle) / elapsed))
       : null;
   previousCpu = current;
-  let disk = null;
+  let diskTotalBytes = null,
+    diskUsedBytes = null,
+    diskAvailableBytes = null;
   try {
     const fs = statfsSync(os.homedir());
-    disk = Math.round(100 * (1 - Number(fs.bavail) / Number(fs.blocks)));
+    diskTotalBytes = Number(fs.blocks) * Number(fs.bsize);
+    diskUsedBytes = (Number(fs.blocks) - Number(fs.bfree)) * Number(fs.bsize);
+    diskAvailableBytes = Number(fs.bavail) * Number(fs.bsize);
   } catch {}
   const interfaces = Object.values(os.networkInterfaces())
     .flat()
@@ -454,9 +468,16 @@ export function localMetrics() {
     homePath: os.homedir(),
     hostname: os.hostname(),
     username: os.userInfo().username,
-    cpu,
-    memory: Math.round(100 * (1 - os.freemem() / total)),
-    disk,
+    ...resourceMetrics({
+      cpu,
+      cpuCores: cpus.length,
+      memoryTotalBytes: total,
+      memoryUsedBytes: total - available,
+      memoryAvailableBytes: available,
+      diskTotalBytes,
+      diskUsedBytes,
+      diskAvailableBytes,
+    }),
     ipv4: interfaces.find((i) => i.family === 'IPv4')?.address || '',
     ipv6: interfaces.find((i) => i.family === 'IPv6')?.address || '',
     uptime: os.uptime(),

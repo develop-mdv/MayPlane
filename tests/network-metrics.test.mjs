@@ -14,4 +14,11 @@ test('network graph derives real rates and skips unavailable samples and resets'
     { rx: null, tx: null },
     { rx: null, tx: null },
   ]);
+  assert.deepEqual(
+    networkRates([
+      { at: at(0), uptime: 100, networkRx: 0, networkTx: 0 },
+      { at: at(10), uptime: 5, networkRx: 5000000, networkTx: 1000000 },
+    ]),
+    [{ rx: null, tx: null }],
+  );
 });

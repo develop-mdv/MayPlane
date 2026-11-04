@@ -1,4 +1,5 @@
 'use client';
+import { AgentLimitsControl } from './agent-limits';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   Check,
@@ -350,6 +351,16 @@ export function ChatModelSettings({
             Выбранный аккаунт получит контекст этого чата. История переписки
             сохраняется.
           </small>
+        )}
+        {open && (
+          <AgentLimitsControl
+            key={`limits:${accountId}`}
+            hub={hub}
+            machineId={session.machineId}
+            provider={session.provider}
+            accountId={accountId || null}
+            sessionId={session.id}
+          />
         )}
         {open && !accountOnly && (
           <AgentModelSelector

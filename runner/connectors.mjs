@@ -1,4 +1,5 @@
 import { randomBytes, randomUUID } from 'node:crypto';
+import { resourceMetrics, metricSample } from '../lib/machine-metrics.mjs';
 import { EventEmitter } from 'node:events';
 import { PassThrough } from 'node:stream';
 import { WebSocketServer, WebSocket } from 'ws';
@@ -103,14 +104,8 @@ export function attachConnectors(server, store) {
           const s = store.get('servers', id);
           if (!s) return ws.close();
           const m = data.metrics;
-          const pct = (value) =>
-            typeof value === 'number' && Number.isFinite(value)
-              ? Math.max(0, Math.min(100, value))
-              : null;
           Object.assign(s, {
-            cpu: pct(m.cpu),
-            memory: pct(m.memory),
-            disk: pct(m.disk),
+            ...resourceMetrics(m),
             status: 'online',
             platform: ['linux', 'darwin', 'win32'].includes(m.platform)
               ? m.platform
@@ -138,17 +133,7 @@ export function attachConnectors(server, store) {
               /* Ignore invalid connector metadata. */
             }
           }
-          s.history = [
-            ...(s.history || []),
-            {
-              at: s.checkedAt,
-              cpu: s.cpu,
-              memory: s.memory,
-              disk: s.disk,
-              networkRx: s.networkRx,
-              networkTx: s.networkTx,
-            },
-          ].slice(-120);
+          s.history = [...(s.history || []), metricSample(s)].slice(-120);
           store.save('servers', s);
         }
         const stream = peer.streams.get(data.id);
