@@ -31,11 +31,13 @@ export function ChatActions({
   onRename,
   onMove,
   onArchive,
+  onDelete,
 }: {
   session: AgentSession;
   onRename: () => void;
   onMove: () => void;
   onArchive: () => void;
+  onDelete: () => void;
 }) {
   return (
     <DropdownMenu>
@@ -57,6 +59,14 @@ export function ChatActions({
         <DropdownMenuItem onClick={onArchive} disabled={activeSession(session)}>
           <Archive />
           {session.archived ? 'Восстановить чат' : 'Архивировать чат'}
+        </DropdownMenuItem>
+        <DropdownMenuItem
+          onClick={onDelete}
+          variant="destructive"
+          disabled={activeSession(session)}
+        >
+          <Trash2 />
+          Удалить чат
         </DropdownMenuItem>
       </DropdownMenuContent>
     </DropdownMenu>
@@ -81,6 +91,7 @@ export function ProjectNavigation({
   onArchive,
   onRenameProject,
   onRemoveProject,
+  onDeleteChat,
 }: {
   projects: HubProject[];
   sessions: AgentSession[];
@@ -99,6 +110,7 @@ export function ProjectNavigation({
   onArchive: (s: AgentSession) => void;
   onRenameProject: (p: HubProject) => void;
   onRemoveProject: (p: HubProject) => void;
+  onDeleteChat: (s: AgentSession) => void;
 }) {
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
   const selectedProject = sessions.find(
@@ -147,6 +159,7 @@ export function ProjectNavigation({
           onRename={() => onRename(s)}
           onMove={() => onMove(s)}
           onArchive={() => onArchive(s)}
+          onDelete={() => onDeleteChat(s)}
         />
       </div>
     ));
@@ -220,9 +233,12 @@ export function ProjectNavigation({
                   <Pencil />
                   Переименовать проект
                 </DropdownMenuItem>
-                <DropdownMenuItem onClick={() => onRemoveProject(p)}>
+                <DropdownMenuItem
+                  variant="destructive"
+                  onClick={() => onRemoveProject(p)}
+                >
                   <Trash2 />
-                  Убрать проект из списка
+                  Удалить проект
                 </DropdownMenuItem>
               </DropdownMenuContent>
             </DropdownMenu>

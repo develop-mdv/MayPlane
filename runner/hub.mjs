@@ -18,6 +18,12 @@ import { createNativeSessions } from './native-sessions.mjs';
 import { metricSample } from '../lib/machine-metrics.mjs';
 import { createAgentLimits, sessionUsage } from './agent-limits.mjs';
 import {
+  removalPlan,
+  removalPreview,
+  assertRemovalJobs,
+  commitRemoval,
+} from './workspace-delete.mjs';
+import {
   createModelCatalog,
   codexModels,
   setAcpSelection,
@@ -50,6 +56,9 @@ export function createHub(
   const connectorUrl = publicUrl ? connectorEndpoint(publicUrl) : null;
   const nativeSessions = createNativeSessions({ openProcess, connectors });
   const nativeChanges = new Set();
+  const deletingSessions = new Set(),
+    deletingProjects = new Set(),
+    deletingMachines = new Set();
   const runtimes = new Map(),
     tasks = new Map(),
     refreshing = new Map();
@@ -103,6 +112,26 @@ export function createHub(
           : x,
       );
   const save = (record) => {
+    if (['session', 'workspace'].includes(record.recordType)) {
+      assert(
+        !deletingMachines.has(record.machineId) &&
+          store.get('servers', record.machineId),
+        'Машина удалена или удаляется',
+        409,
+      );
+      assert(
+        !deletingSessions.has(record.id) && !deletingProjects.has(record.id),
+        'Объект удаляется',
+        409,
+      );
+      if (record.projectId)
+        assert(
+          !deletingProjects.has(record.projectId) &&
+            store.get('settings', record.projectId)?.recordType === 'workspace',
+          'Проект удалён или удаляется',
+          409,
+        );
+    }
     if (record.recordType === 'session') {
       const { title, ...data } = record;
       store.save('settings', data, {
@@ -119,6 +148,11 @@ export function createHub(
     return record;
   };
   const machine = (id) => {
+    assert(
+      !deletingMachines.has(id),
+      'Машина удаляется. Дождитесь завершения.',
+      409,
+    );
     assert(typeof id === 'string' && id, 'Выберите машину', 404);
     const m = store.get('servers', id);
     assert(m, 'Машина не найдена', 404);
@@ -211,6 +245,10 @@ export function createHub(
       return;
     }
     const sid = runtime.sessionId;
+    if (!store.get('settings', sid) || deletingSessions.has(sid)) {
+      if (id !== undefined) runtime.rpc?.reject(id);
+      return;
+    }
     if (runtime.replaying) {
       if (id !== undefined) runtime.rpc.reject(id);
       return;
@@ -329,6 +367,7 @@ export function createHub(
     }
   }
   async function runtimeFor(m, provider, session) {
+    machine(m.id);
     assert(!closed, 'Исполнитель останавливается', 503);
     const accountId = session
       ? session.accountId || null
@@ -378,7 +417,7 @@ export function createHub(
         },
         connectors,
       );
-      if (closed) {
+      if (closed || !store.get('servers', m.id) || deletingMachines.has(m.id)) {
         opened.close();
         throw new Error('Исполнитель останавливается');
       }
@@ -390,7 +429,7 @@ export function createHub(
         runtimes.delete(key);
         if (runtime.releaseAccount)
           void releaseRuntime(runtime).catch(() => {});
-        if (session && !expected)
+        if (session && !expected && store.get('settings', session.id))
           updateSession(session.id, (s) => {
             if (['running', 'connecting', 'approval'].includes(s.status))
               s.status = 'interrupted';
@@ -489,7 +528,7 @@ export function createHub(
               );
           }
         }
-        if (session)
+        if (session && store.get('settings', session.id))
           updateSession(session.id, (s) => {
             s.nativeId = runtime.nativeId;
           });
@@ -788,8 +827,141 @@ export function createHub(
     t.timer.unref();
     return { id: t.id };
   }
+  async function removeObject(plan, body) {
+    assert(body.confirm === true, 'Подтвердите удаление из панели');
+    if (
+      plan.kind === 'machine' &&
+      (plan.chats.length || plan.projects.length || plan.services.length)
+    )
+      assert(
+        body.confirmName === plan.name,
+        'Введите название машины для подтверждения удаления связанных данных',
+      );
+    if (body.revision !== undefined)
+      assert(
+        body.revision === plan.revision,
+        'Состав объекта изменился. Закройте окно и подтвердите удаление заново.',
+        409,
+      );
+    const changedSessions = plan.chats;
+    assert(
+      !changedSessions.some(
+        (s) =>
+          deletingSessions.has(s.id) ||
+          nativeChanges.has(s.id) ||
+          modelChanges.has(s.id) ||
+          ['running', 'connecting', 'approval'].includes(s.status),
+      ),
+      'Сначала остановите активные чаты и дождитесь синхронизации',
+      409,
+    );
+    assert(
+      !changedSessions.some((s) => {
+        const runtime = runtimes.get(s.id);
+        return runtime && !runtime.rpc;
+      }),
+      'Дождитесь завершения подключения агента после остановки',
+      409,
+    );
+    assert(
+      !plan.projects.some((p) => deletingProjects.has(p.id)) &&
+        !deletingMachines.has(plan.id),
+      'Объект уже удаляется',
+      409,
+    );
+    assertRemovalJobs(store, plan);
+    if (plan.kind === 'machine') {
+      assert(
+        !openingTasks.has(plan.id) &&
+          ![...tasks.values()].some(
+            (t) => t.machineId === plan.id && t.status === 'running',
+          ),
+        'Сначала завершите установку или вход агента на машине',
+        409,
+      );
+      assert(
+        ![...nativeChanges].some((key) => {
+          try {
+            return JSON.parse(key)[0] === plan.id;
+          } catch {
+            return false;
+          }
+        }),
+        'Дождитесь подключения истории с машины',
+        409,
+      );
+    }
+    for (const s of changedSessions) deletingSessions.add(s.id);
+    for (const p of plan.projects) deletingProjects.add(p.id);
+    if (plan.kind === 'machine') deletingMachines.add(plan.id);
+    try {
+      for (const runtime of [...runtimes.values()].filter(
+        (r) =>
+          changedSessions.some((s) => s.id === r.sessionId) ||
+          (plan.kind === 'machine' && r.machineId === plan.id),
+      )) {
+        runtime.cancelled = true;
+        await releaseRuntime(runtime).catch(() => {});
+        runtimes.delete(runtime.key);
+      }
+      // Re-read credential targets: closing a runtime may just have saved rotated OAuth credentials.
+      const current = removalPlan(store, plan.kind, plan.id, {
+        deleteChats: plan.deleteChats,
+      });
+      assert(
+        current.revision === plan.revision,
+        'Состав объекта изменился. Закройте окно и подтвердите удаление заново.',
+        409,
+      );
+      assertRemovalJobs(store, current);
+      if (plan.kind === 'machine')
+        assert(
+          !current.targets.some((t) => t.credentialPresent) ||
+            body.allowUnclearedCredentials === true,
+          'На машине остаются копии доступа к агентам. Подключите её и отключите аккаунты либо подтвердите удаление без очистки профилей.',
+          409,
+        );
+      store.db.exec('BEGIN IMMEDIATE');
+      let result;
+      try {
+        result = commitRemoval(store, current);
+        store.db.exec('COMMIT');
+      } catch (error) {
+        store.db.exec('ROLLBACK');
+        throw error;
+      }
+      if (plan.kind === 'machine') {
+        connectors.revoke(plan.id);
+        for (const provider of ['codex', 'opencode'])
+          modelCatalog.invalidate(plan.id, provider);
+        agentLimits.invalidateMachine(plan.id);
+        accounts.invalidateMachine(plan.id);
+        for (const [id, t] of tasks)
+          if (t.machineId === plan.id) tasks.delete(id);
+      } else if (current.targets.some((t) => t.credentialPresent)) {
+        const m = store.get('servers', current.chats[0]?.machineId);
+        if (m) void accounts.cleanupMachine(m).catch(() => {});
+      }
+      return result;
+    } finally {
+      for (const s of changedSessions) deletingSessions.delete(s.id);
+      for (const p of plan.projects) deletingProjects.delete(p.id);
+      if (plan.kind === 'machine') deletingMachines.delete(plan.id);
+    }
+  }
   async function handle(path, method, body, send) {
     if (!path.startsWith('/api/hub')) return false;
+    const removal = path.match(
+      /^\/api\/hub\/removals\/(chat|project|service|machine)\/([a-f0-9-]+)$/,
+    );
+    if (removal && ['GET', 'DELETE'].includes(method)) {
+      const plan = removalPlan(store, removal[1], removal[2], {
+        deleteChats: body.deleteChats === true,
+      });
+      if (method === 'GET') send(removalPreview(plan));
+      else send(await removeObject(plan, body));
+      return true;
+    }
     if (await accounts.handle(path, method, body, send)) return true;
     if (path === '/api/hub' && method === 'GET') {
       send(snapshot());
@@ -1000,6 +1172,17 @@ export function createHub(
       return true;
     }
     if (projectMatch && method === 'DELETE') {
+      if (body.deleteChats === true) {
+        send(
+          await removeObject(
+            removalPlan(store, 'project', projectMatch[1], {
+              deleteChats: true,
+            }),
+            body,
+          ),
+        );
+        return true;
+      }
       assert(
         !sessions().some(
           (s) =>
@@ -1091,6 +1274,15 @@ export function createHub(
     );
     if (sm) {
       const s = load(sm[1], 'session');
+      assert(
+        !deletingSessions.has(s.id) && !deletingMachines.has(s.machineId),
+        'Чат удаляется',
+        409,
+      );
+      if (!sm[2] && method === 'DELETE') {
+        send(await removeObject(removalPlan(store, 'chat', s.id), body));
+        return true;
+      }
       if (!sm[2] && method === 'GET') {
         send({
           ...publicRecord(s),
@@ -1358,15 +1550,23 @@ export function createHub(
               );
               clearTimeout(r.turnTimer);
               if (r.accountId) await releaseRuntime(r);
-              updateSession(s.id, (x) => {
-                if (x.status !== 'interrupted')
-                  x.status =
-                    result.stopReason === 'cancelled' ? 'interrupted' : 'idle';
-                x.secret.approvals = [];
-              });
+              if (store.get('settings', s.id))
+                updateSession(s.id, (x) => {
+                  if (x.status !== 'interrupted')
+                    x.status =
+                      result.stopReason === 'cancelled'
+                        ? 'interrupted'
+                        : 'idle';
+                  x.secret.approvals = [];
+                });
             }
           } catch (error) {
-            if (closed) return;
+            if (
+              closed ||
+              deletingSessions.has(s.id) ||
+              !store.get('settings', s.id)
+            )
+              return;
             const failed = runtimes.get(s.id);
             if (failed?.accountId) await releaseRuntime(failed).catch(() => {});
             const stopped = load(s.id, 'session').status === 'interrupted';

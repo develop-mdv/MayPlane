@@ -3425,6 +3425,22 @@ button {
 .owner-settings .hub-form { margin-top:22px; max-width:580px; }
 .owner-settings-notice { display:block; padding:12px; border:1px solid #52765d; border-radius:8px; color:#b8e0c3; font-size:12px; }
 @media(max-width:480px) { .owner-auth-page {padding:18px;} .owner-auth-card {padding:25px 22px;} .owner-session-summary {align-items:flex-start;} }
+.remove-option {
+  display:flex;
+  align-items:flex-start;
+  gap:10px;
+  padding:14px;
+  border:1px solid #494344;
+  border-radius:9px;
+  font-size:12px;
+  line-height:1.6;
+  margin-block:14px;
+}
+.remove-option input { margin-top:4px; flex-shrink:0; accent-color:#cf9696; }
+.remove-warning { color:#e0b5a2; border-color:#6a4d3c; }
+.hub-modal .hub-button.remove-confirm { color:#ffe2e2; background:#6b3035; border-color:#91484f; }
+.hub-modal .hub-button.remove-confirm:hover { background:#813c43; }
+.hub-modal .hub-button.remove-confirm:disabled { opacity:.45; cursor:not-allowed; }
 .owner-certificate {
   display: grid;
   gap: 6px;

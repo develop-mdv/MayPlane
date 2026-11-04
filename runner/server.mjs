@@ -174,7 +174,11 @@ export function createApp({
       if (authRoute && (await auth.handle(path, req, res, body, send))) return;
       if (
         path.startsWith('/api/hub') &&
-        (await hub.handle(path, req.method, body, send))
+        (await hub.handle(path, req.method, body, (value, status) => {
+          for (const id of value?.deletedMachines || [])
+            terminals.invalidate(id);
+          send(value, status);
+        }))
       )
         return;
       if (

@@ -34,6 +34,7 @@ import {
   useHub,
   type AgentSession,
   type HubProject,
+  type RemovalTarget,
 } from '@/lib/hub';
 import { AgentChat, NewSession } from './agent-chat';
 import { NewProject, SettingsPanel } from './workspace-forms';
@@ -42,6 +43,7 @@ import { ProjectNavigation, ChatActions } from './project-navigation';
 import { ServicesPanel } from './services-panel';
 import { NativeSessionImport } from './native-session-import';
 import { CopyButton, ErrorText, Field, Modal, Submit, Toast } from './hub-ui';
+import { RemoveObject } from './remove-object';
 
 type View = 'chat' | 'projects' | 'services' | 'servers' | 'settings';
 export default function WorkspaceMain() {
@@ -72,7 +74,7 @@ export default function WorkspaceMain() {
     [editTitle, setEditTitle] = useState(''),
     [move, setMove] = useState<AgentSession | null>(null),
     [moveProject, setMoveProject] = useState(''),
-    [removeProject, setRemoveProject] = useState<HubProject | null>(null),
+    [removal, setRemoval] = useState<RemovalTarget | null>(null),
     [modalBusy, setModalBusy] = useState(false),
     [modalError, setModalError] = useState('');
   const searchInput = useRef<HTMLInputElement>(null);
@@ -156,8 +158,10 @@ export default function WorkspaceMain() {
     }
   }
   function removeFolder(p: HubProject) {
-    setRemoveProject(p);
-    setModalError('');
+    setRemoval({ kind: 'project', id: p.id, name: p.name });
+  }
+  function deleteChat(s: AgentSession) {
+    setRemoval({ kind: 'chat', id: s.id, name: s.title });
   }
   const contextPath = session?.cwd || project?.path;
   const scopeTitle =
@@ -268,6 +272,7 @@ export default function WorkspaceMain() {
           onArchive={(s) => void archiveChat(s)}
           onRenameProject={renameProject}
           onRemoveProject={removeFolder}
+          onDeleteChat={deleteChat}
         />
         <div className="sidebar-bottom">
           <div className="runner-state">
@@ -358,6 +363,7 @@ export default function WorkspaceMain() {
                   onRename={() => renameChat(session)}
                   onMove={() => moveChat(session)}
                   onArchive={() => void archiveChat(session)}
+                  onDelete={() => deleteChat(session)}
                 />
                 <button
                   className={`icon-button ${info ? 'is-active' : ''}`}
@@ -404,6 +410,9 @@ export default function WorkspaceMain() {
               onSelect={setSelectedMachine}
               onAdd={(s) => setServerForm(s || 'new')}
               onPair={() => setPair(true)}
+              onRemove={(m) =>
+                setRemoval({ kind: 'machine', id: m.id, name: m.name })
+              }
             />
           ) : view === 'settings' ? (
             <SettingsPanel ws={ws} hub={hub} />
@@ -411,6 +420,9 @@ export default function WorkspaceMain() {
             <ServicesPanel
               services={hub.data.services || []}
               machines={ws.data.servers}
+              onRemove={(s) =>
+                setRemoval({ kind: 'service', id: s.id, name: s.name })
+              }
             />
           ) : view === 'projects' ? (
             <div className="hub-page projects-page">
@@ -485,8 +497,8 @@ export default function WorkspaceMain() {
                         </button>
                         <button
                           className="icon-button"
-                          title="Убрать из списка"
-                          aria-label={`Убрать проект ${p.name}`}
+                          title="Удалить проект"
+                          aria-label={`Удалить проект ${p.name}`}
                           onClick={() => removeFolder(p)}
                         >
                           <Trash2 size={15} />
@@ -619,6 +631,7 @@ export default function WorkspaceMain() {
                         onRename={() => renameChat(s)}
                         onMove={() => moveChat(s)}
                         onArchive={() => void archiveChat(s)}
+                        onDelete={() => deleteChat(s)}
                       />
                     </article>
                   ))}
@@ -895,47 +908,29 @@ export default function WorkspaceMain() {
           </form>
         </Modal>
       )}
-      {removeProject && (
-        <Modal
-          title="Убрать проект из списка?"
-          description={`Рабочая папка ${removeProject.path} и файлы останутся на машине. Чаты сохранятся в группе «Без проекта» с прежним рабочим каталогом.`}
-          onClose={() => setRemoveProject(null)}
-        >
-          <ErrorText error={modalError} />
-          <div className="form-actions">
-            <button
-              className="hub-button"
-              onClick={() => setRemoveProject(null)}
-            >
-              Отмена
-            </button>
-            <button
-              className="hub-button"
-              disabled={modalBusy}
-              onClick={async () => {
-                setModalBusy(true);
-                setModalError('');
-                try {
-                  await hub.mutate(
-                    `/projects/${removeProject.id}`,
-                    {},
-                    'DELETE',
-                  );
-                  setRemoveProject(null);
-                  setSelectedSession(null);
-                  setScope('loose');
-                  setToast('Проект убран из списка, чаты сохранены');
-                } catch (e) {
-                  setModalError((e as Error).message);
-                } finally {
-                  setModalBusy(false);
-                }
-              }}
-            >
-              Убрать из списка
-            </button>
-          </div>
-        </Modal>
+      {removal && (
+        <RemoveObject
+          key={`${removal.kind}/${removal.id}`}
+          target={removal}
+          ws={ws}
+          hub={hub}
+          onClose={() => setRemoval(null)}
+          onRemoved={(result) => {
+            setRemoval(null);
+            if (
+              selectedSession &&
+              result.deletedChats.includes(selectedSession)
+            )
+              setSelectedSession(null);
+            if (result.deletedProjects.includes(scope)) setScope('loose');
+            if (
+              selectedMachine &&
+              result.deletedMachines.includes(selectedMachine)
+            )
+              setSelectedMachine(null);
+            setToast('Удалено из панели');
+          }}
+        />
       )}
       {search && (
         <Modal

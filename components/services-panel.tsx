@@ -1,14 +1,16 @@
 'use client';
-import { ArrowUpRight, Boxes, Monitor } from 'lucide-react';
+import { ArrowUpRight, Boxes, Monitor, Trash2 } from 'lucide-react';
 import type { HubSnapshot } from '@/lib/hub';
 import type { Server } from '@/lib/domain';
 
 export function ServicesPanel({
   services,
   machines,
+  onRemove,
 }: {
   services: HubSnapshot['services'];
   machines: Server[];
+  onRemove: (service: HubSnapshot['services'][number]) => void;
 }) {
   const labels: Record<string, string> = {
     running: 'Работает',
@@ -68,6 +70,17 @@ export function ServicesPanel({
                 </a>
               )}
               {s.domain && <p className="service-domain">{s.domain}</p>}
+              <footer>
+                <button
+                  type="button"
+                  className="hub-button danger"
+                  onClick={() => onRemove(s)}
+                  aria-label={`Удалить сервис ${s.name}`}
+                >
+                  <Trash2 size={14} />
+                  Удалить сервис
+                </button>
+              </footer>
             </article>
           ))}
         </div>

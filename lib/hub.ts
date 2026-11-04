@@ -1,5 +1,5 @@
 'use client';
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import type { Workspace } from './use-workspace';
 
 export type HubProject = {
@@ -11,6 +11,23 @@ export type HubProject = {
   createdAt: string;
 };
 export type AgentProvider = 'codex' | 'opencode';
+export type RemovalKind = 'chat' | 'project' | 'service' | 'machine';
+export type RemovalTarget = { kind: RemovalKind; id: string; name: string };
+export type RemovalPreview = RemovalTarget & {
+  revision: string;
+  projects: number;
+  chats: number;
+  services: number;
+  pendingCredentials: number;
+};
+export type RemovalResult = {
+  ok: boolean;
+  removedId: string;
+  deletedChats: string[];
+  deletedProjects: string[];
+  deletedServices: string[];
+  deletedMachines: string[];
+};
 export type AgentSession = {
   id: string;
   projectId: string | null;
@@ -183,10 +200,14 @@ export function useHub(ws: Workspace) {
   });
   const [error, setError] = useState('');
   const api = ws.api;
+  const revision = useRef(0);
   const refresh = useCallback(async () => {
+    const expected = ++revision.current;
     const next = await api<HubSnapshot>('/hub');
-    setData(next);
-    setError('');
+    if (expected === revision.current) {
+      setData(next);
+      setError('');
+    }
     return next;
   }, [api]);
   useEffect(() => {
@@ -197,9 +218,10 @@ export function useHub(ws: Workspace) {
     const poll = async () => {
       if (loading) return;
       loading = true;
+      const expected = revision.current;
       try {
         const next = await api<HubSnapshot>('/hub');
-        if (alive) {
+        if (alive && expected === revision.current) {
           setData(next);
           setError('');
         }

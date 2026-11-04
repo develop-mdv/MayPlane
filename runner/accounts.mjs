@@ -65,7 +65,8 @@ export function createAccounts(
           t.recordType === 'account_target' &&
           t.accountId === a.id &&
           t.credentialPresent &&
-          (a.status === 'disconnected' ||
+          (t.retired ||
+            a.status === 'disconnected' ||
             (a.authGeneration || 0) !== (t.authGeneration || 0)),
       ).length,
   });
@@ -455,6 +456,7 @@ export function createAccounts(
     return format;
   }
   function targetRecord(machine, profile, a, format) {
+    assert(store.get('servers', machine.id), 'Машина уже удалена', 404);
     const key = `account-target:${machine.id}:${a.provider}:${profile}`;
     const target = {
       id: key,
@@ -471,6 +473,20 @@ export function createAccounts(
     store.save('settings', target, {});
     return target;
   }
+  function clearTarget(target) {
+    const current = store.get('settings', target.id);
+    if (
+      closed ||
+      !current ||
+      !store.get('servers', target.machineId) ||
+      current.accountId !== target.accountId ||
+      (current.authGeneration || 0) !== (target.authGeneration || 0)
+    )
+      return;
+    if (current.retired)
+      store.db.prepare('DELETE FROM settings WHERE id=?').run(current.id);
+    else store.save('settings', { ...current, credentialPresent: false }, {});
+  }
   async function cleanupMachine(machine) {
     if (closed) return;
     for (const target of store
@@ -483,10 +499,22 @@ export function createAccounts(
       )) {
       const account = load(target.accountId);
       const needsCleanup = (a, t) =>
+        t.retired ||
         a.status === 'disconnected' ||
         (a.authGeneration || 0) !== (t.authGeneration || 0);
       if (!needsCleanup(account, target)) continue;
+      if (target.retired && leases.has(account.id)) continue;
       try {
+        if (
+          target.retired &&
+          account.provider === 'opencode' &&
+          account.authType === 'oauth' &&
+          account.status === 'connected' &&
+          (account.authGeneration || 0) === (target.authGeneration || 0)
+        ) {
+          await recover(account, target.id);
+          continue;
+        }
         await withProfile(target, async () => {
           const current = store.get('settings', target.id);
           if (
@@ -506,21 +534,19 @@ export function createAccounts(
             target.format,
             target.vendor,
           );
-          if (!closed) {
-            target.credentialPresent = false;
-            store.save('settings', target, {});
-          }
+          clearTarget(target);
         });
       } catch {}
     }
   }
-  async function recover(a) {
+  async function recover(a, onlyTarget) {
     for (const target of store
       .list('settings')
       .filter(
         (t) =>
           t.recordType === 'account_target' &&
           t.accountId === a.id &&
+          (!onlyTarget || t.id === onlyTarget) &&
           t.credentialPresent,
       )) {
       const machine = store.get('servers', target.machineId);
@@ -556,16 +582,19 @@ export function createAccounts(
         const contains = Array.isArray(bundle)
           ? bundle.some((e) => e.integrationID === a.vendor)
           : !!bundle?.[a.vendor];
+        const latestAccount = load(a.id);
         if (
           contains &&
-          (target.authGeneration || 0) === (a.authGeneration || 0)
+          latestAccount.status === 'connected' &&
+          (target.authGeneration || 0) === (latestAccount.authGeneration || 0)
         ) {
-          a.secret.credentials = credentialBundle(
+          latestAccount.secret.credentials = credentialBundle(
             a.vendor,
             bundle,
-            a.secret.credentials,
+            latestAccount.secret.credentials,
           );
-          save(a);
+          save(latestAccount);
+          Object.assign(a, latestAccount);
         }
         if (contains)
           await profileTransfer(
@@ -579,8 +608,7 @@ export function createAccounts(
             target.format,
             target.vendor,
           );
-        target.credentialPresent = false;
-        store.save('settings', target, {});
+        clearTarget(target);
       });
     }
   }
@@ -763,10 +791,7 @@ export function createAccounts(
               format,
               a.vendor,
             );
-            if (!closed) {
-              target.credentialPresent = false;
-              store.save('settings', target, {});
-            }
+            clearTarget(target);
           } catch {}
         if (leases.get(id) === lease) leases.delete(id);
       }

@@ -67,6 +67,7 @@ export function useWorkspace() {
   const [busy, setBusy] = useState(false);
   const [initializing, setInitializing] = useState(true);
   const generation = useRef(0);
+  const stateRevision = useRef(0);
   const request = useCallback(
     <T>(path: string, method = 'GET', body?: unknown, custom = connection) =>
       apiRequest<T>(custom, path, method, body),
@@ -106,9 +107,14 @@ export function useWorkspace() {
     const timer = setInterval(async () => {
       if (inFlight) return;
       inFlight = true;
+      const version = stateRevision.current;
       try {
         const state = await request<Snapshot>('/state');
-        if (active && expected === generation.current) {
+        if (
+          active &&
+          expected === generation.current &&
+          version === stateRevision.current
+        ) {
           setData(state);
           setError('');
         }
@@ -162,6 +168,7 @@ export function useWorkspace() {
     setBusy(true);
     try {
       const result = await request<T>(path, method, body);
+      ++stateRevision.current;
       const state = await request<Snapshot>('/state');
       if (expected !== generation.current)
         throw new Error('Подключение изменилось во время запроса');

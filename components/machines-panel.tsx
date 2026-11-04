@@ -22,6 +22,7 @@ import {
   ChevronRight,
   LoaderCircle,
   Settings2,
+  Trash2,
 } from 'lucide-react';
 import type { Server } from '@/lib/domain';
 import type { Workspace } from '@/lib/use-workspace';
@@ -943,6 +944,7 @@ export function MachinesPanel({
   onAdd,
   onPair,
   onAccounts,
+  onRemove,
 }: {
   ws: Workspace;
   hub: Hub;
@@ -951,6 +953,7 @@ export function MachinesPanel({
   onAdd: (server?: Server) => void;
   onPair: () => void;
   onAccounts: () => void;
+  onRemove: (machine: Server) => void;
 }) {
   const [consoleServer, setConsoleServer] = useState<Server | null>(null),
     [error, setError] = useState(''),
@@ -1021,6 +1024,15 @@ export function MachinesPanel({
               </p>
             </div>
             <div className="heading-actions">
+              <button
+                type="button"
+                className="hub-button danger"
+                onClick={() => onRemove(machine)}
+                aria-label={`Удалить машину ${machine.name}`}
+              >
+                <Trash2 size={15} />
+                Удалить
+              </button>
               {machine.consoleUrl && (
                 <a
                   className="hub-button"

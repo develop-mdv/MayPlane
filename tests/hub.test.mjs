@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomBytes, randomUUID } from 'node:crypto';
@@ -420,21 +420,19 @@ test('quota API authenticates the owner, resolves the chat account before machin
     async () => (await f.request(`/sessions/${chat.id}`)).json(),
     (s) => s.status === 'approval',
   );
-  f.processes
-    .at(-1)
-    .emit({
-      method: 'account/rateLimits/updated',
-      params: {
-        rateLimits: {
-          limitId: 'codex',
-          primary: {
-            usedPercent: 60,
-            windowDurationMins: 300,
-            resetsAt: Math.floor(Date.now() / 1000) + 3600,
-          },
+  f.processes.at(-1).emit({
+    method: 'account/rateLimits/updated',
+    params: {
+      rateLimits: {
+        limitId: 'codex',
+        primary: {
+          usedPercent: 60,
+          windowDurationMins: 300,
+          resetsAt: Math.floor(Date.now() / 1000) + 3600,
         },
       },
-    });
+    },
+  });
   assert.equal(
     (await (await f.request(path, 'POST', { sessionId: chat.id })).json())
       .buckets[0].primary.usedPercent,
@@ -2086,4 +2084,458 @@ test('stopping during agent initialization preserves the draft and never starts 
   assert.equal(detail.status, 'interrupted');
   assert.equal(detail.messages.length, 0);
   assert.ok(!calls.some((c) => c.method === 'turn/start'));
+});
+
+async function removal(f, kind, id, body = {}) {
+  const url = `/removals/${kind}/${id}`,
+    preview = await (await f.request(url)).json();
+  return f.request(url, 'DELETE', {
+    confirm: true,
+    revision: preview.revision,
+    confirmName: preview.name,
+    ...body,
+  });
+}
+async function deletionWorkspace(f) {
+  const project = await (
+    await f.request('/projects', 'POST', {
+      name: 'Delete test folder',
+      machineId: f.machineId,
+      path: join(f.dir, 'workspace'),
+    })
+  ).json();
+  const chat = await (
+    await f.request('/sessions', 'POST', {
+      projectId: project.id,
+      provider: 'codex',
+    })
+  ).json();
+  return { project, chat };
+}
+test('chat deletion is explicit, removes archived history from the panel and never touches project files', async (t) => {
+  const f = await fixture(t),
+    { project, chat } = await deletionWorkspace(f);
+  const file = join(f.dir, 'keep-this-file.txt');
+  writeFileSync(file, 'untouched');
+  await f.request(`/sessions/${chat.id}`, 'PATCH', { archived: true });
+  assert.equal(
+    (await f.request(`/sessions/${chat.id}`, 'DELETE', {})).status,
+    400,
+  );
+  const plan = await (await f.request(`/removals/chat/${chat.id}`)).json();
+  assert.equal(plan.chats, 1);
+  assert.equal(plan.secret, undefined);
+  assert.equal(plan.messages, undefined);
+  assert.equal((await removal(f, 'chat', chat.id)).status, 200);
+  assert.equal((await f.request(`/sessions/${chat.id}`)).status, 404);
+  assert.equal((await removal(f, 'chat', chat.id)).status, 404);
+  assert.ok(f.store.get('settings', project.id));
+  assert.equal(readFileSync(file, 'utf8'), 'untouched');
+  assert.equal(f.opened.length, 0);
+});
+test('deleting a project preserves its chats by default, including archived native history and original cwd', async (t) => {
+  const f = await fixture(t),
+    { project, chat } = await deletionWorkspace(f);
+  const full = f.store.get('settings', chat.id);
+  full.archived = true;
+  full.nativeId = 'native-keep';
+  full.secret.messages = [{ role: 'user', content: 'private history' }];
+  delete full.cwd;
+  f.store.save('settings', full);
+  assert.equal((await removal(f, 'project', project.id)).status, 200);
+  const detail = await (await f.request(`/sessions/${chat.id}`)).json();
+  assert.equal(detail.projectId, null);
+  assert.equal(detail.cwd, project.path);
+  assert.equal(detail.nativeId, 'native-keep');
+  assert.equal(detail.archived, true);
+  assert.equal(detail.messages[0].content, 'private history');
+  assert.equal(f.store.get('settings', project.id), null);
+});
+test('deleting a project together with its chats removes archived chats without touching unrelated folders', async (t) => {
+  const f = await fixture(t),
+    { project, chat } = await deletionWorkspace(f);
+  const other = await (
+    await f.request('/projects', 'POST', {
+      name: 'Other',
+      machineId: f.machineId,
+      path: join(f.dir, 'other'),
+    })
+  ).json();
+  const second = await (
+    await f.request('/sessions', 'POST', {
+      projectId: project.id,
+      provider: 'codex',
+    })
+  ).json();
+  await f.request(`/sessions/${second.id}`, 'PATCH', { archived: true });
+  const response = await removal(f, 'project', project.id, {
+    deleteChats: true,
+  });
+  assert.equal(response.status, 200);
+  assert.deepEqual(
+    new Set((await response.json()).deletedChats),
+    new Set([chat.id, second.id]),
+  );
+  assert.ok(f.store.get('settings', other.id));
+});
+test('machine removal deletes linked panel records atomically, preserves accounts and leaves other machines intact', async (t) => {
+  const f = await fixture(t),
+    { project, chat } = await deletionWorkspace(f),
+    serviceId = randomUUID(),
+    accountId = randomUUID(),
+    secondId = randomUUID();
+  f.store.save(
+    'projects',
+    {
+      id: serviceId,
+      serverId: f.machineId,
+      name: 'Running service',
+      status: 'running',
+    },
+    { env: 'PRIVATE=service-secret' },
+  );
+  f.store.save(
+    'settings',
+    {
+      id: randomUUID(),
+      recordType: 'service_context',
+      machineId: f.machineId,
+      legacyProjectId: serviceId,
+    },
+    {},
+  );
+  f.store.save(
+    'settings',
+    {
+      id: accountId,
+      recordType: 'agent_account',
+      provider: 'codex',
+      name: 'Personal',
+      status: 'connected',
+    },
+    { credentials: { OPENAI_API_KEY: 'keep-account-key' } },
+  );
+  f.store.save('servers', { id: secondId, name: 'Another server' }, {});
+  const preview = await (
+    await f.request(`/removals/machine/${f.machineId}`)
+  ).json();
+  assert.equal(preview.projects, 1);
+  assert.equal(preview.chats, 1);
+  assert.equal(preview.services, 1);
+  assert.equal(
+    (await removal(f, 'machine', f.machineId, { confirmName: 'incorrect' }))
+      .status,
+    400,
+  );
+  const response = await removal(f, 'machine', f.machineId);
+  assert.equal(response.status, 200);
+  assert.equal(f.store.get('servers', f.machineId), null);
+  assert.equal(f.store.get('settings', project.id), null);
+  assert.equal(f.store.get('settings', chat.id), null);
+  assert.equal(f.store.get('projects', serviceId), null);
+  assert.ok(f.store.get('servers', secondId));
+  assert.equal(
+    f.store.get('settings', accountId).secret.credentials.OPENAI_API_KEY,
+    'keep-account-key',
+  );
+  assert.equal(f.opened.length, 0);
+});
+test('active chats and stale confirmations block the entire removal without partially deleting related records', async (t) => {
+  const f = await fixture(t),
+    { project, chat } = await deletionWorkspace(f);
+  const url = `/removals/machine/${f.machineId}`,
+    preview = await (await f.request(url)).json();
+  await f.request('/sessions', 'POST', {
+    projectId: project.id,
+    provider: 'codex',
+  });
+  assert.equal(
+    (
+      await f.request(url, 'DELETE', {
+        confirm: true,
+        revision: preview.revision,
+        confirmName: preview.name,
+      })
+    ).status,
+    409,
+  );
+  const full = f.store.get('settings', chat.id);
+  full.status = 'approval';
+  f.store.save('settings', full);
+  assert.equal((await removal(f, 'machine', f.machineId)).status, 409);
+  assert.equal(
+    (await removal(f, 'project', project.id, { deleteChats: true })).status,
+    409,
+  );
+  assert.equal((await removal(f, 'chat', chat.id)).status, 409);
+  assert.ok(f.store.get('settings', project.id));
+  assert.ok(f.store.get('servers', f.machineId));
+});
+test('service deletion works with legacy API disabled, preserving chats, native IDs and every remote process', async (t) => {
+  const f = await fixture(t),
+    { project, chat } = await deletionWorkspace(f),
+    id = randomUUID();
+  f.store.save(
+    'projects',
+    { id, serverId: f.machineId, name: 'Service', status: 'running' },
+    { env: 'SECRET=value' },
+  );
+  const full = f.store.get('settings', chat.id);
+  full.serviceId = id;
+  full.nativeId = 'keep-native';
+  f.store.save('settings', full);
+  assert.equal((await removal(f, 'service', id)).status, 200);
+  assert.equal(f.store.get('projects', id), null);
+  assert.ok(f.store.get('settings', project.id));
+  assert.equal(f.store.get('settings', chat.id).nativeId, 'keep-native');
+  assert.equal(f.store.get('settings', chat.id).serviceId, undefined);
+  assert.equal(f.opened.length, 0);
+});
+test('machine and service removal inspect the full job journal beyond the newest 100 operations', async (t) => {
+  const f = await fixture(t),
+    id = randomUUID();
+  f.store.save(
+    'projects',
+    { id, serverId: f.machineId, name: 'Service', status: 'running' },
+    {},
+  );
+  for (let i = 0; i < 110; i++)
+    f.store.save('jobs', {
+      id: randomUUID(),
+      status: 'success',
+      createdAt: '2026-01-01',
+      logs: [],
+    });
+  f.store.save('jobs', {
+    id: randomUUID(),
+    projectId: id,
+    serverId: f.machineId,
+    status: 'pending',
+    createdAt: '2000-01-01',
+    logs: [],
+  });
+  assert.equal((await removal(f, 'service', id)).status, 409);
+  assert.equal((await removal(f, 'machine', f.machineId)).status, 409);
+  assert.ok(f.store.get('projects', id));
+  assert.ok(f.store.get('servers', f.machineId));
+});
+test('a chat being created cannot resurrect an already deleted machine or leave an orphan session', async (t) => {
+  let release, started;
+  const ready = new Promise((resolve) => {
+    started = resolve;
+  });
+  const f = await fixture(t, {
+    resolveHome: async () => {
+      started();
+      return new Promise((resolve) => {
+        release = resolve;
+      });
+    },
+  });
+  const opening = f.request('/sessions', 'POST', {
+    machineId: f.machineId,
+    provider: 'codex',
+  });
+  await ready;
+  assert.equal((await removal(f, 'machine', f.machineId)).status, 200);
+  release(process.cwd());
+  assert.equal((await opening).status, 409);
+  assert.equal(f.store.get('servers', f.machineId), null);
+  assert.equal(
+    f.store.list('settings').filter((s) => s.recordType === 'session').length,
+    0,
+  );
+});
+
+test('deleting a chat retires only its isolated credentials, keeping the shared account usable', async (t) => {
+  const f = await fixture(t, { accountOptions: fakeAccountBrokers() }),
+    { chat } = await deletionWorkspace(f);
+  const a = await (
+    await f.request('/accounts', 'POST', {
+      provider: 'codex',
+      name: 'Personal',
+      method: 'api',
+      apiKey: 'private-test-key',
+    })
+  ).json();
+  const full = f.store.get('settings', chat.id);
+  full.accountId = a.id;
+  full.profileId = chat.id;
+  f.store.save('settings', full);
+  const targetId = `account-target:${f.machineId}:codex:${chat.id}`;
+  f.store.save(
+    'settings',
+    {
+      id: targetId,
+      recordType: 'account_target',
+      machineId: f.machineId,
+      profileId: chat.id,
+      accountId: a.id,
+      provider: 'codex',
+      format: 'codex',
+      credentialPresent: true,
+    },
+    {},
+  );
+  f.profiles.set(`${f.machineId}:${chat.id}`, {
+    OPENAI_API_KEY: 'private-test-key',
+  });
+  assert.equal((await removal(f, 'chat', chat.id)).status, 200);
+  await waitFor(
+    async () => f.store.get('settings', targetId),
+    (value) => value === null,
+  );
+  assert.equal(f.profiles.has(`${f.machineId}:${chat.id}`), false);
+  assert.equal(
+    f.store.get('settings', a.id).secret.credentials.OPENAI_API_KEY,
+    'private-test-key',
+  );
+  assert.ok(f.opened.every((o) => o.operation === 'profile-clear'));
+});
+test('deleting an OpenCode chat saves a pending rotated OAuth token before clearing its remote copy', async (t) => {
+  const f = await fixture(t),
+    { chat } = await deletionWorkspace(f),
+    accountId = randomUUID();
+  const old = {
+    type: 'oauth',
+    access: 'old-access',
+    refresh: 'old-refresh',
+    expires: Date.now() + 3600000,
+  };
+  f.store.save(
+    'settings',
+    {
+      id: accountId,
+      recordType: 'agent_account',
+      name: 'OAuth',
+      provider: 'opencode',
+      vendor: 'openai',
+      authType: 'oauth',
+      status: 'connected',
+      authGeneration: 1,
+    },
+    { credentials: { legacy: { openai: old } } },
+  );
+  const full = f.store.get('settings', chat.id);
+  full.provider = 'opencode';
+  full.accountId = accountId;
+  full.profileId = chat.id;
+  f.store.save('settings', full);
+  const targetId = `account-target:${f.machineId}:opencode:${chat.id}`;
+  f.store.save(
+    'settings',
+    {
+      id: targetId,
+      recordType: 'account_target',
+      machineId: f.machineId,
+      profileId: chat.id,
+      accountId,
+      provider: 'opencode',
+      vendor: 'openai',
+      format: 'opencode-v1',
+      authGeneration: 1,
+      credentialPresent: true,
+    },
+    {},
+  );
+  f.profiles.set(`${f.machineId}:${chat.id}`, {
+    openai: { ...old, access: 'rotated-access', refresh: 'rotated-refresh' },
+  });
+  assert.equal((await removal(f, 'chat', chat.id)).status, 200);
+  await waitFor(
+    async () => f.store.get('settings', targetId),
+    (value) => value === null,
+  );
+  assert.equal(
+    f.store.get('settings', accountId).secret.credentials.legacy.openai.refresh,
+    'rotated-refresh',
+  );
+  assert.equal(f.profiles.size, 0);
+});
+test('removing an offline machine with uncleared credentials requires a separate explicit acknowledgement', async (t) => {
+  const f = await fixture(t),
+    { chat } = await deletionWorkspace(f);
+  const targetId = `account-target:${f.machineId}:codex:${chat.id}`;
+  f.store.save(
+    'settings',
+    {
+      id: targetId,
+      recordType: 'account_target',
+      machineId: f.machineId,
+      profileId: chat.id,
+      accountId: randomUUID(),
+      provider: 'codex',
+      credentialPresent: true,
+    },
+    {},
+  );
+  assert.equal((await removal(f, 'machine', f.machineId)).status, 409);
+  assert.ok(f.store.get('servers', f.machineId));
+  assert.ok(f.store.get('settings', chat.id));
+  assert.equal(
+    (
+      await removal(f, 'machine', f.machineId, {
+        allowUnclearedCredentials: true,
+      })
+    ).status,
+    200,
+  );
+  assert.equal(f.store.get('settings', targetId), null);
+  assert.equal(f.opened.length, 0);
+});
+
+test('a stopped chat can be deleted without late agent events recreating it', async (t) => {
+  const f = await fixture(t),
+    { chat } = await deletionWorkspace(f);
+  assert.equal(
+    (
+      await f.request(`/sessions/${chat.id}/message`, 'POST', {
+        message: 'Test only',
+      })
+    ).status,
+    202,
+  );
+  await waitFor(
+    async () => (await f.request(`/sessions/${chat.id}`)).json(),
+    (s) => s.status === 'approval',
+  );
+  assert.equal((await removal(f, 'chat', chat.id)).status, 409);
+  await f.request(`/sessions/${chat.id}/stop`, 'POST', {});
+  assert.equal((await removal(f, 'chat', chat.id)).status, 200);
+  for (const process of f.processes)
+    process.emit?.({
+      method: 'turn/completed',
+      params: { turn: { status: 'completed' } },
+    });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(f.store.get('settings', chat.id), null);
+});
+test('machine deletion is blocked while an agent installation is still opening', async (t) => {
+  let finish,
+    started = false;
+  const gate = new Promise((resolve) => {
+    finish = resolve;
+  });
+  const f = await fixture(t, {
+    openProcess: async (_m, options) => {
+      if (options.operation === 'install') {
+        started = true;
+        await gate;
+      }
+      return fakeVersion(options.provider);
+    },
+  });
+  const installing = f.request(
+    `/machines/${f.machineId}/agents/codex/install`,
+    'POST',
+    { confirm: true },
+  );
+  await waitFor(
+    async () => started,
+    (value) => value,
+  );
+  assert.equal((await removal(f, 'machine', f.machineId)).status, 409);
+  finish();
+  assert.equal((await installing).status, 202);
+  assert.ok(f.store.get('servers', f.machineId));
 });
