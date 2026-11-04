@@ -5,6 +5,7 @@ import type { Server as Machine } from '@/lib/domain';
 import type { Hub, HubProject } from '@/lib/hub';
 import type { Workspace } from '@/lib/use-workspace';
 import { ErrorText, Field, Modal, Submit } from './hub-ui';
+import { AccountsSettings } from './agent-accounts';
 
 export function NewProject({
   hub,
@@ -129,7 +130,7 @@ export function NewProject({
     </Modal>
   );
 }
-export function SettingsPanel({ ws }: { ws: Workspace }) {
+export function SettingsPanel({ ws, hub }: { ws: Workspace; hub: Hub }) {
   const [url, setUrl] = useState(ws.connection?.url || ''),
     [token, setToken] = useState(''),
     [error, setError] = useState(''),
@@ -143,6 +144,7 @@ export function SettingsPanel({ ws }: { ws: Workspace }) {
           <p>Подключение панели и границы доступа.</p>
         </div>
       </div>
+      <AccountsSettings hub={hub} ws={ws} />
       <section className="detail-card">
         <div className="section-title">
           <h2>Серверная часть</h2>
@@ -233,8 +235,9 @@ export function SettingsPanel({ ws }: { ws: Workspace }) {
           <div>
             <strong>Личные аккаунты агентов</strong>
             <p>
-              Вход выполняется на машине агента. Данные аккаунта не переносятся
-              между серверами автоматически.
+              Сохранённые аккаунты выбираются для машин и чатов. Для каждого
+              чата используется выбранный профиль; работа других аккаунтов не
+              затрагивается.
             </p>
           </div>
         </div>

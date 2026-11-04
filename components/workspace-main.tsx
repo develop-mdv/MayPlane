@@ -395,6 +395,7 @@ export default function WorkspaceMain() {
         >
           {view === 'servers' ? (
             <MachinesPanel
+              onAccounts={() => setView('settings')}
               ws={ws}
               hub={hub}
               selectedId={selectedMachine}
@@ -403,7 +404,7 @@ export default function WorkspaceMain() {
               onPair={() => setPair(true)}
             />
           ) : view === 'settings' ? (
-            <SettingsPanel ws={ws} />
+            <SettingsPanel ws={ws} hub={hub} />
           ) : view === 'services' ? (
             <ServicesPanel
               services={hub.data.services || []}
@@ -529,6 +530,7 @@ export default function WorkspaceMain() {
               hub={hub}
               onNewProject={() => setNewProject(true)}
               onNewSession={() => startSession()}
+              onAccounts={() => setView('settings')}
               disabled={!connected}
             />
           ) : (
@@ -738,6 +740,10 @@ export default function WorkspaceMain() {
           machines={ws.data.servers}
           initialProject={sessionProject || undefined}
           onClose={() => setNewSession(false)}
+          onAccounts={() => {
+            setNewSession(false);
+            setView('settings');
+          }}
           onCreated={(s) => {
             setNewSession(false);
             openSession(s);

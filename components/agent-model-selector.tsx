@@ -1,6 +1,12 @@
 'use client';
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { Check, ChevronDown, LoaderCircle, RefreshCw } from 'lucide-react';
+import {
+  Check,
+  ChevronDown,
+  LoaderCircle,
+  RefreshCw,
+  UserRound,
+} from 'lucide-react';
 import type {
   AgentProvider,
   AgentSession,
@@ -17,6 +23,7 @@ import {
   CommandList,
 } from './ui/command';
 import { ErrorText } from './hub-ui';
+import { AccountSelect } from './agent-accounts';
 
 const effortNames: Record<string, string> = {
   none: 'Без reasoning',
@@ -103,6 +110,7 @@ export function AgentModelSelector({
   provider,
   projectId,
   sessionId,
+  accountId,
   model,
   reasoning,
   onChange,
@@ -114,6 +122,7 @@ export function AgentModelSelector({
   provider: AgentProvider;
   projectId?: string;
   sessionId?: string;
+  accountId?: string | null;
   model: string;
   reasoning: string;
   onChange: (model: string, reasoning: string) => void;
@@ -148,7 +157,7 @@ export function AgentModelSelector({
         const next = await api<ModelCatalog>(
           `/hub/machines/${machineId}/agents/${provider}/models`,
           'POST',
-          { projectId, sessionId, model: modelRef.current, refresh },
+          { projectId, sessionId, accountId, model: modelRef.current, refresh },
         );
         if (request === generation.current) setCatalog(next);
       } catch (e) {
@@ -161,7 +170,7 @@ export function AgentModelSelector({
         }
       }
     },
-    [api, machineId, provider, projectId, sessionId],
+    [api, machineId, provider, projectId, sessionId, accountId],
   );
   useEffect(() => {
     invalidate();
@@ -258,17 +267,26 @@ export function ChatModelSettings({
   hub,
   session,
   disabled,
+  onAccounts,
+  accountOnly = false,
 }: {
   hub: Hub;
   session: AgentSession;
   disabled: boolean;
+  onAccounts: () => void;
+  accountOnly?: boolean;
 }) {
   const [open, setOpen] = useState(false),
+    [accountId, setAccountId] = useState(session.accountId || ''),
     [model, setModel] = useState(session.model),
     [reasoning, setReasoning] = useState(session.reasoning || ''),
     [busy, setBusy] = useState(false),
     [loading, setLoading] = useState(false),
     [error, setError] = useState('');
+  const accountName = session.accountId
+    ? (hub.data.accounts || []).find((a) => a.id === session.accountId)?.name ||
+      'Аккаунт недоступен'
+    : 'Аккаунт машины';
   return (
     <Popover
       open={open}
@@ -276,6 +294,7 @@ export function ChatModelSettings({
         if (busy) return;
         setOpen(value);
         if (value) {
+          setAccountId(session.accountId || '');
           setModel(session.model);
           setReasoning(session.reasoning || '');
           setError('');
@@ -285,21 +304,61 @@ export function ChatModelSettings({
       <PopoverTrigger
         type="button"
         className="chat-model-trigger"
-        aria-label="Модель и reasoning"
+        aria-label={accountOnly ? 'Аккаунт чата' : 'Модель и reasoning'}
         disabled={disabled || busy}
-        title={`${session.model || 'Настройки агента'}${session.reasoning ? ` · ${effortName(session.reasoning)}` : ''}`}
+        title={
+          accountOnly
+            ? accountName
+            : `${session.model || 'Настройки агента'}${session.reasoning ? ` · ${effortName(session.reasoning)}` : ''}`
+        }
       >
-        <span>{session.model || 'Модель агента'}</span>
-        {session.reasoning && <small>{effortName(session.reasoning)}</small>}
+        {accountOnly && <UserRound size={12} />}
+        <span>
+          {accountOnly ? accountName : session.model || 'Модель агента'}
+        </span>
+        {!accountOnly && session.reasoning && (
+          <small>{effortName(session.reasoning)}</small>
+        )}
         <ChevronDown size={12} />
       </PopoverTrigger>
       <PopoverContent align="start" side="top" className="chat-model-popup">
-        {open && (
+        <AccountSelect
+          hub={hub}
+          provider={session.provider}
+          value={accountId}
+          allowNative={!session.profileId}
+          disabled={busy || disabled}
+          onChange={(id) => {
+            setAccountId(id);
+            setModel('');
+            setReasoning('');
+            setError('');
+          }}
+        />
+        <button
+          className="text-button"
+          type="button"
+          onClick={() => {
+            setOpen(false);
+            onAccounts();
+          }}
+        >
+          Управление аккаунтами
+        </button>
+        {accountId !== (session.accountId || '') && (
+          <small className="model-catalog-note">
+            Выбранный аккаунт получит контекст этого чата. История переписки
+            сохраняется.
+          </small>
+        )}
+        {open && !accountOnly && (
           <AgentModelSelector
+            key={accountId}
             hub={hub}
             machineId={session.machineId}
             provider={session.provider}
             sessionId={session.id}
+            accountId={accountId || null}
             model={model}
             reasoning={reasoning}
             disabled={busy || disabled}
@@ -315,14 +374,24 @@ export function ChatModelSettings({
         <button
           type="button"
           className="hub-button primary"
-          disabled={busy || loading || disabled}
+          disabled={
+            busy ||
+            loading ||
+            disabled ||
+            (accountOnly && accountId === (session.accountId || ''))
+          }
           onClick={async () => {
             setBusy(true);
             setError('');
             try {
               await hub.mutate(
                 `/sessions/${session.id}`,
-                { model, reasoning },
+                {
+                  ...(!accountOnly ? { model, reasoning } : {}),
+                  ...(accountId !== (session.accountId || '')
+                    ? { accountId: accountId || null }
+                    : {}),
+                },
                 'PATCH',
               );
               setOpen(false);

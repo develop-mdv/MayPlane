@@ -9,6 +9,7 @@ export type Status =
   | 'offline'
   | 'needs_setup';
 export type Server = {
+  agentAccounts?: { codex?: string | null; opencode?: string | null };
   transport?: 'ssh' | 'local' | 'connector';
   platform?: string;
   homePath?: string;
@@ -18,7 +19,14 @@ export type Server = {
   uptime?: number;
   networkRx?: number | null;
   networkTx?: number | null;
-  history?: { at: string; cpu: number | null; memory: number | null; disk: number | null; networkRx?: number | null; networkTx?: number | null }[];
+  history?: {
+    at: string;
+    cpu: number | null;
+    memory: number | null;
+    disk: number | null;
+    networkRx?: number | null;
+    networkTx?: number | null;
+  }[];
   id: string;
   name: string;
   host: string;

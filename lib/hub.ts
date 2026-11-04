@@ -20,6 +20,9 @@ export type AgentSession = {
   title: string;
   model: string;
   reasoning?: string;
+  accountId?: string | null;
+  profileId?: string;
+  authError?: string | null;
   mode: string;
   status:
     | 'idle'
@@ -59,10 +62,12 @@ export type AgentApproval = {
   };
 };
 export type SessionDetail = AgentSession & {
+  errorMessage?: string | null;
   messages: AgentMessage[];
   approvals: AgentApproval[];
 };
 export type HubSnapshot = {
+  accounts?: AgentAccount[];
   services: {
     id: string;
     name: string;
@@ -75,6 +80,29 @@ export type HubSnapshot = {
   projects: HubProject[];
   sessions: AgentSession[];
   localMachineId?: string;
+};
+export type AgentAccount = {
+  id: string;
+  provider: AgentProvider;
+  vendor: string;
+  name: string;
+  status: 'pending' | 'connected' | 'disconnected' | 'error';
+  authType?: 'api' | 'oauth';
+  methodName?: string;
+  email?: string | null;
+  planType?: string | null;
+  error?: string;
+  pendingCleanup?: number;
+  createdAt: string;
+  updatedAt: string;
+};
+export type AccountLogin = AgentAccount & {
+  login?: {
+    url: string;
+    userCode?: string;
+    instructions?: string;
+    mode: string;
+  };
 };
 export type ModelChoice = { id: string; name: string; description?: string };
 export type AgentModel = ModelChoice & {

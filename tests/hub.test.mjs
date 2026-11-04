@@ -11,6 +11,7 @@ import { createApp } from '../runner/server.mjs';
 import { projectPath, processSpec } from '../runner/machine-process.mjs';
 import { AgentRpc } from '../runner/agent-rpc.mjs';
 import { separateServices } from '../runner/workspace-model.mjs';
+import { fakeProfile, fakeAccountBrokers } from './helpers/account-fakes.mjs';
 import {
   acpOptions,
   setAcpSelection,
@@ -221,12 +222,12 @@ function fakeAgent(provider, calls, onClose = () => {}) {
   };
 }
 
-function fakeVersion(provider, code = 0, errors = '') {
+function fakeVersion(provider, code = 0, errors = '', version = '1.0.0') {
   const stdout = new PassThrough(),
     stderr = new PassThrough(),
     events = new EventEmitter();
   setImmediate(() => {
-    if (code === 0) stdout.write(provider + ' 1.0.0\n');
+    if (code === 0) stdout.write(provider + ' ' + version + '\n');
     if (errors) stderr.write(errors);
     events.emit('close', code);
   });
@@ -239,7 +240,9 @@ async function fixture(t, options = {}) {
     store = openStore(dir, key),
     token = randomBytes(32).toString('hex'),
     calls = [],
-    processes = [];
+    processes = [],
+    profiles = new Map(),
+    opened = [];
   const machineId = randomUUID();
   store.save(
     'servers',
@@ -267,10 +270,17 @@ async function fixture(t, options = {}) {
     legacyApi: options.legacyApi ?? false,
     hubOptions: {
       openProcess: async (m, opts) => {
-        assert.equal(m.id, machineId);
-        const p =
-          opts.operation === 'version'
-            ? fakeVersion(opts.provider)
+        if (!options.allowAnyMachine) assert.equal(m.id, machineId);
+        opened.push({ machineId: m.id, ...opts });
+        const p = opts.operation.startsWith('profile-')
+          ? fakeProfile({ machineId: m.id, ...opts }, profiles)
+          : opts.operation === 'version'
+            ? fakeVersion(
+                opts.provider,
+                0,
+                '',
+                options.nativeVersion || '1.0.0',
+              )
             : fakeAgent(opts.provider, calls);
         processes.push(p);
         return p;
@@ -295,7 +305,19 @@ async function fixture(t, options = {}) {
     store.close();
     rmSync(dir, { recursive: true, force: true });
   });
-  return { store, dir, request, calls, processes, machineId, app, base, token };
+  return {
+    store,
+    dir,
+    request,
+    calls,
+    processes,
+    machineId,
+    app,
+    base,
+    token,
+    profiles,
+    opened,
+  };
 }
 async function waitFor(read, predicate) {
   for (let i = 0; i < 100; i++) {
@@ -1202,4 +1224,685 @@ test('an installation opening its SSH channel already reserves the machine again
   assert.equal(second.status, 409);
   release();
   assert.equal((await first).status, 202);
+});
+
+test('account vault supports personal and work accounts, encrypts credentials, binds defaults and pins each chat independently', async (t) => {
+  const brokers = fakeAccountBrokers(),
+    f = await fixture(t, { accountOptions: brokers, allowAnyMachine: true });
+  const create = async (name, key) => {
+    const r = await f.request('/accounts', 'POST', {
+      provider: 'codex',
+      name,
+      method: 'api',
+      apiKey: key,
+    });
+    assert.equal(r.status, 201);
+    return r.json();
+  };
+  const personal = await create('Personal', 'private-personal-key'),
+    work = await create('Work', 'private-work-key');
+  assert.equal(personal.status, 'connected');
+  assert.equal(work.email, 'work@example.test');
+  const row = f.store.db
+    .prepare('SELECT data,secret FROM settings WHERE id=?')
+    .get(personal.id);
+  assert.ok(!row.data.includes('private-personal-key'));
+  assert.ok(!row.secret.includes('private-personal-key'));
+  assert.equal(
+    f.store.get('settings', personal.id).secret.credentials.OPENAI_API_KEY,
+    'private-personal-key',
+  );
+  const secondId = randomUUID();
+  f.store.save(
+    'servers',
+    { ...f.store.list('servers')[0], id: secondId, name: 'Second computer' },
+    {},
+  );
+  const bind = (m, a) =>
+    f.request('/machines/' + m + '/agents/codex/account', 'POST', {
+      accountId: a,
+    });
+  assert.equal((await bind(f.machineId, personal.id)).status, 200);
+  await bind(secondId, personal.id);
+  const make = (m) =>
+    f
+      .request('/sessions', 'POST', {
+        machineId: m,
+        provider: 'codex',
+        mode: 'read-only',
+      })
+      .then((r) => r.json());
+  const first = await make(f.machineId),
+    second = await make(secondId);
+  assert.equal(first.accountId, personal.id);
+  assert.equal(first.profileId, first.id);
+  await bind(f.machineId, work.id);
+  const third = await make(f.machineId);
+  assert.equal(third.accountId, work.id);
+  assert.equal(
+    (await (await f.request('/sessions/' + first.id)).json()).accountId,
+    personal.id,
+  );
+  assert.equal(
+    (
+      await f.request('/sessions/' + first.id + '/message', 'POST', {
+        message: 'First account context',
+      })
+    ).status,
+    202,
+  );
+  const read = async () => (await f.request('/sessions/' + first.id)).json();
+  await waitFor(read, (s) => s.status === 'approval');
+  assert.ok(
+    f.calls.some(
+      (c) =>
+        c.method === 'account/login/start' &&
+        c.params.apiKey === 'private-personal-key',
+    ),
+  );
+  assert.equal(
+    (await f.request('/accounts/' + personal.id, 'DELETE', {})).status,
+    409,
+  );
+  await f.request('/sessions/' + first.id + '/approval', 'POST', {
+    id: 'permission-1',
+    decision: 'accept',
+  });
+  await waitFor(read, (s) => s.status === 'idle');
+  const switched = await (
+    await f.request('/sessions/' + first.id, 'PATCH', { accountId: work.id })
+  ).json();
+  assert.equal(switched.accountId, work.id);
+  assert.equal(switched.nativeId, 'native-thread');
+  assert.equal(switched.profileId, first.id);
+  await f.request('/sessions/' + first.id + '/message', 'POST', {
+    message: 'Continue with work account',
+  });
+  await waitFor(read, (s) => s.status === 'approval');
+  assert.ok(f.calls.some((c) => c.method === 'thread/resume'));
+  assert.ok(
+    f.calls.some(
+      (c) =>
+        c.method === 'account/login/start' &&
+        c.params.apiKey === 'private-work-key',
+    ),
+  );
+  await f.request('/sessions/' + first.id + '/approval', 'POST', {
+    id: 'permission-1',
+    decision: 'accept',
+  });
+  await waitFor(read, (s) => s.status === 'idle');
+  assert.equal(
+    (await read()).messages.filter((m) => m.role === 'user').length,
+    2,
+  );
+  const snapshot = await (await f.request('')).json();
+  assert.equal(snapshot.accounts.length, 2);
+  assert.ok(!JSON.stringify(snapshot).includes('private-personal-key'));
+  const detail = await (await f.request('/accounts/' + personal.id)).json();
+  assert.ok(!('secret' in detail));
+  assert.equal(
+    (await f.request('/accounts/' + personal.id, 'DELETE', {})).status,
+    200,
+  );
+  assert.equal(f.store.get('servers', secondId).agentAccounts.codex, null);
+  assert.equal(
+    (
+      await f.request('/sessions/' + second.id + '/message', 'POST', {
+        message: 'Revoked account must not run',
+      })
+    ).status,
+    403,
+  );
+  assert.equal(
+    (await f.request('/accounts/' + work.id, 'PATCH', { name: 'Work renamed' }))
+      .status,
+    200,
+  );
+});
+
+test('Codex device authorization stays private, supplies access tokens only, and handles refresh without exposing approval requests', async (t) => {
+  const brokers = fakeAccountBrokers(),
+    f = await fixture(t, { accountOptions: brokers });
+  const created = await (
+    await f.request('/accounts', 'POST', {
+      provider: 'codex',
+      name: 'ChatGPT personal',
+      method: 'oauth',
+    })
+  ).json();
+  assert.equal(created.status, 'pending');
+  assert.equal(created.login.userCode, 'SAFE-CODE');
+  const flow = brokers.logins[0];
+  flow.onLogin({ success: true });
+  const account = await waitFor(
+    async () => (await f.request('/accounts/' + created.id)).json(),
+    (a) => a.status === 'connected',
+  );
+  assert.equal(account.email, 'personal@example.test');
+  assert.ok(flow.closed);
+  const session = await (
+    await f.request('/sessions', 'POST', {
+      machineId: f.machineId,
+      provider: 'codex',
+      accountId: account.id,
+      mode: 'read-only',
+    })
+  ).json();
+  await f.request('/sessions/' + session.id + '/message', 'POST', {
+    message: 'Check external authorization',
+  });
+  const read = async () => (await f.request('/sessions/' + session.id)).json();
+  await waitFor(read, (s) => s.status === 'approval');
+  const login = f.calls.find(
+    (c) =>
+      c.method === 'account/login/start' &&
+      c.params.type === 'chatgptAuthTokens',
+  );
+  assert.equal(login.params.chatgptAccountId, 'org-personal');
+  assert.ok(login.params.accessToken);
+  assert.ok(!JSON.stringify(f.calls).includes('private-refresh-org-personal'));
+  assert.ok(
+    f.calls.find((c) => c.method === 'initialize').params.capabilities
+      .experimentalApi,
+  );
+  const native = f.processes.find((p) => p.emit && p.input);
+  native.emit({
+    id: 'refresh-auth',
+    method: 'account/chatgptAuthTokens/refresh',
+    params: { previousAccountId: 'org-personal' },
+  });
+  await waitFor(
+    async () => f.calls.find((c) => c.id === 'refresh-auth' && !c.method),
+    (x) => !!x,
+  );
+  assert.ok(
+    f.calls.find((c) => c.id === 'refresh-auth' && !c.method).result
+      .accessToken,
+  );
+  const beforeRefresh = brokers.refreshes;
+  for (const id of ['concurrent-one', 'concurrent-two'])
+    native.emit({
+      id,
+      method: 'account/chatgptAuthTokens/refresh',
+      params: { previousAccountId: 'org-personal' },
+    });
+  await waitFor(
+    async () =>
+      f.calls.filter(
+        (c) => ['concurrent-one', 'concurrent-two'].includes(c.id) && !c.method,
+      ).length,
+    (n) => n === 2,
+  );
+  assert.equal(
+    brokers.refreshes - beforeRefresh,
+    1,
+    'concurrent refresh requests must reuse one rotating token refresh',
+  );
+  native.emit({
+    id: 'wrong-account',
+    method: 'account/chatgptAuthTokens/refresh',
+    params: { previousAccountId: 'org-other' },
+  });
+  await waitFor(
+    async () => f.calls.find((c) => c.id === 'wrong-account' && !c.method),
+    (x) => !!x,
+  );
+  assert.ok(f.calls.find((c) => c.id === 'wrong-account' && !c.method).error);
+  assert.equal((await read()).approvals.length, 1);
+  assert.ok(
+    !JSON.stringify(await read()).includes('private-refresh-org-personal'),
+  );
+  await f.request('/sessions/' + session.id + '/stop', 'POST');
+});
+
+test('OpenCode portable accounts use isolated profiles, preserve native chat history and serialize OAuth token updates', async (t) => {
+  const brokers = fakeAccountBrokers(),
+    f = await fixture(t, { accountOptions: brokers });
+  const result = await (
+    await f.request('/accounts', 'POST', {
+      provider: 'opencode',
+      vendor: 'openai',
+      name: 'OpenCode OAuth',
+      method: 'device',
+    })
+  ).json();
+  assert.equal(result.status, 'pending');
+  brokers.logins.at(-1).complete();
+  const account = await waitFor(
+    async () => (await f.request('/accounts/' + result.id)).json(),
+    (a) => a.status === 'connected',
+  );
+  const first = await (
+    await f.request('/sessions', 'POST', {
+      machineId: f.machineId,
+      provider: 'opencode',
+      accountId: account.id,
+    })
+  ).json();
+  const second = await (
+    await f.request('/sessions', 'POST', {
+      machineId: f.machineId,
+      provider: 'opencode',
+      accountId: account.id,
+      mode: 'workspace-write',
+    })
+  ).json();
+  await f.request('/sessions/' + first.id + '/message', 'POST', {
+    message: 'Run a safe mocked turn',
+  });
+  const read = async () => (await f.request('/sessions/' + first.id)).json();
+  await waitFor(read, (s) => s.status === 'approval');
+  assert.equal(
+    f.profiles.get(f.machineId + ':' + first.id).openai.type,
+    'oauth',
+  );
+  const blocked = await f.request(
+    '/machines/' + f.machineId + '/agents/opencode/models',
+    'POST',
+    { sessionId: second.id },
+  );
+  assert.equal(blocked.status, 409);
+  assert.equal(
+    (
+      await f.request('/accounts/' + account.id + '/login', 'POST', {
+        method: 'device',
+      })
+    ).status,
+    409,
+  );
+  await f.request('/sessions/' + first.id + '/approval', 'POST', {
+    id: 'permission-1',
+    decision: 'once',
+  });
+  await waitFor(read, (s) => s.status === 'idle');
+  assert.ok(!f.profiles.has(f.machineId + ':' + first.id));
+  await f.request('/sessions/' + first.id + '/message', 'POST', {
+    message: 'Resume native session',
+  });
+  await waitFor(read, (s) => s.status === 'approval');
+  assert.ok(f.calls.some((c) => c.method === 'session/load'));
+  assert.ok(
+    f.opened.filter((p) => p.operation === 'agent').every((p) => p.profileId),
+  );
+  await f.request('/sessions/' + first.id + '/approval', 'POST', {
+    id: 'permission-1',
+    decision: 'once',
+  });
+  await waitFor(read, (s) => s.status === 'idle');
+  assert.equal(
+    (await read()).messages.filter((m) => m.role === 'user').length,
+    2,
+  );
+  assert.ok(!JSON.stringify(await read()).includes('private-refresh'));
+  const rows = f.store.list('settings');
+  assert.ok(
+    rows
+      .filter((x) => x.recordType === 'account_target')
+      .every((x) => !x.credentialPresent),
+  );
+});
+
+test('unauthenticated Codex rejects before accepting or persisting the message and returns a durable sign-in explanation', async (t) => {
+  const f = await fixture(t, {
+    openProcess: async (m, opts) => {
+      if (opts.operation === 'version') return fakeVersion('codex');
+      const p = fakeAgent('codex', []),
+        write = p.input.write.bind(p.input);
+      p.input.write = (bytes) => {
+        const request = JSON.parse(bytes.toString());
+        if (request.method === 'account/read') {
+          setImmediate(() =>
+            p.emit({
+              id: request.id,
+              result: { account: null, requiresOpenaiAuth: true },
+            }),
+          );
+          return true;
+        }
+        return write(bytes);
+      };
+      return p;
+    },
+  });
+  const s = await (
+    await f.request('/sessions', 'POST', {
+      machineId: f.machineId,
+      provider: 'codex',
+    })
+  ).json();
+  const response = await f.request('/sessions/' + s.id + '/message', 'POST', {
+    message: 'Keep this draft',
+  });
+  assert.equal(response.status, 403);
+  const detail = await (await f.request('/sessions/' + s.id)).json();
+  assert.equal(detail.messages.length, 0);
+  assert.match(detail.authError, /авторизац/);
+  assert.match(detail.errorMessage, /Настройках/);
+});
+
+test('vault validates account/provider context and cancellation cannot leave an authenticated browser payload', async (t) => {
+  const brokers = fakeAccountBrokers(),
+    f = await fixture(t, { accountOptions: brokers });
+  const a = await (
+    await f.request('/accounts', 'POST', {
+      provider: 'codex',
+      name: 'Temporary',
+      method: 'oauth',
+    })
+  ).json();
+  assert.equal(
+    (await f.request('/accounts', 'GET', null, 'wrong')).status,
+    401,
+  );
+  assert.equal(
+    (await f.request('/accounts/' + a.id + '/cancel', 'POST', {})).status,
+    200,
+  );
+  const cancelled = await (await f.request('/accounts/' + a.id)).json();
+  assert.equal(cancelled.status, 'disconnected');
+  assert.ok(!cancelled.login);
+  assert.ok(brokers.logins[0].closed);
+  assert.equal(
+    (
+      await f.request('/sessions', 'POST', {
+        machineId: f.machineId,
+        provider: 'codex',
+        accountId: a.id,
+      })
+    ).status,
+    403,
+  );
+  const key = await (
+    await f.request('/accounts', 'POST', {
+      provider: 'codex',
+      name: 'Work',
+      method: 'api',
+      apiKey: 'private-work-api-key',
+    })
+  ).json();
+  assert.equal(
+    (
+      await f.request(
+        '/machines/' + f.machineId + '/agents/opencode/account',
+        'POST',
+        { accountId: key.id },
+      )
+    ).status,
+    400,
+  );
+  assert.equal(
+    (
+      await f.request('/sessions', 'POST', {
+        machineId: f.machineId,
+        provider: 'opencode',
+        accountId: key.id,
+      })
+    ).status,
+    400,
+  );
+});
+
+test('OpenCode v-prefixed native versions transfer and revoke exact native credentials without interactive pickers', async (t) => {
+  const f = await fixture(t, {
+    accountOptions: fakeAccountBrokers(),
+    nativeVersion: 'v2.0.29',
+  });
+  const a = await (
+    await f.request('/accounts', 'POST', {
+      provider: 'opencode',
+      vendor: 'openai',
+      name: 'Work',
+      method: 'key',
+      apiKey: 'private-v2-test-key',
+    })
+  ).json();
+  const r = await f.request(
+    `/machines/${f.machineId}/agents/opencode/models`,
+    'POST',
+    { accountId: a.id },
+  );
+  assert.equal(r.status, 200);
+  assert.ok((await r.json()).models.length);
+  const transfers = f.opened.filter((o) => o.operation.startsWith('profile-'));
+  assert.ok(transfers.every((o) => o.profileFormat === 'opencode-v2'));
+  const cleared = transfers.find((o) => o.operation === 'profile-clear');
+  assert.match(cleared.profileCredential, /^cred_test/);
+  assert.equal(cleared.profileVendor, 'openai');
+  assert.equal(f.profiles.size, 0);
+  assert.ok(
+    f.store
+      .list('settings')
+      .filter((r) => r.recordType === 'account_target')
+      .every((r) => !r.credentialPresent),
+  );
+});
+
+test('cancelling an OAuth flow while its final read is pending cannot reconnect the account', async (t) => {
+  const brokers = fakeAccountBrokers();
+  let completeRead,
+    reading = false;
+  const f = await fixture(t, {
+    accountOptions: {
+      ...brokers,
+      codexLogin: async (...args) => {
+        const broker = await brokers.codexLogin(...args),
+          read = broker.read;
+        broker.read = async () => {
+          reading = true;
+          await new Promise((r) => {
+            completeRead = r;
+          });
+          return read();
+        };
+        return broker;
+      },
+    },
+  });
+  const a = await (
+    await f.request('/accounts', 'POST', {
+      provider: 'codex',
+      name: 'Cancelled',
+      method: 'oauth',
+    })
+  ).json();
+  brokers.logins[0].onLogin({ success: true });
+  await waitFor(
+    async () => reading,
+    (x) => x,
+  );
+  assert.equal(
+    (await f.request(`/accounts/${a.id}/cancel`, 'POST', {})).status,
+    200,
+  );
+  completeRead();
+  await new Promise((r) => setImmediate(r));
+  const state = await (await f.request(`/accounts/${a.id}`)).json();
+  assert.equal(state.status, 'disconnected');
+  assert.ok(!f.store.get('settings', a.id).secret.credentials);
+});
+
+test('OpenCode recovers rotated credentials after interruption and discards copies from a previous login', async (t) => {
+  const brokers = fakeAccountBrokers(),
+    f = await fixture(t, { accountOptions: brokers });
+  const result = await (
+    await f.request('/accounts', 'POST', {
+      provider: 'opencode',
+      vendor: 'openai',
+      name: 'Portable',
+      method: 'device',
+    })
+  ).json();
+  brokers.logins.at(-1).complete();
+  await waitFor(
+    async () => (await f.request(`/accounts/${result.id}`)).json(),
+    (a) => a.status === 'connected',
+  );
+  async function abandoned(refresh, generation) {
+    const a = f.store.get('settings', result.id),
+      profileId = randomUUID();
+    const credentials = { ...a.secret.credentials.legacy.openai, refresh };
+    f.profiles.set(`${f.machineId}:${profileId}`, { openai: credentials });
+    f.store.save(
+      'settings',
+      {
+        id: `account-target:${f.machineId}:opencode:${profileId}`,
+        recordType: 'account_target',
+        machineId: f.machineId,
+        profileId,
+        accountId: a.id,
+        provider: 'opencode',
+        vendor: 'openai',
+        format: 'opencode-v1',
+        credentialPresent: true,
+        authGeneration: generation,
+      },
+      {},
+    );
+    return profileId;
+  }
+  const dirty = await abandoned('rotated-after-crash', 1);
+  assert.equal(
+    (
+      await f.request(
+        `/machines/${f.machineId}/agents/opencode/models`,
+        'POST',
+        { accountId: result.id },
+      )
+    ).status,
+    200,
+  );
+  assert.equal(
+    f.store.get('settings', result.id).secret.credentials.legacy.openai.refresh,
+    'rotated-after-crash',
+  );
+  assert.ok(!f.profiles.has(`${f.machineId}:${dirty}`));
+  const a = f.store.get('settings', result.id);
+  a.authGeneration = 2;
+  f.store.save('settings', a, a.secret);
+  const stale = await abandoned('old-invalidated-login', 1);
+  assert.equal(
+    (
+      await f.request(
+        `/machines/${f.machineId}/agents/opencode/models`,
+        'POST',
+        { accountId: result.id, refresh: true },
+      )
+    ).status,
+    200,
+  );
+  assert.equal(
+    f.store.get('settings', result.id).secret.credentials.legacy.openai.refresh,
+    'rotated-after-crash',
+  );
+  assert.ok(!f.profiles.has(`${f.machineId}:${stale}`));
+});
+
+test('failed OpenCode authentication releases its OAuth lease and allows a fresh sign-in', async (t) => {
+  const brokers = fakeAccountBrokers(),
+    profiles = new Map();
+  const f = await fixture(t, {
+    accountOptions: brokers,
+    openProcess: async (m, opts) => {
+      if (opts.operation.startsWith('profile-'))
+        return fakeProfile({ machineId: m.id, ...opts }, profiles);
+      if (opts.operation === 'version') return fakeVersion(opts.provider);
+      const p = fakeAgent(opts.provider, []),
+        write = p.input.write.bind(p.input);
+      p.input.write = (bytes) => {
+        const message = JSON.parse(bytes.toString());
+        if (message.method === 'session/prompt') {
+          setImmediate(() =>
+            p.emit({
+              id: message.id,
+              error: { message: '401 authentication rejected' },
+            }),
+          );
+          return true;
+        }
+        return write(bytes);
+      };
+      return p;
+    },
+  });
+  const a = await (
+    await f.request('/accounts', 'POST', {
+      provider: 'opencode',
+      vendor: 'openai',
+      name: 'Reconnect',
+      method: 'device',
+    })
+  ).json();
+  brokers.logins.at(-1).complete();
+  await waitFor(
+    async () => (await f.request(`/accounts/${a.id}`)).json(),
+    (x) => x.status === 'connected',
+  );
+  const s = await (
+    await f.request('/sessions', 'POST', {
+      machineId: f.machineId,
+      provider: 'opencode',
+      accountId: a.id,
+    })
+  ).json();
+  assert.equal(
+    (
+      await f.request(`/sessions/${s.id}/message`, 'POST', {
+        message: 'Fail safely',
+      })
+    ).status,
+    202,
+  );
+  const detail = await waitFor(
+    async () => (await f.request(`/sessions/${s.id}`)).json(),
+    (x) => x.status === 'error',
+  );
+  assert.match(detail.authError, /авторизац/);
+  assert.equal(profiles.size, 0);
+  assert.equal(
+    (await f.request(`/accounts/${a.id}/login`, 'POST', { method: 'device' }))
+      .status,
+    200,
+  );
+});
+
+test('stopping during agent initialization preserves the draft and never starts a model turn', async (t) => {
+  let initialized, finish;
+  const calls = [];
+  const f = await fixture(t, {
+    openProcess: async (_m, opts) => {
+      const p = fakeAgent(opts.provider, calls),
+        write = p.input.write.bind(p.input);
+      p.input.write = (bytes) => {
+        const m = JSON.parse(bytes.toString());
+        if (m.method === 'initialize') {
+          initialized = true;
+          finish = () => write(bytes);
+          return true;
+        }
+        return write(bytes);
+      };
+      return p;
+    },
+  });
+  const s = await (
+    await f.request('/sessions', 'POST', {
+      machineId: f.machineId,
+      provider: 'codex',
+    })
+  ).json();
+  const sending = f.request(`/sessions/${s.id}/message`, 'POST', {
+    message: 'Keep cancelled draft',
+  });
+  await waitFor(
+    async () => initialized,
+    (x) => x,
+  );
+  await f.request(`/sessions/${s.id}/stop`, 'POST', {});
+  finish();
+  assert.equal((await sending).status, 409);
+  const detail = await (await f.request(`/sessions/${s.id}`)).json();
+  assert.equal(detail.status, 'interrupted');
+  assert.equal(detail.messages.length, 0);
+  assert.ok(!calls.some((c) => c.method === 'turn/start'));
 });

@@ -27,6 +27,8 @@ import {
 } from '@/lib/hub';
 import { CopyButton, ErrorText, Field, Modal, Submit } from './hub-ui';
 import { AgentModelSelector, ChatModelSettings } from './agent-model-selector';
+import { AccountSelect } from './agent-accounts';
+const chatDrafts = new WeakMap<object, Map<string, string>>();
 
 export function NewSession({
   hub,
@@ -35,6 +37,7 @@ export function NewSession({
   initialProject,
   onCreated,
   onClose,
+  onAccounts,
 }: {
   hub: Hub;
   projects: HubProject[];
@@ -42,6 +45,7 @@ export function NewSession({
   initialProject?: string;
   onCreated: (s: AgentSession) => void;
   onClose: () => void;
+  onAccounts: () => void;
 }) {
   const [projectId, setProjectId] = useState(initialProject || '');
   const [machineId, setMachineId] = useState(
@@ -51,12 +55,21 @@ export function NewSession({
       '',
   );
   const [provider, setProvider] = useState<AgentProvider>('codex');
+  const [accountChoice, setAccountChoice] = useState('__default');
   const [model, setModel] = useState(''),
     [reasoning, setReasoning] = useState(''),
     [mode, setMode] = useState(
       initialProject ? 'workspace-write' : 'read-only',
     );
   const [loadingModels, setLoadingModels] = useState(false);
+  const selectedMachine = machines.find(
+    (m) =>
+      m.id ===
+      (projects.find((p) => p.id === projectId)?.machineId || machineId),
+  );
+  const defaultAccount = (hub.data.accounts || []).find(
+    (a) => a.id === selectedMachine?.agentAccounts?.[provider],
+  );
   const [busy, setBusy] = useState(false),
     [error, setError] = useState('');
   return (
@@ -78,6 +91,9 @@ export function NewSession({
                 ? projects.find((p) => p.id === projectId)?.machineId
                 : machineId,
               provider,
+              ...(accountChoice === '__default'
+                ? {}
+                : { accountId: accountChoice || null }),
               model,
               reasoning,
               mode: provider === 'opencode' ? 'workspace-write' : mode,
@@ -96,6 +112,7 @@ export function NewSession({
             value={projectId}
             onChange={(e) => {
               setProjectId(e.target.value);
+              setAccountChoice('__default');
               setModel('');
               setReasoning('');
               setMode(e.target.value ? 'workspace-write' : 'read-only');
@@ -121,6 +138,7 @@ export function NewSession({
               value={machineId}
               onChange={(e) => {
                 setMachineId(e.target.value);
+                setAccountChoice('__default');
                 setModel('');
                 setReasoning('');
               }}
@@ -146,6 +164,7 @@ export function NewSession({
                 key={p}
                 onClick={() => {
                   setProvider(p);
+                  setAccountChoice('__default');
                   setModel('');
                   setReasoning('');
                 }}
@@ -161,14 +180,31 @@ export function NewSession({
             ))}
           </div>
         </div>
+        <AccountSelect
+          hub={hub}
+          provider={provider}
+          value={accountChoice}
+          defaultName={defaultAccount?.name || ''}
+          onChange={(value) => {
+            setAccountChoice(value);
+            setModel('');
+            setReasoning('');
+          }}
+        />
+        <button className="text-button" type="button" onClick={onAccounts}>
+          Добавить или настроить аккаунты
+        </button>
         <AgentModelSelector
-          key={provider + ':' + (projectId || machineId)}
+          key={provider + ':' + (projectId || machineId) + ':' + accountChoice}
           hub={hub}
           machineId={
             projects.find((p) => p.id === projectId)?.machineId || machineId
           }
           provider={provider}
           projectId={projectId || undefined}
+          accountId={
+            accountChoice === '__default' ? undefined : accountChoice || null
+          }
           model={model}
           reasoning={reasoning}
           onLoading={setLoadingModels}
@@ -397,6 +433,7 @@ export function AgentChat({
   hub,
   onNewProject,
   onNewSession,
+  onAccounts,
   disabled,
 }: {
   session?: AgentSession;
@@ -405,6 +442,7 @@ export function AgentChat({
   hub: Hub;
   onNewProject: () => void;
   onNewSession: () => void;
+  onAccounts: () => void;
   disabled: boolean;
 }) {
   const [detail, setDetail] = useState<SessionDetail | null>(null),
@@ -418,6 +456,18 @@ export function AgentChat({
   const current = useRef(session?.id);
   current.current = session?.id;
   const api = hub.api;
+  function rememberDraft(text: string) {
+    if (session) {
+      let drafts = chatDrafts.get(api);
+      if (!drafts) {
+        drafts = new Map();
+        chatDrafts.set(api, drafts);
+      }
+      if (text) drafts.set(session.id, text);
+      else drafts.delete(session.id);
+    }
+    setDraft(text);
+  }
   async function reload() {
     if (!session) return;
     const s = await api<SessionDetail>(`/hub/sessions/${session.id}`);
@@ -428,7 +478,7 @@ export function AgentChat({
   }
   useEffect(() => {
     setDetail(null);
-    setDraft('');
+    setDraft(session ? chatDrafts.get(api)?.get(session.id) || '' : '');
     setError('');
     follow.current = true;
     if (!session) return;
@@ -469,7 +519,7 @@ export function AgentChat({
     try {
       await hub.mutate(`/sessions/${session.id}/message`, { message: text });
       if (current.current === session.id) {
-        setDraft('');
+        rememberDraft('');
         follow.current = true;
         await reload();
         composer.current?.focus();
@@ -652,7 +702,14 @@ export function AgentChat({
       </div>
       {session && (
         <div className="composer-area">
-          <ErrorText error={error} />
+          <ErrorText
+            error={error || live?.authError || detail?.errorMessage || ''}
+          />
+          {live?.authError && (
+            <button className="hub-button" type="button" onClick={onAccounts}>
+              Подключить аккаунт в настройках
+            </button>
+          )}
           <form
             className={`chat-composer ${disabled || session.archived ? 'disabled' : ''}`}
             onSubmit={(e) => {
@@ -672,7 +729,7 @@ export function AgentChat({
                   : 'Опишите задачу, задайте вопрос или продолжите работу…'
               }
               disabled={disabled || session.archived}
-              onChange={(e) => setDraft(e.target.value)}
+              onChange={(e) => rememberDraft(e.target.value)}
               onKeyDown={(e) => {
                 if (
                   e.key === 'Enter' &&
@@ -689,6 +746,20 @@ export function AgentChat({
                 <span className={`provider-dot ${session.provider}`} />
                 <strong>{providerNames[session.provider]}</strong>
                 <ChatModelSettings
+                  accountOnly
+                  key={session.id + ':account'}
+                  hub={hub}
+                  session={live || session}
+                  disabled={
+                    disabled ||
+                    sending ||
+                    activeSession(live) ||
+                    session.archived
+                  }
+                  onAccounts={onAccounts}
+                />
+                <ChatModelSettings
+                  onAccounts={onAccounts}
                   key={session.id}
                   hub={hub}
                   session={live || session}

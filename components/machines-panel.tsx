@@ -38,6 +38,7 @@ import { Field, Modal, Submit, CopyButton, ErrorText } from './hub-ui';
 import { ServerConsole } from './server-console';
 import { agentPathSetup } from '@/lib/agent-path.mjs';
 import { networkRates } from '@/lib/network-metrics.mjs';
+import { AccountSelect } from './agent-accounts';
 
 const available = (s: Server) => ['online', 'needs_setup'].includes(s.status);
 const pct = (v: number | null | undefined) =>
@@ -592,11 +593,15 @@ function ProviderPanel({
   provider,
   hub,
   onLoginTerminal,
+  onAccounts,
+  onAccountChanged,
 }: {
   machine: Server;
   provider: AgentProvider;
   hub: Hub;
   onLoginTerminal: () => void;
+  onAccounts: () => void;
+  onAccountChanged: (id: string | null) => Promise<unknown>;
 }) {
   const [status, setStatus] = useState<AgentStatus | null>(null),
     [busy, setBusy] = useState(false),
@@ -714,6 +719,24 @@ function ProviderPanel({
             : 'Не проверен'}
         </span>
       </div>
+      <AccountSelect
+        hub={hub}
+        provider={provider}
+        value={machine.agentAccounts?.[provider] || ''}
+        disabled={busy || !!taskId}
+        onChange={async (id) => {
+          setBusy(true);
+          setError('');
+          try {
+            await onAccountChanged(id || null);
+            setStatus(null);
+          } catch (e) {
+            setError((e as Error).message);
+          } finally {
+            setBusy(false);
+          }
+        }}
+      />
       <div className="provider-panel-actions">
         <button
           className="hub-button"
@@ -739,29 +762,35 @@ function ProviderPanel({
           className="hub-button"
           disabled={busy || !!taskId || !available(machine)}
           onClick={() => {
-            if (
-              provider === 'opencode' &&
-              (!machine.transport || machine.transport === 'ssh')
-            )
-              onLoginTerminal();
-            else void operate('login');
+            onAccounts();
           }}
         >
           <LogIn size={14} />
-          Войти{provider === 'codex' ? ' с ChatGPT' : ''}
+          {machine.agentAccounts?.[provider]
+            ? 'Настроить аккаунт'
+            : 'Добавить аккаунт'}
         </button>
-        {provider === 'codex' && status?.account && (
-          <button
-            className="icon-button"
-            title="Выйти из Codex"
-            aria-label="Выйти из Codex"
-            onClick={() => void operate('logout')}
-            disabled={busy}
-          >
-            <LogOut size={16} />
+        {provider === 'codex' &&
+          status?.account &&
+          !machine.agentAccounts?.[provider] && (
+            <button
+              className="icon-button"
+              title="Выйти из Codex"
+              aria-label="Выйти из Codex"
+              onClick={() => void operate('logout')}
+              disabled={busy}
+            >
+              <LogOut size={16} />
+            </button>
+          )}
+      </div>
+      {!machine.agentAccounts?.[provider] &&
+        provider === 'opencode' &&
+        (!machine.transport || machine.transport === 'ssh') && (
+          <button className="text-button" onClick={onLoginTerminal}>
+            Войти непосредственно на этой машине
           </button>
         )}
-      </div>
       {status?.account && (
         <p className="hub-note">
           <Check size={14} />
@@ -864,7 +893,7 @@ function ProviderPanel({
           <p>
             Установить{' '}
             <code>
-              {provider === 'codex' ? '@openai/codex' : 'opencode-ai'}
+              {provider === 'codex' ? '@openai/codex' : '@opencode/cli'}
             </code>{' '}
             {machine.platform !== 'win32' ? (
               <>
@@ -913,6 +942,7 @@ export function MachinesPanel({
   onSelect,
   onAdd,
   onPair,
+  onAccounts,
 }: {
   ws: Workspace;
   hub: Hub;
@@ -920,6 +950,7 @@ export function MachinesPanel({
   onSelect: (id: string | null) => void;
   onAdd: (server?: Server) => void;
   onPair: () => void;
+  onAccounts: () => void;
 }) {
   const [consoleServer, setConsoleServer] = useState<Server | null>(null),
     [error, setError] = useState(''),
@@ -1204,6 +1235,12 @@ export function MachinesPanel({
                 machine={machine}
                 provider={p}
                 hub={hub}
+                onAccounts={onAccounts}
+                onAccountChanged={(id) =>
+                  ws.action(`/hub/machines/${machine.id}/agents/${p}/account`, {
+                    accountId: id,
+                  })
+                }
                 onLoginTerminal={() => {
                   setConsoleCommand(`${agentPathSetup}\nopencode auth login`);
                   setConsoleServer(machine);

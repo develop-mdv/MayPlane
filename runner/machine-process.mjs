@@ -1,10 +1,17 @@
 import { spawn } from 'node:child_process';
+import { PassThrough } from 'node:stream';
 import { existsSync, statfsSync, readFileSync } from 'node:fs';
 import { dirname, join, isAbsolute, win32 } from 'node:path';
 import os from 'node:os';
 import { connect } from './ssh.mjs';
 import { assert } from './security.mjs';
 import { posixAgentCommand } from './agent-launch.mjs';
+import {
+  profileEnvironment,
+  profileId as validateProfileId,
+  localProfileProcess,
+  posixProfileOperation,
+} from './agent-profile.mjs';
 
 export const providers = {
   codex: {
@@ -16,7 +23,7 @@ export const providers = {
   opencode: {
     name: 'OpenCode',
     executable: 'opencode',
-    package: 'opencode-ai',
+    package: '@opencode/cli',
     args: ['acp'],
   },
 };
@@ -42,9 +49,43 @@ export function processSpec(provider, operation, platform = process.platform) {
   const p = providers[provider];
   assert(p, 'Неизвестный агент');
   assert(
-    ['agent', 'version', 'install', 'login'].includes(operation),
+    [
+      'agent',
+      'version',
+      'install',
+      'login',
+      'auth-server',
+      'credential-export',
+      'credential-import',
+      'credential-clear',
+      'profile-read',
+      'profile-write',
+      'profile-clear',
+    ].includes(operation),
     'Неизвестная операция',
   );
+  if (operation === 'auth-server') {
+    assert(provider === 'opencode', 'Неизвестная операция');
+    return {
+      executable: p.executable,
+      args: ['serve', '--hostname', '127.0.0.1', '--port', '0'],
+    };
+  }
+  if (operation.startsWith('credential-')) {
+    assert(provider === 'opencode', 'Неизвестная операция');
+    return {
+      executable: p.executable,
+      args: [
+        'auth',
+        operation === 'credential-import'
+          ? 'import'
+          : operation === 'credential-export'
+            ? 'export'
+            : 'logout',
+        '--standalone',
+      ],
+    };
+  }
   if (operation === 'install' && platform !== 'win32')
     return {
       executable: '/bin/bash',
@@ -64,8 +105,47 @@ export function processSpec(provider, operation, platform = process.platform) {
   };
 }
 
-export function localProcess({ provider, operation, cwd }) {
+export function localProcess({
+  provider,
+  operation,
+  cwd,
+  profileId,
+  serverPassword,
+  profileFormat,
+  profileVendor,
+  profileCredential,
+}) {
+  if (profileId) {
+    validateProfileId(profileId);
+    assert(
+      operation !== 'install',
+      'Установка агента не поддерживает профиль аккаунта',
+    );
+  }
+  if (operation.startsWith('profile-') && profileFormat !== 'opencode-v2')
+    return localProfileProcess({ provider, operation, profileId });
+  if (operation.startsWith('profile-'))
+    operation =
+      operation === 'profile-read'
+        ? 'credential-export'
+        : operation === 'profile-write'
+          ? 'credential-import'
+          : 'credential-clear';
   let { executable, args } = processSpec(provider, operation);
+  if (operation === 'credential-clear') {
+    assert(
+      typeof profileVendor === 'string' &&
+        /^[a-z0-9][a-z0-9._-]{0,100}$/.test(profileVendor),
+      'Некорректный провайдер',
+    );
+    args.splice(2, 0, profileVendor);
+    assert(
+      typeof profileCredential === 'string' &&
+        /^cred_[a-zA-Z0-9_-]+$/.test(profileCredential),
+      'Некорректные учётные данные',
+    );
+    args.splice(3, 0, profileCredential);
+  }
   if (process.platform !== 'win32' && operation !== 'install') {
     executable = '/bin/bash';
     args = [
@@ -76,6 +156,7 @@ export function localProcess({ provider, operation, cwd }) {
         args,
         undefined,
         process.env[`EZDEPLOY_${provider.toUpperCase()}_BIN`],
+        profileId,
       ),
     ];
   }
@@ -104,7 +185,38 @@ export function localProcess({ provider, operation, cwd }) {
       .filter(Boolean)
       .map((root) => join(root, 'node_modules', entry))
       .find(existsSync);
-    if (script && !process.env[`EZDEPLOY_${provider.toUpperCase()}_BIN`]) {
+    const native =
+      provider === 'codex' && process.env.LOCALAPPDATA
+        ? join(
+            process.env.LOCALAPPDATA,
+            'Programs',
+            'OpenAI',
+            'Codex',
+            'bin',
+            'codex.exe',
+          )
+        : provider === 'opencode'
+          ? roots
+              .filter(Boolean)
+              .map((root) =>
+                join(
+                  root,
+                  'node_modules',
+                  '@opencode',
+                  'cli',
+                  'bin',
+                  'opencode.exe',
+                ),
+              )
+              .find(existsSync)
+          : null;
+    if (
+      native &&
+      existsSync(native) &&
+      !process.env[`EZDEPLOY_${provider.toUpperCase()}_BIN`]
+    )
+      executable = native;
+    else if (script && !process.env[`EZDEPLOY_${provider.toUpperCase()}_BIN`]) {
       executable = process.execPath;
       args = [script, ...args];
     }
@@ -116,6 +228,29 @@ export function localProcess({ provider, operation, cwd }) {
   )
     executable = process.env[`EZDEPLOY_${provider.toUpperCase()}_BIN`];
   const env = { ...process.env, NO_COLOR: '1' };
+  if (profileId) {
+    for (const name of Object.keys(env))
+      if (
+        /(?:_API_KEY|_TOKEN|_ACCESS_KEY|_SECRET_ACCESS_KEY|_CREDENTIALS)$/.test(
+          name,
+        ) ||
+        /^(OPENAI_|ANTHROPIC_|CODEX_HOME$|CODEX_SQLITE_HOME$|OPENCODE_AUTH_CONTENT$|OPENCODE_CONFIG$|OPENCODE_CONFIG_CONTENT$)/.test(
+          name,
+        )
+      )
+        delete env[name];
+    Object.assign(env, profileEnvironment(provider, profileId));
+    if (provider === 'codex' && process.platform === 'win32')
+      args = ['-c', 'cli_auth_credentials_store="file"', ...args];
+  }
+  if (operation === 'auth-server') {
+    assert(
+      typeof serverPassword === 'string' && serverPassword.length >= 24,
+      'Нужен защищённый доступ к серверу авторизации',
+    );
+    env.OPENCODE_SERVER_PASSWORD = serverPassword;
+    env.OPENCODE_SERVER_USERNAME = 'opencode';
+  }
   if (process.platform !== 'win32')
     env.PATH =
       join(os.homedir(), '.local', 'bin') + ':' + (env.PATH || '/usr/bin:/bin');
@@ -136,8 +271,22 @@ export function localProcess({ provider, operation, cwd }) {
   child.on('exit', () => {
     exited = true;
   });
+  let input = child.stdin;
+  if (operation === 'credential-import') {
+    input = new PassThrough();
+    child.stdin.on('error', (error) => input.destroy(error));
+    let pending = '';
+    input.on('data', (bytes) => {
+      pending += bytes.toString();
+      if (pending.length > 131072) child.kill();
+      else if (pending.includes('\n')) {
+        child.stdin.end(pending.slice(0, pending.indexOf('\n')));
+        pending = '';
+      }
+    });
+  }
   return {
-    input: child.stdin,
+    input,
     stdout: child.stdout,
     stderr: child.stderr,
     events: child,
@@ -167,18 +316,33 @@ export function localProcess({ provider, operation, cwd }) {
 }
 
 export async function machineProcess(machine, options, connectors) {
+  assert(
+    !(options.profileId && options.operation === 'install'),
+    'Установка агента не поддерживает профиль аккаунта',
+  );
   if (machine.transport === 'connector')
     return connectors.open(machine.id, options);
   if (machine.transport === 'local') return localProcess(options);
   const spec = processSpec(options.provider, options.operation, 'linux');
   const ssh = await connect(machine);
   try {
-    const command = posixAgentCommand(
-      options.provider,
-      options.operation,
-      spec.args,
-      options.cwd ? projectPath(options.cwd) : undefined,
-    );
+    const command = options.operation.startsWith('profile-')
+      ? posixProfileOperation(
+          options.provider,
+          options.operation,
+          options.profileId,
+          options.profileFormat,
+          options.profileVendor,
+          options.profileCredential,
+        )
+      : posixAgentCommand(
+          options.provider,
+          options.operation,
+          spec.args,
+          options.cwd ? projectPath(options.cwd) : undefined,
+          undefined,
+          options.profileId,
+        );
     const channel = await new Promise((resolve, reject) =>
       ssh.exec(command, (error, stream) =>
         error ? reject(error) : resolve(stream),

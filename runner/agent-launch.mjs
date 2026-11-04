@@ -1,5 +1,6 @@
 import { assert, q } from './security.mjs';
 import { agentPathSetup } from '../lib/agent-path.mjs';
+import { posixProfileSetup } from './agent-profile.mjs';
 
 export const codexInstall = `set -eu
 ${agentPathSetup}
@@ -33,11 +34,20 @@ export function posixAgentCommand(
   args,
   cwd,
   executableOverride,
+  profileId,
 ) {
   assert(['codex', 'opencode'].includes(provider), 'Неизвестный агент');
   const prefix = `${agentPathSetup}\n${cwd ? `cd ${q(cwd)} || exit 1\n` : ''}`;
   if (operation === 'install')
     return prefix + (provider === 'codex' ? codexInstall : openCodeInstall);
-  const invocation = [executableOverride || provider, ...args].map(q).join(' ');
-  return `${prefix}exec ${provider === 'opencode' ? `env OPENCODE_PERMISSION=${q(JSON.stringify({ '*': 'ask' }))} ` : ''}${invocation}`;
+  const invocation = [
+    executableOverride || provider,
+    ...(profileId && provider === 'codex'
+      ? ['-c', 'cli_auth_credentials_store="file"']
+      : []),
+    ...args,
+  ]
+    .map(q)
+    .join(' ');
+  return `${prefix}${profileId ? posixProfileSetup(provider, profileId) : ''}exec ${provider === 'opencode' ? `env OPENCODE_PERMISSION=${q(JSON.stringify({ '*': 'ask' }))} ` : ''}${invocation}`;
 }

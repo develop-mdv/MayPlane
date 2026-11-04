@@ -12,6 +12,7 @@ import { connect, metrics } from './ssh.mjs';
 import { assert, redact } from './security.mjs';
 import { machineHome, separateServices } from './workspace-model.mjs';
 import { agentVersion, agentError } from './agent-status.mjs';
+import { createAccounts } from './accounts.mjs';
 import {
   createModelCatalog,
   codexModels,
@@ -20,6 +21,12 @@ import {
 } from './model-catalog.mjs';
 
 const now = () => new Date().toISOString();
+const authorizationError = (message = '') =>
+  /401|unauthorized|authentication|not logged|sign.?in|авторизац/i.test(
+    message,
+  );
+const signInHelp =
+  'Сервис отклонил авторизацию. Проверьте выбранный аккаунт в настройках и повторите вход.';
 const publicRecord = (record) => {
   const { secret, ...rest } = record;
   return rest;
@@ -28,7 +35,11 @@ const publicRecord = (record) => {
 export function createHub(
   server,
   store,
-  { openProcess = machineProcess, resolveHome = machineHome } = {},
+  {
+    openProcess = machineProcess,
+    resolveHome = machineHome,
+    accountOptions = {},
+  } = {},
 ) {
   const connectors = attachConnectors(server, store);
   const runtimes = new Map(),
@@ -39,6 +50,26 @@ export function createHub(
     openProcess,
     connectors,
     isClosed: () => closed,
+    prepareAccount: (...args) => accounts.prepare(...args),
+    authenticateAccount: (...args) => accounts.authenticate(...args),
+    refreshAccount: (...args) => accounts.refresh(...args),
+  });
+  const accounts = createAccounts(store, {
+    openProcess,
+    connectors,
+    ...accountOptions,
+    onChanged: (id) => {
+      modelCatalog.invalidateAccount(id);
+      for (const r of runtimes.values())
+        if (
+          r.accountId === id &&
+          (!r.sessionId ||
+            !['running', 'connecting', 'approval'].includes(
+              load(r.sessionId, 'session').status,
+            ))
+        )
+          r.rpc?.close();
+    },
   });
   const modelChanges = new Set();
   const openingTasks = new Set();
@@ -136,6 +167,14 @@ export function createHub(
   }
   function onMessage(runtime, message) {
     const { method, params: p = {}, id } = message;
+    if (
+      method === 'account/chatgptAuthTokens/refresh' &&
+      id !== undefined &&
+      runtime.accountId
+    ) {
+      void accounts.refresh(runtime.rpc, runtime.accountId, message);
+      return;
+    }
     if (!runtime.sessionId) {
       if (id !== undefined) runtime.rpc.reject(id);
       if (method === 'account/login/completed')
@@ -203,9 +242,17 @@ export function createHub(
               ? 'interrupted'
               : 'error';
         s.secret.approvals = [];
+        if (authorizationError(p.turn?.error?.message))
+          s.authError = signInHelp;
       });
       if (p.turn?.error?.message)
-        addMessage(sid, 'system', p.turn.error.message);
+        addMessage(
+          sid,
+          'system',
+          authorizationError(p.turn.error.message)
+            ? signInHelp
+            : p.turn.error.message,
+        );
     }
     if (method === 'serverRequest/resolved')
       updateSession(sid, (s) => {
@@ -244,14 +291,28 @@ export function createHub(
   }
   async function runtimeFor(m, provider, session) {
     assert(!closed, 'Исполнитель останавливается', 503);
-    const key = session?.id || `account:${m.id}:${provider}`;
+    const accountId = session
+      ? session.accountId || null
+      : m.agentAccounts?.[provider] || null;
+    if (accountId) accounts.connected(accountId, provider);
+    const profileId = accountId
+      ? session?.profileId || session?.id || accountId
+      : session?.profileId;
+    const key =
+      session?.id || `account:${m.id}:${provider}:${accountId || 'native'}`;
     if (runtimes.has(key)) return runtimes.get(key);
     assert(
       runtimes.size < 16,
       'Открыто слишком много агентов. Завершите лишние диалоги.',
       429,
     );
-    const runtime = { key, sessionId: session?.id, provider, machineId: m.id };
+    const runtime = {
+      key,
+      sessionId: session?.id,
+      provider,
+      machineId: m.id,
+      accountId,
+    };
     runtimes.set(key, runtime);
     runtime.ready = (async () => {
       const cwd = session
@@ -260,9 +321,21 @@ export function createHub(
             ? load(session.projectId, 'workspace').path
             : await resolveHome(m))
         : undefined;
+      if (accountId)
+        runtime.releaseAccount = await accounts.prepare(
+          m,
+          provider,
+          accountId,
+          profileId,
+        );
       const opened = await openProcess(
         m,
-        { provider, operation: 'agent', cwd },
+        {
+          provider,
+          operation: 'agent',
+          cwd,
+          ...(profileId ? { profileId } : {}),
+        },
         connectors,
       );
       if (closed) {
@@ -272,9 +345,12 @@ export function createHub(
       runtime.rpc = new AgentRpc(opened);
       runtime.rpc.on('message', (msg) => onMessage(runtime, msg));
       runtime.rpc.on('disconnected', () => {
+        const expected = runtime.managedClose;
         clearTimeout(runtime.turnTimer);
         runtimes.delete(key);
-        if (session)
+        if (runtime.releaseAccount)
+          void releaseRuntime(runtime).catch(() => {});
+        if (session && !expected)
           updateSession(session.id, (s) => {
             if (['running', 'connecting', 'approval'].includes(s.status))
               s.status = 'interrupted';
@@ -289,9 +365,19 @@ export function createHub(
               title: 'ezdeploy',
               version: '0.2.0',
             },
+            ...(accountId ? { capabilities: { experimentalApi: true } } : {}),
           });
           runtime.rpc.notify('initialized');
+          if (accountId) await accounts.authenticate(runtime.rpc, accountId);
           if (session) {
+            const auth = await runtime.rpc.request('account/read', {
+              refreshToken: false,
+            });
+            assert(
+              auth.account || auth.requiresOpenaiAuth === false,
+              'Для Codex нужна авторизация. Добавьте аккаунт в Настройках и выберите его под полем сообщения.',
+              403,
+            );
             if (session.model || session.reasoning) {
               const catalog = await codexModels(runtime.rpc);
               validateSelection(
@@ -361,16 +447,29 @@ export function createHub(
         throw error;
       }
       return runtime;
-    })().catch((error) => {
+    })().catch(async (error) => {
       runtimes.delete(key);
+      if (runtime.releaseAccount || runtime.cleanupPromise)
+        await releaseRuntime(runtime).catch(() => {});
       throw Object.assign(
         new Error(
-          `Не удалось подключить ${providers[provider].name}. Проверьте установку, вход и путь проекта. ${error.message}`,
+          error.status === 403
+            ? error.message
+            : `Не удалось подключить ${providers[provider].name}. Проверьте установку, вход и путь проекта. ${error.message}`,
         ),
-        { status: 400 },
+        { status: error.status || 400 },
       );
     });
     return runtime;
+  }
+  async function releaseRuntime(runtime) {
+    if (runtime.cleanupPromise) return runtime.cleanupPromise;
+    const release = runtime.releaseAccount;
+    runtime.releaseAccount = null;
+    runtime.managedClose = true;
+    runtime.rpc?.close();
+    runtime.cleanupPromise = Promise.resolve().then(() => release?.());
+    return runtime.cleanupPromise;
   }
   async function status(m, provider) {
     const version = await agentVersion(m, provider, openProcess, connectors);
@@ -418,6 +517,7 @@ export function createHub(
   }
   function snapshot() {
     return {
+      accounts: accounts.list(),
       projects: records('workspace'),
       services: store.list('projects').map((s) => ({
         id: s.id,
@@ -504,6 +604,7 @@ export function createHub(
         ].slice(-120);
         saveMachine(current);
       }
+      void accounts.cleanupMachine(machine(id));
       return publicRecord(machine(id));
     } catch (error) {
       const current = machine(id);
@@ -558,6 +659,7 @@ export function createHub(
         for (const r of runtimes.values())
           if (r.machineId === m.id && r.provider === provider) r.rpc?.close();
         modelCatalog.invalidate(m.id, provider);
+        accounts.invalidateMachine(m.id);
       }
       p.close();
     };
@@ -588,6 +690,7 @@ export function createHub(
   }
   async function handle(path, method, body, send) {
     if (!path.startsWith('/api/hub')) return false;
+    if (await accounts.handle(path, method, body, send)) return true;
     if (path === '/api/hub' && method === 'GET') {
       send(snapshot());
       return true;
@@ -694,6 +797,10 @@ export function createHub(
     if (path === '/api/hub/sessions' && method === 'POST') {
       const p = body.projectId ? load(body.projectId, 'workspace') : null;
       const m = machine(p?.machineId || body.machineId);
+      const accountId = Object.hasOwn(body, 'accountId')
+        ? body.accountId
+        : m.agentAccounts?.[body.provider] || null;
+      if (accountId) accounts.connected(accountId, body.provider);
       if (p && body.machineId)
         assert(
           p.machineId === body.machineId,
@@ -718,6 +825,7 @@ export function createHub(
         cwd:
           p?.path || projectPath(await resolveHome(m), m.platform || 'linux'),
         provider: body.provider,
+        accountId: accountId || null,
         mode:
           body.mode ||
           (!p && body.provider === 'codex' ? 'read-only' : 'workspace-write'),
@@ -730,12 +838,13 @@ export function createHub(
         updatedAt: now(),
         secret: { messages: [], approvals: [] },
       };
+      if (session.accountId) session.profileId = session.id;
       if (session.model || session.reasoning) {
         const catalog = await modelCatalog.get(
           m,
           session.provider,
           session.cwd,
-          { model: session.model },
+          { model: session.model, accountId: session.accountId },
         );
         validateSelection(catalog, session.model, session.reasoning);
       } else
@@ -756,11 +865,15 @@ export function createHub(
             s.cwd ||
             (s.projectId ? load(s.projectId, 'workspace').path : undefined),
           messages: s.secret.messages,
+          errorMessage: s.secret.errorMessage || null,
           approvals: s.secret.approvals,
         });
         return true;
       }
       if (!sm[2] && method === 'PATCH') {
+        const accountChanged =
+          Object.hasOwn(body, 'accountId') &&
+          (body.accountId || null) !== (s.accountId || null);
         assert(!modelChanges.has(s.id), 'Дождитесь сохранения модели', 409);
         if (body.title !== undefined)
           assert(
@@ -774,7 +887,36 @@ export function createHub(
           'Сначала остановите диалог',
           409,
         );
-        if (Object.hasOwn(body, 'model') || Object.hasOwn(body, 'reasoning')) {
+        if (Object.hasOwn(body, 'accountId')) {
+          const accountId = body.accountId || null;
+          if (accountId) accounts.connected(accountId, s.provider);
+          assert(
+            !s.profileId || accountId,
+            'Для этого чата выберите сохранённый аккаунт. Аккаунт машины доступен в новом чате.',
+            409,
+          );
+          if (accountId && !s.profileId) {
+            assert(
+              !s.secret.messages.some((m) =>
+                ['assistant', 'tool'].includes(m.role),
+              ),
+              'Этот чат использует прежний профиль машины. Создайте новый чат с выбранным аккаунтом; история этого чата сохранится.',
+              409,
+            );
+            s.profileId = s.id;
+            s.nativeId = null;
+          }
+          s.accountId = accountId;
+          s.model = '';
+          s.reasoning = '';
+          s.authError = null;
+          s.secret.errorMessage = null;
+        }
+        if (
+          Object.hasOwn(body, 'model') ||
+          Object.hasOwn(body, 'reasoning') ||
+          accountChanged
+        ) {
           assert(!modelChanges.has(s.id), 'Настройки модели уже меняются', 409);
           assert(
             !Object.hasOwn(body, 'projectId'),
@@ -782,11 +924,11 @@ export function createHub(
           );
           modelChanges.add(s.id);
           try {
-            const model = body.model ?? s.model ?? '';
+            let model = body.model ?? s.model ?? '';
             const reasoning =
               body.reasoning ?? (model === s.model ? s.reasoning || '' : '');
             const catalog =
-              model || reasoning
+              model || reasoning || (accountChanged && s.accountId)
                 ? await modelCatalog.get(
                     machine(s.machineId),
                     s.provider,
@@ -794,9 +936,11 @@ export function createHub(
                       (s.projectId
                         ? load(s.projectId, 'workspace').path
                         : await resolveHome(machine(s.machineId))),
-                    { model },
+                    { model, accountId: s.accountId || null },
                   )
                 : { models: [] };
+            if (!model && accountChanged && s.accountId)
+              model = catalog.defaultModelId || '';
             validateSelection(catalog, model, reasoning);
             assert(
               load(s.id, 'session').updatedAt === s.updatedAt &&
@@ -877,10 +1021,46 @@ export function createHub(
             body.message.length <= 32000,
           'Сообщение: от 1 до 32000 символов',
         );
-        s.status = 'connecting';
-        if (!s.customTitle && !s.secret.messages.some((m) => m.role === 'user'))
-          s.title = body.message.trim().slice(0, 70);
-        save(s);
+        if (s.accountId) accounts.connected(s.accountId, s.provider);
+        updateSession(s.id, (x) => {
+          x.status = 'connecting';
+          x.authError = null;
+          x.secret.errorMessage = null;
+          if (
+            !x.customTitle &&
+            !x.secret.messages.some((m) => m.role === 'user')
+          )
+            x.title = body.message.trim().slice(0, 70);
+        });
+        let connectingRuntime;
+        try {
+          connectingRuntime = await runtimeFor(
+            machine(s.machineId),
+            s.provider,
+            s,
+          );
+          const ready = await connectingRuntime.ready;
+          if (load(s.id, 'session').status !== 'connecting') {
+            await releaseRuntime(ready).catch(() => {});
+            throw Object.assign(
+              new Error('Отправка отменена. Черновик можно отправить снова.'),
+              { status: 409 },
+            );
+          }
+        } catch (error) {
+          if (connectingRuntime?.cancelled)
+            throw Object.assign(
+              new Error('Отправка отменена. Черновик можно отправить снова.'),
+              { status: 409 },
+            );
+          if (!connectingRuntime?.cancelled)
+            updateSession(s.id, (x) => {
+              x.status = 'error';
+              x.authError = error.status === 403 ? error.message : null;
+              x.secret.errorMessage = error.message?.slice(0, 2000);
+            });
+          throw error;
+        }
         addMessage(s.id, 'user', body.message.trim());
         // Accept promptly; native agent events update the durable session asynchronously.
         void (async () => {
@@ -923,6 +1103,7 @@ export function createHub(
                 30 * 60 * 1000,
               );
               clearTimeout(r.turnTimer);
+              if (r.accountId) await releaseRuntime(r);
               updateSession(s.id, (x) => {
                 if (x.status !== 'interrupted')
                   x.status =
@@ -932,13 +1113,20 @@ export function createHub(
             }
           } catch (error) {
             if (closed) return;
+            const failed = runtimes.get(s.id);
+            if (failed?.accountId) await releaseRuntime(failed).catch(() => {});
             const stopped = load(s.id, 'session').status === 'interrupted';
             if (!stopped) {
               updateSession(s.id, (x) => {
                 x.status = 'error';
+                if (authorizationError(error.message)) x.authError = signInHelp;
                 x.secret.approvals = [];
               });
-              addMessage(s.id, 'system', error.message);
+              addMessage(
+                s.id,
+                'system',
+                authorizationError(error.message) ? signInHelp : error.message,
+              );
             }
           }
         })();
@@ -947,6 +1135,7 @@ export function createHub(
       }
       if (method === 'POST' && sm[2] === 'stop') {
         const r = runtimes.get(s.id);
+        if (r) r.cancelled = true;
         if (r?.rpc) {
           try {
             if (s.provider === 'codex' && r.turnId)
@@ -1044,11 +1233,23 @@ export function createHub(
       }
     }
     const am = path.match(
-      /^\/api\/hub\/machines\/([a-f0-9-]+)\/agents\/(codex|opencode)(?:\/(install|login|logout|models))?$/,
+      /^\/api\/hub\/machines\/([a-f0-9-]+)\/agents\/(codex|opencode)(?:\/(install|login|logout|models|account))?$/,
     );
     if (am) {
       const m = machine(am[1]),
         provider = am[2];
+      if (method === 'POST' && am[3] === 'account') {
+        const accountId = body.accountId || null;
+        if (accountId) accounts.connected(accountId, provider);
+        m.agentAccounts = { ...m.agentAccounts, [provider]: accountId };
+        saveMachine(m);
+        for (const r of runtimes.values())
+          if (r.machineId === m.id && r.provider === provider && !r.sessionId)
+            r.rpc?.close();
+        modelCatalog.invalidate(m.id, provider);
+        send({ ok: true, accountId });
+        return true;
+      }
       if (method === 'POST' && am[3] === 'models') {
         const session = body.sessionId ? load(body.sessionId, 'session') : null;
         const project = body.projectId
@@ -1071,6 +1272,11 @@ export function createHub(
           await modelCatalog.get(m, provider, cwd, {
             model: body.model ?? '',
             refresh: body.refresh === true,
+            accountId: Object.hasOwn(body, 'accountId')
+              ? body.accountId
+              : session
+                ? session.accountId || null
+                : m.agentAccounts?.[provider] || null,
           }),
         );
         return true;
@@ -1193,6 +1399,7 @@ export function createHub(
       if (closed) return;
       closed = true;
       modelCatalog.close();
+      accounts.close();
       clearInterval(sampler);
       for (const r of runtimes.values()) r.rpc?.close();
       for (const t of tasks.values()) {

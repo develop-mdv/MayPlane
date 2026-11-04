@@ -1,4 +1,5 @@
 import { AgentRpc } from './agent-rpc.mjs';
+import { randomUUID } from 'node:crypto';
 import { assert } from './security.mjs';
 
 const choice = (id, name, description) => ({
@@ -163,7 +164,14 @@ export function validateSelection(catalog, model, reasoning = '') {
 
 // Probes never prompt a model or change a user's chat. Reuse their native session
 // IDs so periodic refreshes do not create an unbounded native chat history.
-export function createModelCatalog({ openProcess, connectors, isClosed }) {
+export function createModelCatalog({
+  openProcess,
+  connectors,
+  isClosed,
+  prepareAccount,
+  authenticateAccount,
+  refreshAccount,
+}) {
   const entries = new Map(),
     probes = new Set();
   let opening = 0;
@@ -171,14 +179,14 @@ export function createModelCatalog({ openProcess, connectors, isClosed }) {
     machine,
     provider,
     cwd,
-    { model = '', refresh = false } = {},
+    { model = '', refresh = false, accountId = null } = {},
   ) {
     assert(!isClosed(), 'Исполнитель останавливается', 503);
     assert(
       typeof model === 'string' && model.length <= 500,
       'Некорректная модель',
     );
-    const key = JSON.stringify([machine.id, provider, cwd]);
+    const key = JSON.stringify([machine.id, provider, cwd, accountId]);
     let entry = entries.get(key);
     if (!entry) {
       if (entries.size >= 64) {
@@ -186,12 +194,15 @@ export function createModelCatalog({ openProcess, connectors, isClosed }) {
         assert(idle, 'Слишком много запросов моделей', 429);
         entries.delete(idle[0]);
       }
-      entry = { variants: new Map() };
+      entry = {
+        variants: new Map(),
+        profileId: accountId ? randomUUID() : undefined,
+      };
       entries.set(key, entry);
     }
     if (entry.pending) {
       await entry.pending;
-      return get(machine, provider, cwd, { model });
+      return get(machine, provider, cwd, { model, accountId });
     }
     if (
       !refresh &&
@@ -206,24 +217,44 @@ export function createModelCatalog({ openProcess, connectors, isClosed }) {
     );
     entry.pending = (async () => {
       opening++;
-      let opened;
+      let opened, release;
       try {
+        if (accountId)
+          release = await prepareAccount?.(
+            machine,
+            provider,
+            accountId,
+            entry.profileId,
+          );
         opened = await openProcess(
           machine,
-          { provider, operation: 'agent', cwd },
+          {
+            provider,
+            operation: 'agent',
+            cwd,
+            ...(entry.profileId ? { profileId: entry.profileId } : {}),
+          },
           connectors,
         );
+      } catch (error) {
+        await release?.();
+        throw error;
       } finally {
         opening--;
       }
       if (isClosed()) {
         opened.close();
+        await release?.();
         throw new Error('Исполнитель останавливается');
       }
       const rpc = new AgentRpc(opened);
       let runtime;
       rpc.on('message', (msg) => {
-        if (msg.id !== undefined) rpc.reject(msg.id);
+        if (msg.id !== undefined) {
+          if (msg.method === 'account/chatgptAuthTokens/refresh' && accountId)
+            void refreshAccount?.(rpc, accountId, msg);
+          else rpc.reject(msg.id);
+        }
         if (
           runtime &&
           msg.method === 'session/update' &&
@@ -248,8 +279,10 @@ export function createModelCatalog({ openProcess, connectors, isClosed }) {
         if (provider === 'codex') {
           await rpc.request('initialize', {
             clientInfo: { name: 'ezdeploy', version: '0.2.0' },
+            ...(accountId ? { capabilities: { experimentalApi: true } } : {}),
           });
           rpc.notify('initialized');
+          if (accountId) await authenticateAccount?.(rpc, accountId);
           catalog = await codexModels(rpc);
         } else {
           const init = await rpc.request('initialize', {
@@ -319,6 +352,7 @@ export function createModelCatalog({ openProcess, connectors, isClosed }) {
         clearTimeout(deadline);
         probes.delete(rpc);
         rpc.close();
+        await release?.();
       }
     })();
     try {
@@ -336,6 +370,10 @@ export function createModelCatalog({ openProcess, connectors, isClosed }) {
   }
   return {
     get,
+    invalidateAccount(accountId) {
+      for (const key of entries.keys())
+        if (JSON.parse(key)[3] === accountId) entries.delete(key);
+    },
     invalidate(machineId, provider) {
       for (const key of entries.keys()) {
         const [id, agent] = JSON.parse(key);

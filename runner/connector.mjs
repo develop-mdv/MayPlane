@@ -99,6 +99,10 @@ function connect() {
           provider: message.provider,
           operation: message.operation,
           cwd: message.cwd,
+          profileId: message.profileId,
+          profileFormat: message.profileFormat,
+          profileVendor: message.profileVendor,
+          profileCredential: message.profileCredential,
         });
         processes.set(message.id, childProcess);
         for (const type of ['stdout', 'stderr'])
