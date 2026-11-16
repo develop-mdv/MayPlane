@@ -1,5 +1,5 @@
 'use client';
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useId, useRef, useState } from 'react';
 import {
   ArrowUp,
   Square,
@@ -12,11 +12,13 @@ import {
   Bug,
   Folder,
   LoaderCircle,
+  Boxes,
 } from 'lucide-react';
 import type { Server } from '@/lib/domain';
 import {
   activeSession,
   providerNames,
+  agentProviders,
   sessionLabels,
   type Hub,
   type AgentSession,
@@ -24,11 +26,23 @@ import {
   type AgentApproval,
   type HubProject,
   type AgentProvider,
+  type ServiceConversationBatch,
 } from '@/lib/hub';
+import {
+  serviceChatBlock,
+  serviceChatCommand,
+  splitServiceChatCommand,
+  suggestsServiceChatCommand,
+} from '@/lib/service-chat.mjs';
 import { CopyButton, ErrorText, Field, Modal, Submit } from './hub-ui';
 import { AgentModelSelector, ChatModelSettings } from './agent-model-selector';
 import { AccountSelect } from './agent-accounts';
 import { AgentLimitsControl } from './agent-limits';
+import {
+  ServiceChatBatch,
+  ServiceCommandSuggestion,
+  ServiceCommandTag,
+} from './service-chat';
 const chatDrafts = new WeakMap<object, Map<string, string>>();
 
 export function NewSession({
@@ -97,7 +111,7 @@ export function NewSession({
                 : { accountId: accountChoice || null }),
               model,
               reasoning,
-              mode: provider === 'opencode' ? 'workspace-write' : mode,
+              mode: provider !== 'codex' ? 'workspace-write' : mode,
             });
             onCreated(s);
           } catch (e) {
@@ -158,7 +172,7 @@ export function NewSession({
         <div className="hub-field">
           <span>Агент</span>
           <div className="provider-options">
-            {(['codex', 'opencode'] as const).map((p) => (
+            {agentProviders.map((p) => (
               <button
                 className={provider === p ? 'selected' : ''}
                 type="button"
@@ -175,7 +189,9 @@ export function NewSession({
                 <small>
                   {p === 'codex'
                     ? 'Ваш аккаунт ChatGPT / API'
-                    : 'Ваши провайдеры моделей'}
+                    : p === 'claude'
+                      ? 'Anthropic API / аккаунт машины'
+                      : 'Ваши провайдеры моделей'}
                 </small>
               </button>
             ))}
@@ -241,8 +257,8 @@ export function NewSession({
           </Field>
         ) : (
           <p className="hub-note">
-            <ShieldCheck size={16} /> OpenCode запрашивает разрешение на
-            инструменты. Разрешить можно одно действие за раз.
+            <ShieldCheck size={16} /> {providerNames[provider]} запрашивает
+            разрешение на инструменты. Разрешить можно одно действие за раз.
           </p>
         )}
         <ErrorText error={error} />
@@ -445,6 +461,7 @@ export function AgentChat({
   onNewProject,
   onNewSession,
   onAccounts,
+  onOpenService,
   disabled,
 }: {
   session?: AgentSession;
@@ -454,52 +471,56 @@ export function AgentChat({
   onNewProject: () => void;
   onNewSession: () => void;
   onAccounts: () => void;
+  onOpenService: (id: string) => void;
   disabled: boolean;
 }) {
+  const api = hub.api;
+  const sessionId = session?.id;
   const [detail, setDetail] = useState<SessionDetail | null>(null),
-    [draft, setDraft] = useState(''),
+    [draft, setDraft] = useState(() =>
+      sessionId ? chatDrafts.get(api)?.get(sessionId) || '' : '',
+    ),
     [error, setError] = useState(''),
-    [sending, setSending] = useState(false);
+    [sending, setSending] = useState(false),
+    [changingMode, setChangingMode] = useState(false);
+  const [composerFocused, setComposerFocused] = useState(false);
+  const [commandsDismissed, setCommandsDismissed] = useState(false);
+  const commandMenuId = useId();
   const bottom = useRef<HTMLDivElement>(null),
     scroller = useRef<HTMLDivElement>(null),
     follow = useRef(true),
     composer = useRef<HTMLTextAreaElement>(null);
-  const current = useRef(session?.id);
-  current.current = session?.id;
-  const api = hub.api;
+  const mounted = useRef(false);
   function rememberDraft(text: string) {
-    if (session) {
+    if (sessionId) {
       let drafts = chatDrafts.get(api);
       if (!drafts) {
         drafts = new Map();
         chatDrafts.set(api, drafts);
       }
-      if (text) drafts.set(session.id, text);
-      else drafts.delete(session.id);
+      if (text) drafts.set(sessionId, text);
+      else drafts.delete(sessionId);
     }
     setDraft(text);
   }
   async function reload() {
-    if (!session) return;
-    const s = await api<SessionDetail>(`/hub/sessions/${session.id}`);
-    if (current.current === s.id) {
+    if (!sessionId) return;
+    const s = await api<SessionDetail>(`/hub/sessions/${sessionId}`);
+    if (mounted.current && s.id === sessionId) {
       setDetail(s);
       setError('');
     }
   }
   useEffect(() => {
-    setDetail(null);
-    setDraft(session ? chatDrafts.get(api)?.get(session.id) || '' : '');
-    setError('');
-    follow.current = true;
-    if (!session) return;
-    let alive = true,
-      loading = false;
+    if (!sessionId) return;
+    mounted.current = true;
+    let alive = true;
+    let loading = false;
     const poll = async () => {
       if (loading) return;
       loading = true;
       try {
-        const s = await api<SessionDetail>(`/hub/sessions/${session.id}`);
+        const s = await api<SessionDetail>(`/hub/sessions/${sessionId}`);
         if (alive) {
           setDetail(s);
           setError('');
@@ -514,23 +535,73 @@ export function AgentChat({
     const timer = setInterval(poll, 1200);
     return () => {
       alive = false;
+      mounted.current = false;
       clearInterval(timer);
     };
-  }, [session?.id, api]);
+  }, [sessionId, api]);
   useEffect(() => {
     if (follow.current)
       bottom.current?.scrollIntoView({ behavior: 'instant', block: 'end' });
   }, [detail]);
-  const live = detail || session;
+  const currentDetail = detail?.id === session?.id ? detail : null;
+  const live = currentDetail || session;
+  const drafting = !!live?.serviceDrafting;
+  const chatBusy =
+    disabled ||
+    sending ||
+    changingMode ||
+    activeSession(live) ||
+    !!session?.archived;
+  const command = splitServiceChatCommand(draft);
+  const commandAttached = !!command?.separated;
+  const serviceChatAvailable = !!hub.data.capabilities?.serviceChat;
+  const commandUnavailable = !!command && !serviceChatAvailable;
+  const commandMenuOpen =
+    composerFocused &&
+    !commandsDismissed &&
+    !disabled &&
+    !session?.archived &&
+    suggestsServiceChatCommand(draft);
+  const draftContent = commandAttached && command ? command.content : draft;
+  function chooseCommand() {
+    rememberDraft(serviceChatCommand + ' ');
+    composer.current?.focus();
+  }
+  function removeCommand() {
+    rememberDraft(draftContent);
+    composer.current?.focus();
+  }
+  async function changeServiceMode(active: boolean) {
+    if (!session || chatBusy || !serviceChatAvailable) return;
+    if (active === drafting) {
+      composer.current?.focus();
+      return;
+    }
+    setChangingMode(true);
+    setError('');
+    try {
+      await api('/hub/sessions/' + session.id + '/service-drafts', 'PATCH', {
+        active,
+      });
+      await reload();
+      if (active && mounted.current) composer.current?.focus();
+    } catch (reason) {
+      setError((reason as Error).message);
+    } finally {
+      setChangingMode(false);
+    }
+  }
   async function send() {
-    if (!session || !draft.trim() || sending || activeSession(live)) return;
+    if (!session || !draft.trim() || chatBusy || commandUnavailable) return;
     const text = draft;
     setSending(true);
     setError('');
     try {
       await hub.mutate(`/sessions/${session.id}/message`, { message: text });
-      if (current.current === session.id) {
-        rememberDraft('');
+      const drafts = chatDrafts.get(api);
+      if (drafts?.get(session.id) === text) drafts.delete(session.id);
+      if (mounted.current) {
+        setDraft((value) => (value === text ? '' : value));
         follow.current = true;
         await reload();
         composer.current?.focus();
@@ -541,7 +612,25 @@ export function AgentChat({
       setSending(false);
     }
   }
-  const messages = detail?.messages || [];
+  const messages = currentDetail?.messages || [];
+  const batches = currentDetail?.serviceBatches || [];
+  const messageIds = new Set(messages.map((message) => message.id));
+  function renderServiceBatch(batch: ServiceConversationBatch) {
+    return (
+      session && (
+        <ServiceChatBatch
+          key={batch.id}
+          batch={batch}
+          sessionId={session.id}
+          hub={hub}
+          disabled={chatBusy}
+          onRefresh={reload}
+          onOpen={onOpenService}
+          onRefine={() => void changeServiceMode(true)}
+        />
+      )
+    );
+  }
   return (
     <div className="chat-layout">
       {session?.nativeSource && (
@@ -579,7 +668,7 @@ export function AgentChat({
               el.scrollHeight - el.scrollTop - el.clientHeight < 100;
         }}
       >
-        {!messages.length ? (
+        {!messages.length && !batches.length ? (
           <div className="chat-welcome">
             <div className="welcome-mark">
               <Code2 size={32} />
@@ -635,7 +724,7 @@ export function AgentChat({
                     key={text}
                     disabled={disabled}
                     onClick={() => {
-                      setDraft(text);
+                      rememberDraft(text);
                       composer.current?.focus();
                     }}
                   >
@@ -680,52 +769,73 @@ export function AgentChat({
           </div>
         ) : (
           <div className="conversation">
-            {messages.map((m) => (
-              <article key={m.id} className={`chat-message ${m.role}`}>
-                {m.role === 'tool' ? (
-                  <details>
-                    <summary>
-                      <Terminal size={14} />
-                      Действие агента
-                      <ChevronDown size={13} />
-                    </summary>
-                    <pre>{m.content}</pre>
-                  </details>
-                ) : (
-                  <>
-                    <div className="message-author">
-                      {m.role === 'user'
-                        ? 'Вы'
-                        : m.role === 'system'
-                          ? 'Система'
-                          : providerNames[session!.provider]}
-                      <time>
-                        {new Date(m.createdAt).toLocaleTimeString('ru', {
-                          hour: '2-digit',
-                          minute: '2-digit',
-                        })}
-                      </time>
-                    </div>
-                    <RichText text={m.content} />
-                    {m.role === 'assistant' && (
-                      <div className="message-actions">
-                        <CopyButton value={m.content} />
+            {messages.map((m) => {
+              const text = m.serviceOutput
+                ? (serviceChatBlock(m.content)?.text ?? m.content)
+                : m.content;
+              return (
+                <article key={m.id} className={`chat-message ${m.role}`}>
+                  {m.role === 'tool' ? (
+                    <details>
+                      <summary>
+                        <Terminal size={14} />
+                        Действие агента
+                        <ChevronDown size={13} />
+                      </summary>
+                      <pre>{m.content}</pre>
+                    </details>
+                  ) : (
+                    <>
+                      <div className="message-author">
+                        {m.role === 'user'
+                          ? 'Вы'
+                          : m.role === 'system'
+                            ? 'Система'
+                            : providerNames[session!.provider]}
+                        <time>
+                          {new Date(m.createdAt).toLocaleTimeString('ru', {
+                            hour: '2-digit',
+                            minute: '2-digit',
+                          })}
+                        </time>
                       </div>
-                    )}
-                  </>
-                )}
-              </article>
-            ))}
-            {detail?.approvals.map((a) => (
+                      {m.role === 'user' &&
+                        m.command === serviceChatCommand && (
+                          <div className="message-command">
+                            <ServiceCommandTag />
+                          </div>
+                        )}
+                      {text && <RichText text={text} />}
+                      {batches
+                        .filter((batch) => batch.messageId === m.id)
+                        .map(renderServiceBatch)}
+                      {m.role === 'assistant' && text && (
+                        <div className="message-actions">
+                          <CopyButton value={text} />
+                        </div>
+                      )}
+                    </>
+                  )}
+                </article>
+              );
+            })}
+            {batches
+              .filter((batch) => !messageIds.has(batch.messageId))
+              .map((batch) => (
+                <article key={batch.id} className="chat-message assistant">
+                  {renderServiceBatch(batch)}
+                </article>
+              ))}
+            {currentDetail?.approvals.map((a) => (
               <ApprovalCard
                 key={a.id}
                 approval={a}
-                session={detail}
+                session={currentDetail}
                 hub={hub}
                 onDone={reload}
               />
             ))}
-            {activeSession(live) && !detail?.approvals.length && (
+            {activeSession(live) && !currentDetail?.approvals.length && (
               <div className="agent-working">
                 <LoaderCircle size={15} className="spin" />
                 {live ? sessionLabels[live.status] : 'Подключение'}
@@ -739,130 +849,222 @@ export function AgentChat({
       {session && (
         <div className="composer-area">
           <ErrorText
-            error={error || live?.authError || detail?.errorMessage || ''}
+            error={
+              commandUnavailable
+                ? 'Команда /services доступна после обновления серверной части MayPlane.'
+                : error || live?.authError || currentDetail?.errorMessage || ''
+            }
           />
           {live?.authError && (
             <button className="hub-button" type="button" onClick={onAccounts}>
               Подключить аккаунт в настройках
             </button>
           )}
-          <form
-            className={`chat-composer ${disabled || session.archived ? 'disabled' : ''}`}
-            onSubmit={(e) => {
-              e.preventDefault();
-              void send();
-            }}
-          >
-            <textarea
-              ref={composer}
-              rows={3}
-              aria-label="Сообщение агенту"
-              value={draft}
-              maxLength={32000}
-              placeholder={
-                session.archived
-                  ? 'Диалог в архиве'
-                  : 'Опишите задачу, задайте вопрос или продолжите работу…'
-              }
-              disabled={disabled || session.archived}
-              onChange={(e) => rememberDraft(e.target.value)}
-              onKeyDown={(e) => {
-                if (
-                  e.key === 'Enter' &&
-                  !e.shiftKey &&
-                  !e.nativeEvent.isComposing
-                ) {
-                  e.preventDefault();
-                  void send();
-                }
+          <div className="composer-entry">
+            <form
+              className={`chat-composer ${disabled || session.archived ? 'disabled' : ''}${commandAttached ? ' with-command' : ''}`}
+              onSubmit={(e) => {
+                e.preventDefault();
+                void send();
               }}
-            />
-            <div className="composer-toolbar">
-              <div>
-                <span className={`provider-dot ${session.provider}`} />
-                <strong>{providerNames[session.provider]}</strong>
-                <ChatModelSettings
-                  accountOnly
-                  key={session.id + ':account'}
-                  hub={hub}
-                  session={live || session}
-                  disabled={
-                    disabled ||
-                    sending ||
-                    activeSession(live) ||
-                    session.archived
-                  }
-                  onAccounts={onAccounts}
-                />
-                <ChatModelSettings
-                  onAccounts={onAccounts}
-                  key={session.id}
-                  hub={hub}
-                  session={live || session}
-                  disabled={
-                    disabled ||
-                    sending ||
-                    activeSession(live) ||
-                    session.archived
-                  }
-                />
-                <span className="composer-mode">
-                  <ShieldCheck size={13} />
-                  {session.mode === 'read-only'
-                    ? 'Только чтение'
-                    : 'Права по запросу'}
-                </span>
-                <AgentLimitsControl
-                  key={`${session.id}:${live?.accountId || 'native'}`}
-                  hub={hub}
-                  machineId={session.machineId}
-                  provider={session.provider}
-                  accountId={live?.accountId || null}
-                  sessionId={session.id}
-                  usage={detail?.usage}
-                  disabled={disabled}
-                />
-              </div>
-              {activeSession(live) ? (
-                <button
-                  type="button"
-                  className="send-button stop"
-                  aria-label="Остановить выполнение"
-                  onClick={async () => {
-                    try {
-                      await hub.mutate(`/sessions/${session.id}/stop`);
-                      await reload();
-                    } catch (e) {
-                      setError((e as Error).message);
-                    }
-                  }}
-                >
-                  <Square size={14} fill="currentColor" />
-                </button>
-              ) : (
-                <button
-                  className="send-button"
-                  type="submit"
-                  disabled={
-                    !draft.trim() || sending || disabled || session.archived
-                  }
-                  aria-label="Отправить сообщение"
-                >
-                  {sending ? (
-                    <LoaderCircle className="spin" size={18} />
-                  ) : (
-                    <ArrowUp size={20} />
-                  )}
-                </button>
+            >
+              {commandAttached && (
+                <div className="composer-command-token">
+                  <ServiceCommandTag onRemove={removeCommand} />
+                </div>
               )}
-            </div>
-          </form>
+              <textarea
+                ref={composer}
+                rows={3}
+                aria-label="Сообщение агенту"
+                aria-autocomplete="list"
+                aria-controls={commandMenuOpen ? commandMenuId : undefined}
+                aria-activedescendant={
+                  commandMenuOpen ? commandMenuId + '-services' : undefined
+                }
+                value={draftContent}
+                maxLength={
+                  32000 - (commandAttached ? serviceChatCommand.length + 1 : 0)
+                }
+                placeholder={
+                  session.archived
+                    ? 'Диалог в архиве'
+                    : drafting || commandAttached
+                      ? 'Что оформить? Можно добавить ссылку на репозиторий…'
+                      : 'Сообщение агенту. Введите / для подсказок…'
+                }
+                disabled={disabled || session.archived}
+                onFocus={() => {
+                  setComposerFocused(true);
+                  setCommandsDismissed(false);
+                }}
+                onBlur={() => setComposerFocused(false)}
+                onChange={(e) => {
+                  setCommandsDismissed(false);
+                  rememberDraft(
+                    commandAttached
+                      ? serviceChatCommand + ' ' + e.target.value
+                      : e.target.value,
+                  );
+                }}
+                onKeyDown={(e) => {
+                  if (e.nativeEvent.isComposing) return;
+                  if (commandMenuOpen && e.key === 'Escape') {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    setCommandsDismissed(true);
+                    return;
+                  }
+                  if (
+                    commandMenuOpen &&
+                    !e.shiftKey &&
+                    (e.key === 'Enter' || e.key === 'Tab')
+                  ) {
+                    e.preventDefault();
+                    chooseCommand();
+                    return;
+                  }
+                  if (
+                    commandAttached &&
+                    e.key === 'Backspace' &&
+                    e.currentTarget.selectionStart === 0 &&
+                    e.currentTarget.selectionEnd === 0
+                  ) {
+                    e.preventDefault();
+                    removeCommand();
+                    return;
+                  }
+                  if (e.key === 'Enter' && !e.shiftKey) {
+                    e.preventDefault();
+                    void send();
+                  }
+                }}
+              />
+              {!session.archived && (
+                <div className="composer-service-mode">
+                  <button
+                    type="button"
+                    className="chat-service-trigger"
+                    aria-pressed={drafting}
+                    title={
+                      drafting
+                        ? 'Завершить оформление сервисов'
+                        : 'Команда ' + serviceChatCommand
+                    }
+                    disabled={chatBusy || !serviceChatAvailable}
+                    onClick={() => void changeServiceMode(!drafting)}
+                  >
+                    {changingMode ? (
+                      <LoaderCircle size={14} className="spin" />
+                    ) : (
+                      <Boxes size={14} />
+                    )}
+                    {drafting ? 'Оформление сервисов' : 'Оформить сервисы'}
+                  </button>
+                  {(drafting || commandAttached) && (
+                    <span>
+                      {providerNames[session.provider]} использует контекст
+                      этого чата. Сюда же можно прислать ссылку на репозиторий.
+                    </span>
+                  )}
+                </div>
+              )}
+              <div className="composer-toolbar">
+                <div>
+                  <span className={`provider-dot ${session.provider}`} />
+                  <strong>{providerNames[session.provider]}</strong>
+                  <ChatModelSettings
+                    accountOnly
+                    key={session.id + ':account'}
+                    hub={hub}
+                    session={live || session}
+                    disabled={
+                      disabled ||
+                      sending ||
+                      activeSession(live) ||
+                      session.archived
+                    }
+                    onAccounts={onAccounts}
+                  />
+                  <ChatModelSettings
+                    onAccounts={onAccounts}
+                    key={session.id}
+                    hub={hub}
+                    session={live || session}
+                    disabled={
+                      disabled ||
+                      sending ||
+                      activeSession(live) ||
+                      session.archived
+                    }
+                  />
+                  <span className="composer-mode">
+                    <ShieldCheck size={13} />
+                    {session.mode === 'read-only'
+                      ? 'Только чтение'
+                      : 'Права по запросу'}
+                  </span>
+                  <AgentLimitsControl
+                    key={`${session.id}:${live?.accountId || 'native'}`}
+                    hub={hub}
+                    machineId={session.machineId}
+                    provider={session.provider}
+                    accountId={live?.accountId || null}
+                    sessionId={session.id}
+                    usage={currentDetail?.usage}
+                    disabled={disabled}
+                  />
+                </div>
+                {activeSession(live) ? (
+                  <button
+                    type="button"
+                    className="send-button stop"
+                    aria-label="Остановить выполнение"
+                    onClick={async () => {
+                      try {
+                        await hub.mutate(`/sessions/${session.id}/stop`);
+                        await reload();
+                      } catch (e) {
+                        setError((e as Error).message);
+                      }
+                    }}
+                  >
+                    <Square size={14} fill="currentColor" />
+                  </button>
+                ) : (
+                  <button
+                    className="send-button"
+                    type="submit"
+                    disabled={!draft.trim() || chatBusy || commandUnavailable}
+                    aria-label="Отправить сообщение"
+                  >
+                    {sending ? (
+                      <LoaderCircle className="spin" size={18} />
+                    ) : (
+                      <ArrowUp size={20} />
+                    )}
+                  </button>
+                )}
+              </div>
+            </form>
+            {commandMenuOpen && (
+              <ServiceCommandSuggestion
+                id={commandMenuId}
+                available={serviceChatAvailable}
+                onSelect={chooseCommand}
+              />
+            )}
+          </div>
           <p className="composer-footnote">
             <span>
               <Folder size={12} />
               {session.cwd || project?.path || 'Без проекта'}
             </span>
-            <span>Enter — отправить · Shift + Enter — новая строка</span>
+            <span>
+              {commandMenuOpen
+                ? 'Enter — выбрать · Esc — закрыть'
+                : 'Enter — отправить · Shift + Enter — новая строка'}
+            </span>
           </p>
         </div>
       )}

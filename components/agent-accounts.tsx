@@ -8,13 +8,15 @@ import {
   LogIn,
   Plus,
   ShieldCheck,
+  Trash2,
   UserRound,
   X,
 } from 'lucide-react';
 import type { AgentAccount, AgentProvider, AccountLogin, Hub } from '@/lib/hub';
-import { providerNames } from '@/lib/hub';
+import { providerNames, agentProviders } from '@/lib/hub';
 import type { Workspace } from '@/lib/use-workspace';
 import { Modal, Field, ErrorText, CopyButton, Submit } from './hub-ui';
+import { ClaudeSubscription } from './claude-subscription';
 
 type AuthField = {
   key: string;
@@ -30,7 +32,7 @@ type AuthField = {
 };
 type AuthMethod = {
   id: string;
-  type: 'api' | 'oauth';
+  type: 'api' | 'oauth' | 'native';
   name: string;
   fields: AuthField[];
 };
@@ -73,10 +75,20 @@ export function AccountSelect({
       >
         {defaultName !== undefined && (
           <option value="__default">
-            По умолчанию сервера · {defaultName || 'аккаунт машины'}
+            По умолчанию сервера ·{' '}
+            {defaultName ||
+              (provider === 'claude'
+                ? 'подписка / профиль Claude'
+                : 'аккаунт машины')}
           </option>
         )}
-        {allowNative && <option value="">Аккаунт машины</option>}
+        {allowNative && (
+          <option value="">
+            {provider === 'claude'
+              ? 'Подписка / профиль Claude на машине'
+              : 'Аккаунт машины'}
+          </option>
+        )}
         {accounts
           .filter((a) => a.status === 'connected' || a.id === value)
           .map((a) => (
@@ -100,17 +112,21 @@ export function AccountSelect({
 
 function AccountForm({
   hub,
+  ws,
+  initialProvider,
   account,
   onClose,
   onStarted,
 }: {
   hub: Hub;
+  ws: Workspace;
+  initialProvider?: AgentProvider;
   account?: AgentAccount;
   onClose: () => void;
   onStarted: (a: AccountLogin) => void;
 }) {
   const [provider, setProvider] = useState<AgentProvider>(
-      account?.provider || 'codex',
+      account?.provider || initialProvider || 'codex',
     ),
     [name, setName] = useState(account?.name || ''),
     [list, setList] = useState<AuthProvider[]>([]),
@@ -125,6 +141,7 @@ function AccountForm({
   const api = hub.api;
   const selected = list.find((v) => v.id === vendor),
     auth = selected?.methods.find((m) => m.id === method);
+  const subscription = provider === 'claude' && method === 'subscription';
   function selectMethod(value: AuthMethod | undefined) {
     setMethod(value?.id || '');
     setInputs(
@@ -154,6 +171,9 @@ function AccountForm({
         setVendor(chosen?.id || '');
         selectMethod(
           chosen?.methods.find((m) => m.name === account?.methodName) ||
+            (provider === 'claude'
+              ? chosen?.methods.find((m) => m.id === 'subscription')
+              : undefined) ||
             chosen?.methods.find(
               (m) => m.type === 'oauth' && /device|headless/.test(m.id),
             ) ||
@@ -185,7 +205,11 @@ function AccountForm({
   return (
     <Modal
       title={account ? 'Повторный вход' : 'Добавить аккаунт'}
-      description="Подключите личный или рабочий аккаунт один раз и выбирайте его для машин и чатов."
+      description={
+        provider === 'claude'
+          ? 'Подключите свою подписку на машине или сохраните API-аккаунт.'
+          : 'Подключите личный или рабочий аккаунт один раз и выбирайте его для машин и чатов.'
+      }
       onClose={() => {
         if (!busy) onClose();
       }}
@@ -194,6 +218,7 @@ function AccountForm({
         className="hub-form"
         onSubmit={async (e) => {
           e.preventDefault();
+          if (subscription) return;
           setBusy(true);
           setError('');
           try {
@@ -218,7 +243,7 @@ function AccountForm({
           }
         }}
       >
-        {!account && (
+        {!account && !subscription && (
           <Field label="Название аккаунта">
             <input
               aria-label="Название аккаунта"
@@ -246,6 +271,7 @@ function AccountForm({
           >
             <option value="codex">Codex</option>
             <option value="opencode">OpenCode</option>
+            <option value="claude">Claude Code</option>
           </select>
         </Field>
         {loading ? (
@@ -255,6 +281,12 @@ function AccountForm({
           </p>
         ) : (
           <>
+            {provider === 'claude' && (
+              <p className="hub-note">
+                Войдите со своей подпиской Claude или добавьте Anthropic
+                API-ключ. Для подписки отдельный API-баланс не нужен.
+              </p>
+            )}
             {provider === 'opencode' && (
               <Field label="Провайдер">
                 <input
@@ -328,6 +360,20 @@ function AccountForm({
                 ))}
               </select>
             </Field>
+            {subscription && (
+              <ClaudeSubscription
+                hub={hub}
+                machines={ws.data.servers}
+                onUse={async (machineId) => {
+                  await ws.action(
+                    `/hub/machines/${machineId}/agents/claude/subscription`,
+                    { confirm: true },
+                  );
+                  await hub.refresh();
+                  onClose();
+                }}
+              />
+            )}
             {auth?.fields.filter(visible).map((f) => (
               <Field key={f.key} label={f.title} hint={f.description}>
                 {f.options?.length ? (
@@ -381,10 +427,12 @@ function AccountForm({
             )}
           </>
         )}
-        <p className="hub-note">
-          <ShieldCheck size={16} /> Вход выполняется в отдельном профиле.
-          Аккаунт вашего Codex или OpenCode вне панели не меняется.
-        </p>
+        {!subscription && (
+          <p className="hub-note">
+            <ShieldCheck size={16} /> Вход выполняется в отдельном профиле.
+            Аккаунт вашего Codex или OpenCode вне панели не меняется.
+          </p>
+        )}
         <ErrorText error={error} />
         <div className="form-actions">
           <button
@@ -395,11 +443,13 @@ function AccountForm({
           >
             Отмена
           </button>
-          <Submit busy={busy || loading || !method}>
-            {auth?.type === 'api'
-              ? 'Сохранить аккаунт'
-              : 'Перейти к авторизации'}
-          </Submit>
+          {!subscription && (
+            <Submit busy={busy || loading || !method}>
+              {auth?.type === 'api'
+                ? 'Сохранить аккаунт'
+                : 'Перейти к авторизации'}
+            </Submit>
+          )}
         </div>
       </form>
     </Modal>
@@ -552,13 +602,29 @@ function LoginDialog({
 }
 
 export function AccountsSettings({ hub, ws }: { hub: Hub; ws: Workspace }) {
-  const [form, setForm] = useState<AgentAccount | 'new' | null>(null),
+  const [form, setForm] = useState<AgentAccount | 'new' | 'claude' | null>(
+      null,
+    ),
     [login, setLogin] = useState<AccountLogin | null>(null),
     [renaming, setRenaming] = useState<AgentAccount | null>(null),
+    [deleting, setDeleting] = useState<AgentAccount | null>(null),
+    [removeError, setRemoveError] = useState(''),
+    [notice, setNotice] = useState(''),
     [name, setName] = useState(''),
     [error, setError] = useState(''),
     [busy, setBusy] = useState(false);
   const accounts = hub.data.accounts || [];
+  const linkedChats = deleting
+    ? hub.data.sessions.filter((s) => s.accountId === deleting.id)
+    : [];
+  const linkedMachines = deleting
+    ? ws.data.servers.filter(
+        (m) => m.agentAccounts?.[deleting.provider] === deleting.id,
+      )
+    : [];
+  const hasActiveChats = linkedChats.some((s) =>
+    ['connecting', 'running', 'approval'].includes(s.status),
+  );
   return (
     <>
       <section className="detail-card accounts-settings">
@@ -666,6 +732,18 @@ export function AccountsSettings({ hub, ws }: { hub: Hub; ws: Workspace }) {
                   >
                     <X size={13} /> Отключить
                   </button>
+                  <button
+                    type="button"
+                    className="text-button danger"
+                    aria-label={`Удалить аккаунт ${a.name}`}
+                    disabled={busy}
+                    onClick={() => {
+                      setRemoveError('');
+                      setDeleting(a);
+                    }}
+                  >
+                    <Trash2 size={13} /> Удалить
+                  </button>
                 </div>
                 <ErrorText error={a.error || ''} />
                 {!!a.pendingCleanup && (
@@ -678,7 +756,36 @@ export function AccountsSettings({ hub, ws }: { hub: Hub; ws: Workspace }) {
             ))}
           </div>
         )}
+        <div className="account-card">
+          <div className="account-card-main">
+            <div className="agent-logo claude">
+              <UserRound size={18} />
+            </div>
+            <div>
+              <strong>Подписка Claude</strong>
+              <p>
+                Вход через ваш Claude-аккаунт на выбранной машине, без
+                API-ключа.
+              </p>
+            </div>
+          </div>
+          <div className="account-card-actions">
+            <button
+              type="button"
+              className="hub-button"
+              disabled={!ws.connection}
+              onClick={() => setForm('claude')}
+            >
+              <LogIn size={14} /> Подключить подписку Claude
+            </button>
+          </div>
+        </div>
         <ErrorText error={error} />
+        {notice && (
+          <p className="owner-settings-notice" role="status">
+            {notice}
+          </p>
+        )}
         <p className="hub-note">
           <ShieldCheck size={15} /> Токены хранятся на серверной части панели в
           зашифрованном виде. Codex получает доступ для выбранного процесса; для
@@ -702,7 +809,7 @@ export function AccountsSettings({ hub, ws }: { hub: Hub; ws: Workspace }) {
           {ws.data.servers.map((m) => (
             <div className="account-machine-row" key={m.id}>
               <strong>{m.name}</strong>
-              {(['codex', 'opencode'] as const).map((p) => (
+              {agentProviders.map((p) => (
                 <label className="hub-field" key={p}>
                   <span>{providerNames[p]}</span>
                   <select
@@ -725,7 +832,11 @@ export function AccountsSettings({ hub, ws }: { hub: Hub; ws: Workspace }) {
                       }
                     }}
                   >
-                    <option value="">Аккаунт машины</option>
+                    <option value="">
+                      {p === 'claude'
+                        ? 'Подписка / профиль Claude на машине'
+                        : 'Аккаунт машины'}
+                    </option>
                     {accounts
                       .filter(
                         (a) => a.provider === p && a.status === 'connected',
@@ -746,7 +857,9 @@ export function AccountsSettings({ hub, ws }: { hub: Hub; ws: Workspace }) {
       {form && (
         <AccountForm
           hub={hub}
-          account={form === 'new' ? undefined : form}
+          ws={ws}
+          initialProvider={form === 'claude' ? 'claude' : undefined}
+          account={typeof form === 'object' ? form : undefined}
           onClose={() => setForm(null)}
           onStarted={(a) => {
             setForm(null);
@@ -793,6 +906,83 @@ export function AccountsSettings({ hub, ws }: { hub: Hub; ws: Workspace }) {
             </Field>
             <Submit busy={busy}>Сохранить</Submit>
           </form>
+        </Modal>
+      )}
+      {deleting && (
+        <Modal
+          title="Удалить аккаунт?"
+          description={`«${deleting.name}» будет удалён из MayPlane.`}
+          onClose={() => {
+            if (!busy) setDeleting(null);
+          }}
+        >
+          <p className="hub-note">
+            Запись аккаунта и сохранённые ключи или токены будут удалены из
+            панели. Для повторного использования потребуется добавить аккаунт
+            заново.
+          </p>
+          <p className="hub-note">
+            Чаты и их история сохранятся
+            {linkedChats.length ? ` (${linkedChats.length})` : ''}. В связанных
+            чатах нужно будет выбрать другой аккаунт. Проекты, файлы и аккаунт у
+            провайдера сохранятся.
+          </p>
+          {linkedMachines.length > 0 && (
+            <p className="hub-note">
+              На {linkedMachines.length} машинах этот аккаунт перестанет быть
+              выбранным по умолчанию. Новые чаты будут использовать профиль
+              машины.
+            </p>
+          )}
+          <p className="hub-note">
+            Копии доступа в отдельных профилях чатов будут очищены в фоне. Для
+            недоступных машин очистка продолжится после подключения.
+          </p>
+          {hasActiveChats && (
+            <p className="model-catalog-note">
+              Сначала завершите или остановите активные чаты этого аккаунта.
+            </p>
+          )}
+          <ErrorText error={removeError} />
+          <div className="form-actions">
+            <button
+              type="button"
+              className="hub-button"
+              disabled={busy}
+              onClick={() => setDeleting(null)}
+            >
+              Отмена
+            </button>
+            <button
+              type="button"
+              className="hub-button danger"
+              disabled={busy || hasActiveChats}
+              onClick={async () => {
+                setBusy(true);
+                setRemoveError('');
+                try {
+                  const result = await ws.action<{ pendingCleanup: number }>(
+                    `/hub/accounts/${deleting.id}/remove`,
+                    { confirm: true },
+                    'DELETE',
+                  );
+                  setDeleting(null);
+                  setNotice(
+                    result.pendingCleanup
+                      ? 'Аккаунт удалён. Очистка копий доступа на машинах продолжается в фоне.'
+                      : 'Аккаунт удалён. История чатов сохранена.',
+                  );
+                  await hub.refresh();
+                } catch (e) {
+                  setRemoveError((e as Error).message);
+                } finally {
+                  setBusy(false);
+                }
+              }}
+            >
+              <Trash2 size={14} /> {busy ? 'Удаление…' : 'Удалить аккаунт'}
+            </button>
+          </div>
         </Modal>
       )}
     </>

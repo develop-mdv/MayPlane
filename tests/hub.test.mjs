@@ -7,6 +7,7 @@ import { randomBytes, randomUUID } from 'node:crypto';
 import { PassThrough, Writable } from 'node:stream';
 import { EventEmitter } from 'node:events';
 import { openStore } from '../runner/store.mjs';
+import { createAccounts } from '../runner/accounts.mjs';
 import { createApp } from '../runner/server.mjs';
 import { projectPath, processSpec } from '../runner/machine-process.mjs';
 import { AgentRpc } from '../runner/agent-rpc.mjs';
@@ -153,6 +154,11 @@ function fakeAgent(provider, calls, onClose = () => {}) {
               },
             }),
           );
+        } else if (m.method === 'session/cancel') {
+          emit({
+            id: input._pendingPrompt,
+            result: { stopReason: 'cancelled' },
+          });
         } else if (m.method === 'turn/interrupt') {
           respond({});
           emit({
@@ -670,6 +676,365 @@ test('Codex account API supports device login without exposing agent tokens; ins
     (await f.request(`/machines/${f.machineId}/credentials`, 'POST', {}))
       .status,
     400,
+  );
+});
+
+test('Claude accounts encrypt multiple API keys, pin chat identity and remove temporary credentials after each turn', async (t) => {
+  const f = await fixture(t);
+  const auth = await (await f.request('/accounts/providers/claude')).json();
+  assert.deepEqual(
+    auth.providers[0].methods.map((m) => m.id),
+    ['subscription', 'api'],
+  );
+  const makeAccount = async (name, apiKey) => {
+    const r = await f.request('/accounts', 'POST', {
+      provider: 'claude',
+      name,
+      apiKey,
+      method: 'api',
+    });
+    assert.equal(r.status, 201);
+    return r.json();
+  };
+  const personal = await makeAccount(
+      'Personal Claude',
+      'private-claude-personal',
+    ),
+    work = await makeAccount('Work Claude', 'private-claude-work');
+  assert.equal(personal.status, 'connected');
+  const row = f.store.db
+    .prepare('SELECT data,secret FROM settings WHERE id=?')
+    .get(personal.id);
+  assert.ok(!JSON.stringify(row).includes('private-claude-personal'));
+  const base = `/machines/${f.machineId}/agents/claude`;
+  assert.equal(
+    (await f.request(base + '/account', 'POST', { accountId: personal.id }))
+      .status,
+    200,
+  );
+  const project = await (
+    await f.request('/projects', 'POST', {
+      name: 'Claude project',
+      machineId: f.machineId,
+      path: join(f.dir, 'workspace'),
+    })
+  ).json();
+  const s = await (
+    await f.request('/sessions', 'POST', {
+      provider: 'claude',
+      projectId: project.id,
+    })
+  ).json();
+  assert.equal(s.accountId, personal.id);
+  await f.request(base + '/account', 'POST', { accountId: work.id });
+  const read = async () => (await f.request(`/sessions/${s.id}`)).json();
+  assert.equal((await read()).accountId, personal.id);
+  const catalog = await (
+    await f.request(base + '/models', 'POST', {
+      projectId: project.id,
+      accountId: personal.id,
+    })
+  ).json();
+  assert.equal(catalog.models.length, 2);
+  assert.deepEqual(
+    catalog.models[0].reasoning.map((e) => e.id),
+    ['default', 'deep'],
+  );
+  assert.equal(f.profiles.size, 0, 'model probes must retire their API key');
+  assert.equal(
+    (
+      await f.request(`/sessions/${s.id}/message`, 'POST', {
+        message: 'Inspect this project',
+      })
+    ).status,
+    202,
+  );
+  const waiting = await waitFor(read, (s) => s.status === 'approval');
+  assert.equal(waiting.nativeId, 'native-acp');
+  assert.equal(
+    f.profiles.get(f.machineId + ':' + s.id).env.ANTHROPIC_API_KEY,
+    'private-claude-personal',
+  );
+  assert.equal(
+    (
+      await f.request(`/sessions/${s.id}/approval`, 'POST', {
+        id: 'permission-1',
+        decision: 'always',
+      })
+    ).status,
+    400,
+  );
+  assert.equal(
+    (await f.request(`/sessions/${s.id}`, 'PATCH', { accountId: work.id }))
+      .status,
+    409,
+  );
+  await f.request(`/sessions/${s.id}/approval`, 'POST', {
+    id: 'permission-1',
+    decision: 'once',
+  });
+  await waitFor(read, (s) => s.status === 'idle');
+  await waitFor(
+    async () => f.profiles.size,
+    (size) => size === 0,
+  );
+  const switched = await (
+    await f.request(`/sessions/${s.id}`, 'PATCH', { accountId: work.id })
+  ).json();
+  assert.equal(switched.accountId, work.id);
+  assert.equal(switched.nativeId, 'native-acp');
+  await f.request(`/sessions/${s.id}/message`, 'POST', {
+    message: 'Continue with work account',
+  });
+  await waitFor(read, (s) => s.status === 'approval');
+  assert.ok(f.calls.some((c) => c.method === 'session/load'));
+  assert.equal(
+    f.profiles.get(f.machineId + ':' + s.id).env.ANTHROPIC_API_KEY,
+    'private-claude-work',
+  );
+  await f.request(`/sessions/${s.id}/stop`, 'POST');
+  await waitFor(
+    async () => f.profiles.size,
+    (size) => size === 0,
+  );
+  assert.ok(f.calls.some((c) => c.method === 'session/cancel'));
+  assert.ok(
+    !JSON.stringify(await (await f.request('')).json()).includes(
+      'private-claude-',
+    ),
+  );
+  assert.ok(
+    !JSON.stringify(f.calls).includes('private-claude-'),
+    'keys must never appear in ACP JSON',
+  );
+  assert.equal(
+    (await f.request('/accounts/' + personal.id, 'DELETE')).status,
+    200,
+  );
+});
+
+test('Claude subscription sign-in uses the machine profile, never confuses API keys with a subscription and preserves pinned API chats', async (t) => {
+  let loggedIn = false,
+    authMethod = 'claude.ai';
+  const calls = [],
+    opened = [];
+  const textProcess = (text, code = 0) => {
+    const stdout = new PassThrough(),
+      stderr = new PassThrough(),
+      events = new EventEmitter();
+    setImmediate(() => {
+      stdout.write(text);
+      events.emit('close', code);
+    });
+    return { input: new PassThrough(), stdout, stderr, events, close() {} };
+  };
+  const f = await fixture(t, {
+    openProcess: async (_m, opts) => {
+      opened.push(opts);
+      if (opts.operation === 'auth-status')
+        return textProcess(
+          JSON.stringify({
+            loggedIn,
+            authMethod,
+            email: 'subscriber@example.test',
+            subscriptionType: 'max',
+            accessToken: 'never-transfer-subscription-token',
+          }),
+          loggedIn ? 0 : 1,
+        );
+      if (['version', 'adapter-version'].includes(opts.operation))
+        return textProcess('Claude fixture');
+      assert.equal(opts.operation, 'agent');
+      return fakeAgent('claude', calls);
+    },
+  });
+  const base = `/machines/${f.machineId}/agents/claude`;
+  assert.equal(
+    (await f.request(base + '/subscription', 'GET', null, 'wrong-owner'))
+      .status,
+    401,
+  );
+  const account = await (
+    await f.request('/accounts', 'POST', {
+      provider: 'claude',
+      name: 'Existing API account',
+      method: 'api',
+      apiKey: 'private-existing-api-key',
+    })
+  ).json();
+  await f.request(base + '/account', 'POST', { accountId: account.id });
+  const apiChat = await (
+    await f.request('/sessions', 'POST', {
+      machineId: f.machineId,
+      provider: 'claude',
+    })
+  ).json();
+  assert.equal(apiChat.accountId, account.id);
+  assert.equal(
+    (
+      await f.request('/accounts', 'POST', {
+        provider: 'claude',
+        method: 'subscription',
+        name: 'No token vault copy',
+      })
+    ).status,
+    400,
+  );
+  const unsigned = await (await f.request(base + '/subscription')).json();
+  assert.equal(
+    unsigned.ready,
+    false,
+    'a configured API account must not satisfy subscription status',
+  );
+  assert.equal(
+    (await f.request(base + '/subscription', 'POST', { confirm: true })).status,
+    403,
+  );
+  loggedIn = true;
+  authMethod = 'api_key';
+  assert.equal(
+    (await f.request(base + '/subscription', 'POST', { confirm: true })).status,
+    403,
+  );
+  assert.equal(
+    f.store.get('servers', f.machineId).agentAccounts.claude,
+    account.id,
+  );
+  authMethod = 'claude.ai';
+  assert.equal((await f.request(base + '/subscription', 'POST')).status, 400);
+  const connected = await f.request(base + '/subscription', 'POST', {
+    confirm: true,
+  });
+  assert.equal(connected.status, 200);
+  const publicStatus = await connected.json();
+  assert.equal(publicStatus.account.email, 'subscriber@example.test');
+  assert.equal(publicStatus.account.planType, 'max');
+  assert.ok(
+    !JSON.stringify(publicStatus).includes('never-transfer-subscription-token'),
+  );
+  assert.equal(f.store.get('servers', f.machineId).agentAccounts.claude, null);
+  assert.equal(
+    (await (await f.request('/sessions/' + apiChat.id)).json()).accountId,
+    account.id,
+  );
+  const s = await (
+    await f.request('/sessions', 'POST', {
+      machineId: f.machineId,
+      provider: 'claude',
+    })
+  ).json();
+  assert.equal(s.accountId, null);
+  assert.ok(
+    !s.profileId,
+    'the native subscription profile is never replaced by an empty per-chat API profile',
+  );
+  const read = async () => (await f.request(`/sessions/${s.id}`)).json();
+  loggedIn = false;
+  assert.equal(
+    (
+      await f.request(`/sessions/${s.id}/message`, 'POST', {
+        message: 'Keep this draft until sign-in',
+      })
+    ).status,
+    403,
+  );
+  assert.equal(
+    (await read()).messages.filter((m) => m.role === 'user').length,
+    0,
+  );
+  assert.ok(!calls.some((c) => c.method === 'session/prompt'));
+  loggedIn = true;
+  assert.equal(
+    (
+      await f.request(`/sessions/${s.id}/message`, 'POST', {
+        message: 'Use my own subscription',
+      })
+    ).status,
+    202,
+  );
+  await waitFor(read, (s) => s.status === 'approval');
+  assert.ok(
+    opened.filter((o) => o.operation === 'agent').every((o) => !o.profileId),
+  );
+  assert.ok(!opened.some((o) => o.operation.startsWith('profile-')));
+  await f.request(`/sessions/${s.id}/approval`, 'POST', {
+    id: 'permission-1',
+    decision: 'once',
+  });
+  await waitFor(read, (s) => s.status === 'idle');
+  assert.ok(
+    !JSON.stringify(await (await f.request('')).json()).includes(
+      'never-transfer-subscription-token',
+    ),
+  );
+});
+
+test('Claude native login preserves a recoverable task, filters terminal output and redacts submitted codes', async (t) => {
+  const operations = [];
+  const input = new PassThrough(),
+    stdout = new PassThrough(),
+    stderr = new PassThrough(),
+    events = new EventEmitter();
+  let received = '';
+  input.on('data', (data) => {
+    received += data;
+    stdout.write(data);
+  });
+  const p = { input, stdout, stderr, events, close() {} };
+  const f = await fixture(t, {
+    openProcess: async (_m, opts) => {
+      operations.push(opts);
+      return p;
+    },
+  });
+  const base = `/machines/${f.machineId}/agents/claude`;
+  assert.equal((await f.request(base + '/login', 'POST')).status, 400);
+  const started = await f.request(base + '/login', 'POST', { confirm: true });
+  assert.equal(started.status, 202);
+  const { id } = await started.json();
+  const url =
+    'https://claude.com/cai/oauth/authorize?client_id=fixture&code_challenge=challenge&state=state';
+  stdout.write(`\x1b[32mOpen ${url.slice(0, 45)}`);
+  assert.ok(!(await (await f.request('/tasks/' + id)).json()).loginUrl);
+  stdout.write(`${url.slice(45)}\x1b[0m\r\n`);
+  assert.equal((await (await f.request('/tasks/' + id)).json()).loginUrl, url);
+  const snapshot = await (await f.request('')).json();
+  assert.deepEqual(snapshot.tasks, [
+    {
+      id,
+      machineId: f.machineId,
+      provider: 'claude',
+      operation: 'login',
+      status: 'running',
+    },
+  ]);
+  assert.ok(!JSON.stringify(snapshot.tasks).includes(url));
+  assert.equal(
+    (await f.request(base + '/install', 'POST', { confirm: true })).status,
+    409,
+  );
+  await f.request(`/tasks/${id}/input`, 'POST', {
+    input: 'private-code-fixture',
+  });
+  assert.equal(received, 'private-code-fixture\r');
+  const task = await (await f.request('/tasks/' + id)).json();
+  assert.ok(!task.output.includes('private-code-fixture'));
+  assert.ok(!task.output.includes('\x1b'));
+  assert.ok(!('process' in task || 'secrets' in task));
+  events.emit('close', 0);
+  assert.equal(
+    (await (await f.request('/tasks/' + id)).json()).status,
+    'success',
+  );
+  assert.deepEqual((await (await f.request('')).json()).tasks, []);
+  assert.equal((await f.request(base + '/logout', 'POST')).status, 400);
+  assert.equal(
+    (await f.request(base + '/logout', 'POST', { confirm: true })).status,
+    202,
+  );
+  assert.deepEqual(
+    operations.map((o) => o.operation),
+    ['login', 'logout'],
   );
 });
 
@@ -1758,6 +2123,382 @@ test('unauthenticated Codex rejects before accepting or persisting the message a
   assert.equal(detail.messages.length, 0);
   assert.match(detail.authError, /авторизац/);
   assert.match(detail.errorMessage, /Настройках/);
+});
+
+test('account removal is confirmed, blocks active chats and preserves history without falling back to native credentials', async (t) => {
+  const f = await fixture(t, { accountOptions: fakeAccountBrokers() });
+  const a = await (
+    await f.request('/accounts', 'POST', {
+      provider: 'codex',
+      name: 'Remove this account',
+      method: 'api',
+      apiKey: 'private-remove-test-key',
+    })
+  ).json();
+  const accountUrl = `/accounts/${a.id}`,
+    removeUrl = accountUrl + '/remove';
+  const { project } = await deletionWorkspace(f);
+  await f.request(`/machines/${f.machineId}/agents/codex/account`, 'POST', {
+    accountId: a.id,
+  });
+  const s = await (
+    await f.request('/sessions', 'POST', {
+      projectId: project.id,
+      provider: 'codex',
+    })
+  ).json();
+  const read = async () => (await f.request('/sessions/' + s.id)).json();
+  assert.equal(
+    (await f.request(removeUrl, 'DELETE', { confirm: true }, 'wrong-owner'))
+      .status,
+    401,
+  );
+  assert.equal((await f.request(removeUrl, 'DELETE')).status, 400);
+  await f.request(`/sessions/${s.id}/message`, 'POST', {
+    message: 'Keep this chat history',
+  });
+  await waitFor(read, (s) => s.status === 'approval');
+  assert.equal(
+    (await f.request(removeUrl, 'DELETE', { confirm: true })).status,
+    409,
+  );
+  assert.equal(f.store.get('servers', f.machineId).agentAccounts.codex, a.id);
+  await f.request(`/sessions/${s.id}/approval`, 'POST', {
+    id: 'permission-1',
+    decision: 'accept',
+  });
+  await waitFor(read, (s) => s.status === 'idle');
+  await f.request('/sessions/' + s.id, 'PATCH', { archived: true });
+  const before = await read();
+  assert.ok(before.messages.some((m) => m.role === 'assistant'));
+  const marker = join(f.dir, 'keep-account-project-file.txt');
+  writeFileSync(marker, 'user files remain');
+  const removed = await f.request(removeUrl, 'DELETE', { confirm: true });
+  assert.equal(removed.status, 200);
+  assert.equal((await removed.json()).removedId, a.id);
+  assert.equal(f.store.get('settings', a.id), null);
+  assert.equal((await f.request(accountUrl)).status, 404);
+  assert.ok(
+    !(await (await f.request('/accounts')).json()).accounts.some(
+      (x) => x.id === a.id,
+    ),
+  );
+  assert.ok(
+    !(await (await f.request('')).json()).accounts.some((x) => x.id === a.id),
+  );
+  assert.equal(f.store.get('servers', f.machineId).agentAccounts.codex, null);
+  const after = await read();
+  assert.equal(after.archived, true);
+  assert.equal(
+    after.accountId,
+    a.id,
+    'keep the unavailable identity instead of silently switching an existing chat',
+  );
+  assert.equal(after.nativeId, before.nativeId);
+  assert.deepEqual(after.messages, before.messages);
+  assert.equal(readFileSync(marker, 'utf8'), 'user files remain');
+  await f.request('/sessions/' + s.id, 'PATCH', { archived: false });
+  assert.equal(
+    (
+      await f.request(`/sessions/${s.id}/message`, 'POST', {
+        message: 'Do not use the machine account',
+      })
+    ).status,
+    404,
+  );
+  assert.deepEqual((await read()).messages, before.messages);
+  await waitFor(
+    async () =>
+      f.store
+        .list('settings')
+        .filter(
+          (x) => x.recordType === 'account_target' && x.accountId === a.id,
+        ).length,
+    (n) => n === 0,
+  );
+});
+
+test('removing a pending account cancels its broker and late authentication cannot resurrect the record', async (t) => {
+  const brokers = fakeAccountBrokers();
+  let completeRead,
+    reading = false;
+  const f = await fixture(t, {
+    accountOptions: {
+      ...brokers,
+      codexLogin: async (...args) => {
+        const broker = await brokers.codexLogin(...args),
+          read = broker.read;
+        broker.read = async () => {
+          reading = true;
+          await new Promise((r) => {
+            completeRead = r;
+          });
+          return read();
+        };
+        return broker;
+      },
+    },
+  });
+  const a = await (
+    await f.request('/accounts', 'POST', {
+      provider: 'codex',
+      name: 'Pending removal',
+      method: 'oauth',
+    })
+  ).json();
+  brokers.logins[0].onLogin({ success: true });
+  await waitFor(
+    async () => reading,
+    (x) => x,
+  );
+  assert.equal(
+    (await f.request(`/accounts/${a.id}/remove`, 'DELETE', { confirm: true }))
+      .status,
+    200,
+  );
+  assert.equal(brokers.logins[0].closed, true);
+  completeRead();
+  await new Promise((r) => setImmediate(r));
+  assert.equal(f.store.get('settings', a.id), null);
+  assert.equal((await f.request(`/accounts/${a.id}`)).status, 404);
+  const disconnected = await (
+    await f.request('/accounts', 'POST', {
+      provider: 'claude',
+      name: 'Disconnected removal',
+      method: 'api',
+      apiKey: 'private-disconnected-fixture',
+    })
+  ).json();
+  await f.request('/accounts/' + disconnected.id, 'DELETE');
+  assert.equal(
+    (await (await f.request('/accounts/' + disconnected.id)).json()).status,
+    'disconnected',
+  );
+  assert.equal(
+    (
+      await f.request(`/accounts/${disconnected.id}/remove`, 'DELETE', {
+        confirm: true,
+      })
+    ).status,
+    200,
+  );
+  assert.equal(f.store.get('settings', disconnected.id), null);
+});
+
+test('deleted account credentials on an offline machine are cleaned after restart without retaining the account or its secrets', async (t) => {
+  const f = await fixture(t);
+  const a = await (
+    await f.request('/accounts', 'POST', {
+      provider: 'claude',
+      name: 'Offline account',
+      method: 'api',
+      apiKey: 'private-offline-fixture',
+    })
+  ).json();
+  const profileId = randomUUID(),
+    targetId = `account-target:${f.machineId}:claude:${profileId}`;
+  const machine = f.store.get('servers', f.machineId);
+  machine.transport = 'connector';
+  machine.status = 'offline';
+  f.store.save('servers', machine);
+  f.store.save(
+    'settings',
+    {
+      id: targetId,
+      recordType: 'account_target',
+      machineId: f.machineId,
+      profileId,
+      accountId: a.id,
+      provider: 'claude',
+      format: 'claude',
+      vendor: 'anthropic',
+      credentialPresent: true,
+    },
+    {},
+  );
+  f.profiles.set(`${f.machineId}:${profileId}`, {
+    env: { ANTHROPIC_API_KEY: 'private-offline-fixture' },
+  });
+  const result = await (
+    await f.request(`/accounts/${a.id}/remove`, 'DELETE', { confirm: true })
+  ).json();
+  assert.equal(result.pendingCleanup, 1);
+  assert.equal(f.store.get('settings', a.id), null);
+  const target = f.store.get('settings', targetId);
+  assert.equal(target.retired, true);
+  assert.deepEqual(target.secret, {});
+  assert.ok(!JSON.stringify(target).includes('private-offline-fixture'));
+  f.app.hub.close();
+  const cleaner = createAccounts(f.store, {
+    openProcess: async (m, opts) =>
+      fakeProfile({ machineId: m.id, ...opts }, f.profiles),
+  });
+  try {
+    await cleaner.cleanupMachine({ ...machine, status: 'online' });
+  } finally {
+    cleaner.close();
+  }
+  assert.equal(f.profiles.size, 0);
+  assert.equal(f.store.get('settings', targetId), null);
+  assert.equal(f.store.get('settings', a.id), null);
+});
+
+test('an OpenCode chat can switch away from a deleted account with pending offline credentials without erasing the replacement', async (t) => {
+  const f = await fixture(t, {
+    accountOptions: fakeAccountBrokers(),
+    nativeVersion: '2.0.29',
+  });
+  const make = async (name, apiKey) =>
+    (
+      await f.request('/accounts', 'POST', {
+        provider: 'opencode',
+        vendor: 'openai',
+        name,
+        method: 'key',
+        apiKey,
+      })
+    ).json();
+  const old = await make('Old OpenCode account', 'private-old-account-fixture'),
+    next = await make(
+      'Replacement OpenCode account',
+      'private-next-account-fixture',
+    );
+  const s = await (
+    await f.request('/sessions', 'POST', {
+      machineId: f.machineId,
+      provider: 'opencode',
+      accountId: old.id,
+    })
+  ).json();
+  const targetId = `account-target:${f.machineId}:opencode:${s.profileId}`;
+  const machine = f.store.get('servers', f.machineId);
+  f.store.save('servers', {
+    ...machine,
+    transport: 'connector',
+    status: 'offline',
+  });
+  f.store.save(
+    'settings',
+    {
+      id: targetId,
+      recordType: 'account_target',
+      machineId: f.machineId,
+      profileId: s.profileId,
+      accountId: old.id,
+      provider: 'opencode',
+      vendor: 'openai',
+      format: 'opencode-v2',
+      credentialPresent: true,
+    },
+    {},
+  );
+  f.profiles.set(
+    `${f.machineId}:${s.profileId}`,
+    f.store.get('settings', old.id).secret.credentials.native2,
+  );
+  assert.equal(
+    (await f.request(`/accounts/${old.id}/remove`, 'DELETE', { confirm: true }))
+      .status,
+    200,
+  );
+  f.store.save('servers', machine);
+  assert.equal(
+    (await f.request(`/sessions/${s.id}`, 'PATCH', { accountId: next.id }))
+      .status,
+    200,
+  );
+  assert.equal(
+    (
+      await f.request(`/sessions/${s.id}/message`, 'POST', {
+        message: 'Use the replacement account',
+      })
+    ).status,
+    202,
+  );
+  const read = async () => (await f.request('/sessions/' + s.id)).json();
+  await waitFor(read, (s) => s.status === 'approval');
+  assert.equal(f.store.get('settings', targetId).accountId, next.id);
+  assert.equal(
+    f.profiles.get(`${f.machineId}:${s.profileId}`)[0].value.key,
+    'private-next-account-fixture',
+  );
+  const cleaner = createAccounts(f.store, {
+    openProcess: async (m, opts) =>
+      fakeProfile({ machineId: m.id, ...opts }, f.profiles),
+  });
+  try {
+    await cleaner.cleanupMachine(machine);
+  } finally {
+    cleaner.close();
+  }
+  assert.equal(
+    f.profiles.get(`${f.machineId}:${s.profileId}`)[0].value.key,
+    'private-next-account-fixture',
+  );
+  await f.request(`/sessions/${s.id}/stop`, 'POST');
+  await waitFor(
+    async () => f.profiles.size,
+    (n) => n === 0,
+  );
+});
+
+test('account removal waits for credential preparation so an in-flight model probe cannot write a key after deletion', async (t) => {
+  const profiles = new Map(),
+    calls = [];
+  let written = false,
+    release;
+  const f = await fixture(t, {
+    openProcess: async (m, opts) => {
+      if (opts.operation.startsWith('profile-')) {
+        const p = fakeProfile({ machineId: m.id, ...opts }, profiles);
+        if (opts.operation === 'profile-write') {
+          const emit = p.events.emit.bind(p.events);
+          p.events.emit = (event, ...args) => {
+            if (event === 'close') {
+              written = true;
+              release = () => emit(event, ...args);
+              return true;
+            }
+            return emit(event, ...args);
+          };
+        }
+        return p;
+      }
+      return fakeAgent('claude', calls);
+    },
+  });
+  const a = await (
+    await f.request('/accounts', 'POST', {
+      provider: 'claude',
+      name: 'Preparing removal',
+      method: 'api',
+      apiKey: 'private-preparing-fixture',
+    })
+  ).json();
+  const models = f.request(
+    `/machines/${f.machineId}/agents/claude/models`,
+    'POST',
+    { accountId: a.id },
+  );
+  await waitFor(
+    async () => written,
+    (x) => x,
+  );
+  assert.equal(
+    (await f.request(`/accounts/${a.id}/remove`, 'DELETE', { confirm: true }))
+      .status,
+    409,
+  );
+  assert.equal(f.store.get('settings', a.id).status, 'connected');
+  release();
+  assert.equal((await models).status, 200);
+  assert.equal(profiles.size, 0);
+  assert.equal(
+    (await f.request(`/accounts/${a.id}/remove`, 'DELETE', { confirm: true }))
+      .status,
+    200,
+  );
+  assert.equal(f.store.get('settings', a.id), null);
 });
 
 test('vault validates account/provider context and cancellation cannot leave an authenticated browser payload', async (t) => {

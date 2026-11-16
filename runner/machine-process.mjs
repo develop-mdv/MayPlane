@@ -3,6 +3,10 @@ import { PassThrough } from 'node:stream';
 import { existsSync, statfsSync, readFileSync } from 'node:fs';
 import { dirname, join, isAbsolute, win32 } from 'node:path';
 import os from 'node:os';
+import { fileURLToPath } from 'node:url';
+import { createRequire } from 'node:module';
+import { EventEmitter } from 'node:events';
+import { localClaudeCommand } from '../lib/claude-runtime.mjs';
 import { resourceMetrics } from '../lib/machine-metrics.mjs';
 import { connect } from './ssh.mjs';
 import { assert } from './security.mjs';
@@ -26,6 +30,12 @@ export const providers = {
     executable: 'opencode',
     package: '@opencode/cli',
     args: ['acp'],
+  },
+  claude: {
+    name: 'Claude Code',
+    executable: 'claude',
+    package: '@anthropic-ai/claude-code',
+    args: [],
   },
 };
 let desktopLookup;
@@ -100,9 +110,23 @@ export function processSpec(provider, operation, platform = process.platform) {
       'profile-read',
       'profile-write',
       'profile-clear',
+      'auth-status',
+      'adapter-version',
+      'logout',
     ].includes(operation),
     'Неизвестная операция',
   );
+  if (['auth-status', 'adapter-version', 'logout'].includes(operation)) {
+    assert(provider === 'claude', 'Неизвестная операция');
+    return {
+      executable:
+        operation === 'adapter-version' ? 'claude-agent-acp' : 'claude',
+      args:
+        operation === 'adapter-version'
+          ? ['--version']
+          : ['auth', operation === 'auth-status' ? 'status' : 'logout'],
+    };
+  }
   if (operation === 'auth-server') {
     assert(provider === 'opencode', 'Неизвестная операция');
     return {
@@ -131,15 +155,28 @@ export function processSpec(provider, operation, platform = process.platform) {
       args: ['-c', posixAgentCommand(provider, operation, [])],
     };
   if (operation === 'install')
+    if (provider === 'claude')
+      return {
+        executable: process.execPath,
+        args: [fileURLToPath(new URL('./claude-install.mjs', import.meta.url))],
+      };
+  if (operation === 'install')
     return { executable: 'npm', args: ['install', '--global', p.package] };
   if (operation === 'login')
     return {
       executable: p.executable,
       args:
-        provider === 'codex' ? ['login', '--device-auth'] : ['auth', 'login'],
+        provider === 'codex'
+          ? ['login', '--device-auth']
+          : provider === 'claude'
+            ? ['auth', 'login', '--claudeai']
+            : ['auth', 'login'],
     };
   return {
-    executable: p.executable,
+    executable:
+      provider === 'claude' && operation === 'agent'
+        ? 'claude-agent-acp'
+        : p.executable,
     args: operation === 'version' ? ['--version'] : p.args,
   };
 }
@@ -172,6 +209,12 @@ export function localProcess({
           ? 'credential-import'
           : 'credential-clear';
   let { executable, args } = processSpec(provider, operation);
+  const override =
+    process.env[
+      provider === 'claude' && ['agent', 'adapter-version'].includes(operation)
+        ? 'MAYPLANE_CLAUDE_ACP_BIN'
+        : `MAYPLANE_${provider.toUpperCase()}_BIN`
+    ];
   const desktop =
     provider === 'codex' &&
     nativeDesktop === true &&
@@ -202,7 +245,7 @@ export function localProcess({
         operation,
         args,
         undefined,
-        desktop || process.env[`MAYPLANE_${provider.toUpperCase()}_BIN`],
+        desktop || override,
         profileId,
       ),
     ];
@@ -218,7 +261,14 @@ export function localProcess({
       join(dirname(process.execPath), 'node_modules/npm/bin/npm-cli.js'),
       ...args,
     ];
-  } else if (process.platform === 'win32') {
+  } else if (
+    process.platform === 'win32' &&
+    provider === 'claude' &&
+    operation !== 'install'
+  ) {
+    if (override) executable = override;
+    else ({ executable, args } = localClaudeCommand(operation, args));
+  } else if (process.platform === 'win32' && provider !== 'claude') {
     // Resolve npm's .cmd shim to its package's actual executable where possible.
     const roots = [
       process.env.APPDATA && join(process.env.APPDATA, 'npm'),
@@ -268,26 +318,39 @@ export function localProcess({
       args = [script, ...args];
     }
   }
-  if (
-    process.platform === 'win32' &&
-    operation !== 'install' &&
-    process.env[`MAYPLANE_${provider.toUpperCase()}_BIN`]
-  )
-    executable = process.env[`MAYPLANE_${provider.toUpperCase()}_BIN`];
+  if (process.platform === 'win32' && operation !== 'install' && override)
+    executable = override;
   else if (desktop && process.platform === 'win32') executable = desktop;
   const env = { ...process.env, NO_COLOR: '1' };
   if (profileId) {
     for (const name of Object.keys(env))
       if (
-        /(?:_API_KEY|_TOKEN|_ACCESS_KEY|_SECRET_ACCESS_KEY|_CREDENTIALS)$/.test(
+        name !== 'CLAUDE_CODE_GIT_BASH_PATH' &&
+        (/(?:_API_KEY|_TOKEN|_ACCESS_KEY|_SECRET_ACCESS_KEY|_CREDENTIALS)$/.test(
           name,
         ) ||
-        /^(OPENAI_|ANTHROPIC_|CODEX_HOME$|CODEX_SQLITE_HOME$|OPENCODE_AUTH_CONTENT$|OPENCODE_CONFIG$|OPENCODE_CONFIG_CONTENT$)/.test(
-          name,
-        )
+          /^(OPENAI_|ANTHROPIC_|CLAUDE_|CLAUDECODE$|CODEX_HOME$|CODEX_SQLITE_HOME$|OPENCODE_AUTH_CONTENT$|OPENCODE_CONFIG$|OPENCODE_CONFIG_CONTENT$)/.test(
+            name,
+          ))
       )
         delete env[name];
     Object.assign(env, profileEnvironment(provider, profileId));
+    if (provider === 'claude') {
+      try {
+        const data = JSON.parse(
+          readFileSync(
+            profileEnvironment(provider, profileId).CLAUDE_CONFIG_DIR +
+              '/settings.json',
+            'utf8',
+          ),
+        );
+        if (typeof data.env?.ANTHROPIC_API_KEY === 'string')
+          env.ANTHROPIC_API_KEY = data.env.ANTHROPIC_API_KEY;
+      } catch (error) {
+        if (error.code !== 'ENOENT')
+          throw new Error('Не удалось прочитать профиль Claude');
+      }
+    }
     if (provider === 'codex' && process.platform === 'win32')
       args = ['-c', 'cli_auth_credentials_store="file"', ...args];
   }
@@ -307,6 +370,39 @@ export function localProcess({
   // Infrastructure credentials never enter the agent environment.
   for (const name of Object.keys(env))
     if (/^(MAYPLANE_|ALLOWED_ORIGINS$)/.test(name)) delete env[name];
+  if (provider === 'claude') delete env.CLAUDECODE;
+  if (provider === 'claude' && operation === 'login') {
+    const { spawn: spawnPty } = createRequire(import.meta.url)(
+      '@lydell/node-pty',
+    );
+    const terminal = spawnPty(executable, args, {
+      cwd: cwd || os.homedir(),
+      env: { ...env, BROWSER: process.platform === 'win32' ? 'echo' : 'true' },
+      cols: 2000,
+      rows: 30,
+      name: 'xterm-256color',
+    });
+    const input = new PassThrough(),
+      stdout = new PassThrough(),
+      stderr = new PassThrough(),
+      events = new EventEmitter();
+    terminal.onData((data) => stdout.write(data));
+    terminal.onExit(({ exitCode }) => events.emit('close', exitCode));
+    input.on('data', (bytes) =>
+      terminal.write(bytes.toString().replaceAll('\n', '\r')),
+    );
+    return {
+      input,
+      stdout,
+      stderr,
+      events,
+      close() {
+        try {
+          terminal.kill();
+        } catch {}
+      },
+    };
+  }
   const child = spawn(executable, args, {
     cwd: cwd || os.homedir(),
     env,
@@ -392,8 +488,12 @@ export async function machineProcess(machine, options, connectors) {
           options.profileId,
         );
     const channel = await new Promise((resolve, reject) =>
-      ssh.exec(command, (error, stream) =>
-        error ? reject(error) : resolve(stream),
+      ssh.exec(
+        command,
+        options.provider === 'claude' && options.operation === 'login'
+          ? { pty: { term: 'xterm-256color', cols: 2000, rows: 30 } }
+          : {},
+        (error, stream) => (error ? reject(error) : resolve(stream)),
       ),
     );
     return {

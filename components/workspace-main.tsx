@@ -40,7 +40,7 @@ import { AgentChat, NewSession } from './agent-chat';
 import { NewProject, SettingsPanel } from './workspace-forms';
 import { MachinesPanel, PairComputer, ServerForm } from './machines-panel';
 import { ProjectNavigation, ChatActions } from './project-navigation';
-import { ServicesPanel } from './services-panel';
+import { ProjectServices, ServicesPanel, type ServiceView } from './services-panel';
 import { NativeSessionImport } from './native-session-import';
 import { CopyButton, ErrorText, Field, Modal, Submit, Toast } from './hub-ui';
 import { RemoveObject } from './remove-object';
@@ -53,6 +53,7 @@ export default function WorkspaceMain() {
     [selectedSession, setSelectedSession] = useState<string | null>(null),
     [selectedMachine, setSelectedMachine] = useState<string | null>(null),
     [scope, setScope] = useState('all');
+  const [serviceView, setServiceView] = useState<ServiceView>({});
   const [newProject, setNewProject] = useState(false),
     [newSession, setNewSession] = useState(false),
     [importSession, setImportSession] = useState(false),
@@ -111,8 +112,9 @@ export default function WorkspaceMain() {
   useEffect(() => {
     if (search) searchInput.current?.focus();
   }, [search]);
-  function navigate(next: View) {
+  function navigate(next: View, services: ServiceView = {}) {
     setView(next);
+    if (next === 'services') setServiceView(services);
     setSidebar(false);
     setError('');
   }
@@ -179,6 +181,9 @@ export default function WorkspaceMain() {
   );
   const searchMachines = ws.data.servers.filter((m) =>
     m.name.toLowerCase().includes(query.toLowerCase()),
+  );
+  const searchServices = hub.data.services.filter((s) =>
+    s.name.toLowerCase().includes(query.toLowerCase()),
   );
   return (
     <div className="workspace-app">
@@ -410,6 +415,7 @@ export default function WorkspaceMain() {
               onSelect={setSelectedMachine}
               onAdd={(s) => setServerForm(s || 'new')}
               onPair={() => setPair(true)}
+              onServices={(machineId) => navigate('services', { machineId })}
               onRemove={(m) =>
                 setRemoval({ kind: 'machine', id: m.id, name: m.name })
               }
@@ -418,8 +424,15 @@ export default function WorkspaceMain() {
             <SettingsPanel ws={ws} hub={hub} />
           ) : view === 'services' ? (
             <ServicesPanel
-              services={hub.data.services || []}
+              key={JSON.stringify(serviceView)}
+              hub={hub}
               machines={ws.data.servers}
+              scope={serviceView}
+              onProject={selectProject}
+              onMachine={(id) => {
+                setSelectedMachine(id);
+                navigate('servers');
+              }}
               onRemove={(s) =>
                 setRemoval({ kind: 'service', id: s.id, name: s.name })
               }
@@ -479,6 +492,14 @@ export default function WorkspaceMain() {
                         }{' '}
                         чатов
                       </p>
+                      <button
+                        type="button"
+                        className="text-button project-service-link"
+                        onClick={() => navigate('services', { projectId: p.id })}
+                      >
+                        <Boxes size={14} /> Сервисы
+                        <span>{hub.data.services.filter((s) => s.projectId === p.id).length}</span>
+                      </button>
                       <footer>
                         <button
                           className="hub-button"
@@ -515,8 +536,6 @@ export default function WorkspaceMain() {
                   <h2>Добавьте рабочую папку</h2>
                   <p>
                     У проекта будут свои чаты с любыми агентами.
-                    <br />
-                    Прежние развёртывания находятся в «Сервисах».
                   </p>
                   <button
                     className="hub-button primary"
@@ -538,6 +557,7 @@ export default function WorkspaceMain() {
             </div>
           ) : session ? (
             <AgentChat
+              key={session.id}
               session={session}
               project={project}
               machine={machine}
@@ -545,6 +565,7 @@ export default function WorkspaceMain() {
               onNewProject={() => setNewProject(true)}
               onNewSession={() => startSession()}
               onAccounts={() => setView('settings')}
+              onOpenService={(serviceId) => navigate('services', { serviceId })}
               disabled={!connected}
             />
           ) : (
@@ -600,6 +621,16 @@ export default function WorkspaceMain() {
                   </button>
                 </div>
               </div>
+              {project && (
+                <ProjectServices
+                  services={hub.data.services.filter((s) => s.projectId === project.id)}
+                  machines={ws.data.servers}
+                  disabled={!connected}
+                  onOpen={(serviceId) => navigate('services', { projectId: project.id, serviceId })}
+                  onAdd={() => navigate('services', { projectId: project.id, create: true })}
+                  onAll={() => navigate('services', { projectId: project.id })}
+                />
+              )}
               {visible.length ? (
                 <div className="chat-home-list">
                   {visible.map((s) => (
@@ -935,7 +966,7 @@ export default function WorkspaceMain() {
       {search && (
         <Modal
           title="Поиск"
-          description="Проекты, чаты и машины"
+          description="Проекты, чаты, сервисы и машины"
           onClose={() => setSearch(false)}
         >
           <div className="command-search">
@@ -944,7 +975,7 @@ export default function WorkspaceMain() {
               ref={searchInput}
               value={query}
               onChange={(e) => setQuery(e.target.value)}
-              placeholder="Найти проект или чат…"
+              placeholder="Поиск по рабочему пространству…"
               aria-label="Поиск"
             />
           </div>
@@ -985,9 +1016,21 @@ export default function WorkspaceMain() {
                 <small>Машина</small>
               </button>
             ))}
+            {searchServices.map((s) => (
+              <button key={s.id} onClick={() => {
+                setSearch(false);
+                setQuery('');
+                navigate('services', { serviceId: s.id });
+              }}>
+                <Boxes size={17} />
+                <span>{s.name}</span>
+                <small>Сервис</small>
+              </button>
+            ))}
             {!searchProjects.length &&
               !searchChats.length &&
-              !searchMachines.length && (
+              !searchMachines.length &&
+              !searchServices.length && (
                 <p className="muted">Ничего не найдено</p>
               )}
           </div>

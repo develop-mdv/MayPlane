@@ -20,7 +20,10 @@ export function profileId(value) {
   return value;
 }
 export function profilePaths(provider, id) {
-  assert(['codex', 'opencode'].includes(provider), 'Неизвестный агент');
+  assert(
+    ['codex', 'opencode', 'claude'].includes(provider),
+    'Неизвестный агент',
+  );
   const root = join(
     os.homedir(),
     '.mayplane',
@@ -31,22 +34,26 @@ export function profilePaths(provider, id) {
   return {
     root,
     auth:
-      provider === 'codex'
-        ? join(root, 'codex', 'auth.json')
-        : join(root, 'data', 'opencode', 'auth.json'),
+      provider === 'claude'
+        ? join(root, 'claude', 'settings.json')
+        : provider === 'codex'
+          ? join(root, 'codex', 'auth.json')
+          : join(root, 'data', 'opencode', 'auth.json'),
   };
 }
 export function profileEnvironment(provider, id) {
   const { root } = profilePaths(provider, id);
   const env =
-    provider === 'codex'
-      ? { CODEX_HOME: join(root, 'codex') }
-      : {
-          XDG_DATA_HOME: join(root, 'data'),
-          XDG_CONFIG_HOME: join(root, 'config'),
-          XDG_CACHE_HOME: join(root, 'cache'),
-          XDG_STATE_HOME: join(root, 'state'),
-        };
+    provider === 'claude'
+      ? { CLAUDE_CONFIG_DIR: join(root, 'claude') }
+      : provider === 'codex'
+        ? { CODEX_HOME: join(root, 'codex') }
+        : {
+            XDG_DATA_HOME: join(root, 'data'),
+            XDG_CONFIG_HOME: join(root, 'config'),
+            XDG_CACHE_HOME: join(root, 'cache'),
+            XDG_STATE_HOME: join(root, 'state'),
+          };
   for (const value of Object.values(env))
     mkdirSync(value, { recursive: true, mode: 0o700 });
   if (provider === 'opencode') {
@@ -60,9 +67,11 @@ export function posixProfileSetup(provider, id) {
   const root = `"$HOME/.mayplane/agent-profiles/${provider}/${id}"`;
   return (
     `umask 077\nfor __mayplane_name in $(env | cut -d= -f1); do\ncase "$__mayplane_name" in\n*_API_KEY|*_TOKEN|*_ACCESS_KEY|*_SECRET_ACCESS_KEY|*_CREDENTIALS|OPENAI_*|ANTHROPIC_*|CODEX_HOME|CODEX_SQLITE_HOME|OPENCODE_AUTH_CONTENT|OPENCODE_CONFIG|OPENCODE_CONFIG_CONTENT) unset "$__mayplane_name" ;;\nesac\ndone\n__mayplane_profile=${root}\nmkdir -p "$__mayplane_profile"\n` +
-    (provider === 'codex'
-      ? 'export CODEX_HOME="$__mayplane_profile/codex"\nunset CODEX_SQLITE_HOME OPENAI_API_KEY CODEX_ACCESS_TOKEN\nmkdir -p "$CODEX_HOME"\n'
-      : 'export XDG_DATA_HOME="$__mayplane_profile/data" XDG_CONFIG_HOME="$__mayplane_profile/config" XDG_CACHE_HOME="$__mayplane_profile/cache" XDG_STATE_HOME="$__mayplane_profile/state"\nexport OPENCODE_DB="$XDG_DATA_HOME/opencode/opencode.db"\nunset OPENCODE_AUTH_CONTENT OPENAI_API_KEY ANTHROPIC_API_KEY GOOGLE_API_KEY GEMINI_API_KEY OPENROUTER_API_KEY OPENCODE_CONFIG OPENCODE_CONFIG_CONTENT\nmkdir -p "$XDG_DATA_HOME/opencode" "$XDG_CONFIG_HOME" "$XDG_STATE_HOME" "$XDG_CACHE_HOME"\n')
+    (provider === 'claude'
+      ? 'export CLAUDE_CONFIG_DIR="$__mayplane_profile/claude"\nfor __mayplane_name in $(env | cut -d= -f1); do case "$__mayplane_name" in CLAUDE_CODE_GIT_BASH_PATH|CLAUDE_CONFIG_DIR) ;; CLAUDE_*|CLAUDECODE) unset "$__mayplane_name" ;; esac; done\nmkdir -p "$CLAUDE_CONFIG_DIR"\n'
+      : provider === 'codex'
+        ? 'export CODEX_HOME="$__mayplane_profile/codex"\nunset CODEX_SQLITE_HOME OPENAI_API_KEY CODEX_ACCESS_TOKEN\nmkdir -p "$CODEX_HOME"\n'
+        : 'export XDG_DATA_HOME="$__mayplane_profile/data" XDG_CONFIG_HOME="$__mayplane_profile/config" XDG_CACHE_HOME="$__mayplane_profile/cache" XDG_STATE_HOME="$__mayplane_profile/state"\nexport OPENCODE_DB="$XDG_DATA_HOME/opencode/opencode.db"\nunset OPENCODE_AUTH_CONTENT OPENAI_API_KEY ANTHROPIC_API_KEY GOOGLE_API_KEY GEMINI_API_KEY OPENROUTER_API_KEY OPENCODE_CONFIG OPENCODE_CONFIG_CONTENT\nmkdir -p "$XDG_DATA_HOME/opencode" "$XDG_CONFIG_HOME" "$XDG_STATE_HOME" "$XDG_CACHE_HOME"\n')
   );
 }
 export function posixProfileOperation(
@@ -102,9 +111,11 @@ export function posixProfileOperation(
     );
   }
   const file =
-    provider === 'codex'
-      ? '"$CODEX_HOME/auth.json"'
-      : '"$XDG_DATA_HOME/opencode/auth.json"';
+    provider === 'claude'
+      ? '"$CLAUDE_CONFIG_DIR/settings.json"'
+      : provider === 'codex'
+        ? '"$CODEX_HOME/auth.json"'
+        : '"$XDG_DATA_HOME/opencode/auth.json"';
   if (operation === 'profile-read')
     return `set -eu\n${setup}if [ -f ${file} ]; then cat ${file}; else printf '{}'; fi`;
   if (operation === 'profile-clear') return `set -eu\n${setup}rm -f -- ${file}`;

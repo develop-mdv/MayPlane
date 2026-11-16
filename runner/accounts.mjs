@@ -9,6 +9,7 @@ import {
 } from './account-brokers.mjs';
 import { agentVersion } from './agent-status.mjs';
 import { profileTransfer } from './agent-profile.mjs';
+import { claudeBroker, claudeAuthProviders } from './claude-account.mjs';
 
 const now = () => new Date().toISOString();
 export function createAccounts(
@@ -19,13 +20,16 @@ export function createAccounts(
     onChanged = () => {},
     codexLogin = codexBroker,
     openCodeLogin = openCodeBroker,
+    claudeLogin = claudeBroker,
   } = {},
 ) {
   const pending = new Map(),
     locks = new Map(),
     leases = new Map(),
     versions = new Map();
-  const starting = new Set();
+  const starting = new Set(),
+    removing = new Set(),
+    preparing = new Map();
   const refreshing = new Map(),
     profileLocks = new Map();
   let discovery;
@@ -71,6 +75,7 @@ export function createAccounts(
       ).length,
   });
   const connected = (id, provider) => {
+    assert(!removing.has(id), 'Аккаунт удаляется или отключается', 409);
     assert(!starting.has(id), 'Дождитесь завершения авторизации аккаунта', 409);
     const a = load(id);
     assert(
@@ -125,6 +130,7 @@ export function createAccounts(
           ['connecting', 'running', 'approval'].includes(s.status),
       );
   async function providers(provider) {
+    if (provider === 'claude') return claudeAuthProviders;
     if (provider === 'codex')
       return [
         {
@@ -175,7 +181,14 @@ export function createAccounts(
     work.completion = (async () => {
       try {
         const a = load(id);
-        if (a.provider === 'codex') {
+        if (a.provider === 'claude') {
+          const result = await work.broker.read();
+          if (closed || pending.get(id) !== work) return;
+          a.secret.credentials = result.credentials;
+          a.authType = 'api';
+          a.email = null;
+          a.planType = null;
+        } else if (a.provider === 'codex') {
           const result = await work.broker.read();
           if (closed || pending.get(id) !== work) return;
           assert(result.account, 'Авторизация Codex не завершена');
@@ -223,6 +236,7 @@ export function createAccounts(
   async function start(id, body) {
     assert(
       !starting.has(id) &&
+        !removing.has(id) &&
         !locks.has(id) &&
         !leases.has(id) &&
         pending.size + starting.size < 4,
@@ -263,15 +277,21 @@ export function createAccounts(
               else if (work && pending.get(id) === work)
                 void fail(id, work, 'Вход отменён или отклонён провайдером.');
             })
-          : await openCodeLogin(brokerId);
+          : a.provider === 'claude'
+            ? await claudeLogin(brokerId)
+            : await openCodeLogin(brokerId);
       work = { broker, login: null, finishing: false };
       pending.set(id, work);
       const available =
-        a.provider === 'codex'
-          ? (await providers('codex'))[0].methods
+        a.provider !== 'opencode'
+          ? (await providers(a.provider))[0].methods
           : (await broker.providers()).find((v) => v.id === a.vendor)?.methods;
       const method = available?.find((m) => m.id === body.method);
       assert(method, 'Выберите поддерживаемый способ входа');
+      assert(
+        method.type !== 'native',
+        'Для подписки Claude выберите машину в форме входа.',
+      );
       if (method.type === 'api')
         assert(
           typeof body.apiKey === 'string' &&
@@ -283,7 +303,7 @@ export function createAccounts(
       a.methodName = method.name;
       save(a);
       work.login =
-        a.provider === 'codex'
+        a.provider !== 'opencode'
           ? await broker.login(key)
           : await broker.login(
               a.vendor,
@@ -497,17 +517,18 @@ export function createAccounts(
           t.machineId === machine.id &&
           t.credentialPresent,
       )) {
-      const account = load(target.accountId);
+      const account = store.get('settings', target.accountId);
       const needsCleanup = (a, t) =>
+        !a ||
         t.retired ||
         a.status === 'disconnected' ||
         (a.authGeneration || 0) !== (t.authGeneration || 0);
       if (!needsCleanup(account, target)) continue;
-      if (target.retired && leases.has(account.id)) continue;
+      if (target.retired && leases.has(target.accountId)) continue;
       try {
         if (
           target.retired &&
-          account.provider === 'opencode' &&
+          account?.provider === 'opencode' &&
           account.authType === 'oauth' &&
           account.status === 'connected' &&
           (account.authGeneration || 0) === (target.authGeneration || 0)
@@ -520,7 +541,7 @@ export function createAccounts(
           if (
             current?.accountId !== target.accountId ||
             !current.credentialPresent ||
-            !needsCleanup(load(target.accountId), current)
+            !needsCleanup(store.get('settings', target.accountId), current)
           )
             return;
           await profileTransfer(
@@ -614,7 +635,49 @@ export function createAccounts(
   }
   async function prepare(machine, provider, id, profile) {
     if (!id) return async () => {};
+    connected(id, provider);
+    preparing.set(id, (preparing.get(id) || 0) + 1);
+    try {
+      return await prepareWork(machine, provider, id, profile);
+    } finally {
+      const count = preparing.get(id) - 1;
+      if (count) preparing.set(id, count);
+      else preparing.delete(id);
+    }
+  }
+  async function prepareWork(machine, provider, id, profile) {
+    if (!id) return async () => {};
     const a = connected(id, provider);
+    if (provider === 'claude') {
+      assert(
+        typeof a.secret.credentials.apiKey === 'string',
+        'Добавьте Anthropic API-ключ',
+        403,
+      );
+      const target = targetRecord(machine, profile, a, 'claude');
+      await profileTransfer(
+        openProcess,
+        machine,
+        provider,
+        profile,
+        'profile-write',
+        connectors,
+        { env: { ANTHROPIC_API_KEY: a.secret.credentials.apiKey } },
+      );
+      return async () => {
+        try {
+          await profileTransfer(
+            openProcess,
+            machine,
+            provider,
+            profile,
+            'profile-clear',
+            connectors,
+          );
+          clearTarget(target);
+        } catch {}
+      };
+    }
     if (provider === 'codex') {
       await profileTransfer(
         openProcess,
@@ -643,8 +706,8 @@ export function createAccounts(
         `account-target:${machine.id}:${provider}:${profile}`,
       );
       if (prior?.credentialPresent && prior.accountId !== id) {
-        const owner = load(prior.accountId);
-        if (owner.status === 'connected' && owner.authType === 'oauth') {
+        const owner = store.get('settings', prior.accountId);
+        if (owner?.status === 'connected' && owner.authType === 'oauth') {
           assert(
             !leases.has(owner.id),
             'Предыдущий аккаунт ещё завершает работу. Повторите переключение.',
@@ -803,14 +866,22 @@ export function createAccounts(
       return true;
     }
     const discovery = path.match(
-      /^\/api\/hub\/accounts\/providers\/(codex|opencode)$/,
+      /^\/api\/hub\/accounts\/providers\/(codex|opencode|claude)$/,
     );
     if (discovery && method === 'GET') {
       send({ providers: await providers(discovery[1]) });
       return true;
     }
     if (path === '/api/hub/accounts' && method === 'POST') {
-      assert(['codex', 'opencode'].includes(body.provider), 'Выберите агента');
+      assert(
+        !(body.provider === 'claude' && body.method === 'subscription'),
+        'Подписка Claude подключается штатным входом на выбранной машине; выберите машину в форме входа.',
+        400,
+      );
+      assert(
+        ['codex', 'opencode', 'claude'].includes(body.provider),
+        'Выберите агента',
+      );
       assert(
         typeof body.name === 'string' &&
           body.name.trim() &&
@@ -818,7 +889,12 @@ export function createAccounts(
         'Название аккаунта: от 1 до 80 символов',
       );
       assert(list().length < 64, 'Можно сохранить не более 64 аккаунтов', 429);
-      const vendor = body.provider === 'codex' ? 'chatgpt' : body.vendor;
+      const vendor =
+        body.provider === 'codex'
+          ? 'chatgpt'
+          : body.provider === 'claude'
+            ? 'anthropic'
+            : body.vendor;
       assert(
         typeof vendor === 'string' &&
           /^[a-z0-9][a-z0-9._-]{0,100}$/.test(vendor),
@@ -840,10 +916,15 @@ export function createAccounts(
       return true;
     }
     const match = path.match(
-      /^\/api\/hub\/accounts\/([a-f0-9-]+)(?:\/(login|cancel|complete))?$/,
+      /^\/api\/hub\/accounts\/([a-f0-9-]+)(?:\/(login|cancel|complete|remove))?$/,
     );
     if (!match) return false;
     const a = load(match[1]);
+    assert(
+      !removing.has(a.id) || method === 'GET',
+      'Аккаунт удаляется или отключается',
+      409,
+    );
     if (!match[2] && method === 'GET') {
       send(await detail(a.id));
       return true;
@@ -888,7 +969,13 @@ export function createAccounts(
       send(await detail(a.id));
       return true;
     }
-    if (!match[2] && method === 'DELETE') {
+    if ((!match[2] || match[2] === 'remove') && method === 'DELETE') {
+      const permanent = match[2] === 'remove';
+      if (permanent)
+        assert(
+          body.confirm === true,
+          'Подтвердите удаление аккаунта из панели',
+        );
       assert(
         !inUse(a.id) &&
           !leases.has(a.id) &&
@@ -897,27 +984,73 @@ export function createAccounts(
         'Сначала остановите чаты этого аккаунта',
         409,
       );
-      await cancel(a.id);
-      const record = load(a.id);
-      record.secret = {};
-      record.status = 'disconnected';
-      record.email = null;
-      record.planType = null;
-      record.error = '';
-      save(record);
-      onChanged(a.id);
-      for (const m of store.list('servers'))
-        if (m.agentAccounts?.[a.provider] === a.id) {
-          m.agentAccounts = { ...m.agentAccounts, [a.provider]: null };
-          store.save('servers', m, store.get('servers', m.id).secret);
-        }
-      await Promise.allSettled(
-        store
-          .list('servers')
-          .filter((m) => m.transport === 'local' || m.status === 'online')
-          .map((m) => cleanupMachine(store.get('servers', m.id))),
+      assert(
+        !preparing.has(a.id),
+        'Дождитесь завершения проверки или подключения аккаунта и повторите удаление.',
+        409,
       );
-      send({ ok: true, account: publicAccount(record) });
+      removing.add(a.id);
+      try {
+        await cancel(a.id);
+        const record = load(a.id);
+        record.secret = {};
+        record.status = 'disconnected';
+        record.email = null;
+        record.planType = null;
+        record.error = '';
+        store.db.exec('BEGIN IMMEDIATE');
+        try {
+          if (permanent) {
+            for (const target of store
+              .list('settings')
+              .filter(
+                (t) =>
+                  t.recordType === 'account_target' && t.accountId === a.id,
+              )) {
+              if (target.credentialPresent)
+                store.save('settings', { ...target, retired: true }, {});
+              else
+                store.db
+                  .prepare('DELETE FROM settings WHERE id=?')
+                  .run(target.id);
+            }
+            store.db.prepare('DELETE FROM settings WHERE id=?').run(a.id);
+          } else save(record);
+          for (const m of store.list('servers'))
+            if (m.agentAccounts?.[a.provider] === a.id) {
+              m.agentAccounts = { ...m.agentAccounts, [a.provider]: null };
+              store.save('servers', m, store.get('servers', m.id).secret);
+            }
+          store.db.exec('COMMIT');
+        } catch (error) {
+          store.db.exec('ROLLBACK');
+          throw error;
+        }
+        onChanged(a.id);
+        const cleanup = Promise.allSettled(
+          store
+            .list('servers')
+            .filter((m) => m.transport === 'local' || m.status === 'online')
+            .map((m) => cleanupMachine(store.get('servers', m.id))),
+        );
+        if (permanent) {
+          void cleanup;
+          const pendingCleanup = store
+            .list('settings')
+            .filter(
+              (t) =>
+                t.recordType === 'account_target' &&
+                t.accountId === a.id &&
+                t.credentialPresent,
+            ).length;
+          send({ ok: true, removedId: a.id, pendingCleanup });
+        } else {
+          await cleanup;
+          send({ ok: true, account: publicAccount(record) });
+        }
+      } finally {
+        removing.delete(a.id);
+      }
       return true;
     }
     return false;

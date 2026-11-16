@@ -16,7 +16,11 @@ export type Server = {
   diskUsedBytes?: number | null;
   diskTotalBytes?: number | null;
   diskAvailableBytes?: number | null;
-  agentAccounts?: { codex?: string | null; opencode?: string | null };
+  agentAccounts?: {
+    codex?: string | null;
+    opencode?: string | null;
+    claude?: string | null;
+  };
   transport?: 'ssh' | 'local' | 'connector';
   platform?: string;
   homePath?: string;

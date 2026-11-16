@@ -1,6 +1,12 @@
 import { createHash } from 'node:crypto';
 import { assert } from './security.mjs';
 import { migrationLocked } from './migration.mjs';
+import {
+  findService,
+  listServices,
+  serviceRecordKey,
+  unlinkProjectServices,
+} from './service-model.mjs';
 
 export function removalPlan(store, kind, id, { deleteChats = false } = {}) {
   assert(
@@ -9,14 +15,10 @@ export function removalPlan(store, kind, id, { deleteChats = false } = {}) {
   );
   const settings = store.list('settings'),
     allChats = settings.filter((s) => s.recordType === 'session');
-  const item = store.get(
-    kind === 'machine'
-      ? 'servers'
-      : kind === 'service'
-        ? 'projects'
-        : 'settings',
-    id,
-  );
+  const item =
+    kind === 'service'
+      ? findService(store, id)
+      : store.get(kind === 'machine' ? 'servers' : 'settings', id);
   assert(
     item &&
       (kind !== 'chat' || item.recordType === 'session') &&
@@ -40,12 +42,18 @@ export function removalPlan(store, kind, id, { deleteChats = false } = {}) {
         : kind === 'project'
           ? allChats.filter((s) => s.projectId === id)
           : [];
+  const allServices = listServices(store, settings);
   const services =
     kind === 'service'
       ? [item]
       : kind === 'machine'
-        ? store.list('projects').filter((s) => s.serverId === id)
+        ? allServices.filter((s) => s.machineId === id)
         : [];
+  const detachedServices = allServices.filter(
+    (s) =>
+      projects.some((p) => p.id === s.projectId) &&
+      !services.some((removed) => removed.id === s.id),
+  );
   const context = settings.filter(
     (s) =>
       s.recordType === 'service_context' &&
@@ -69,7 +77,8 @@ export function removalPlan(store, kind, id, { deleteChats = false } = {}) {
         name: item.name || item.secret?.title,
         projects: projects.map((p) => [p.id, p.path]),
         chats: chats.map((s) => [s.id, s.projectId, s.updatedAt]),
-        services: services.map((s) => s.id),
+        services: services.map((s) => [s.id, s.machineId, s.projectId]),
+        detachedServices: detachedServices.map((s) => s.id),
         targets: targets.map((s) => s.id),
       }),
     )
@@ -82,6 +91,7 @@ export function removalPlan(store, kind, id, { deleteChats = false } = {}) {
     projects,
     chats,
     services,
+    detachedServices,
     context,
     targets,
     deleteChats,
@@ -96,13 +106,15 @@ export function removalPreview(plan) {
     projects: plan.projects.length,
     chats: plan.chats.length,
     services: plan.services.length,
+    detachedServices: plan.detachedServices.length,
     pendingCredentials: plan.targets.filter((t) => t.credentialPresent).length,
   };
 }
 export function assertRemovalJobs(store, plan) {
   if (!['machine', 'service'].includes(plan.kind)) return;
+  if (plan.kind === 'service' && !plan.services[0]?.legacy) return;
   const machineIds =
-    plan.kind === 'machine' ? [plan.id] : plan.services.map((s) => s.serverId);
+    plan.kind === 'machine' ? [plan.id] : plan.services.map((s) => s.machineId);
   const serviceIds = plan.services.map((s) => s.id);
   const related = (p) =>
     serviceIds.includes(p.id) ||
@@ -149,6 +161,7 @@ export function commitRemoval(store, plan) {
       else removeSetting.run(target.id);
     }
   for (const chat of removedChats) removeSetting.run(chat.id);
+  unlinkProjectServices(store, plan.detachedServices);
   for (const project of plan.projects) removeSetting.run(project.id);
   if (plan.kind === 'project' && !plan.deleteChats)
     for (const chat of plan.chats) {
@@ -168,7 +181,10 @@ export function commitRemoval(store, plan) {
       delete full.serviceId;
       store.save('settings', full);
     }
-    store.db.prepare('DELETE FROM projects WHERE id=?').run(service.id);
+    if (service.recordType === 'service')
+      removeSetting.run(serviceRecordKey(service.id));
+    if (service.legacy)
+      store.db.prepare('DELETE FROM projects WHERE id=?').run(service.id);
   }
   if (plan.kind === 'machine') {
     for (const target of plan.targets) removeSetting.run(target.id);

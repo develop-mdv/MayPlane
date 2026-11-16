@@ -1,5 +1,10 @@
 import { randomUUID } from 'node:crypto';
 import os from 'node:os';
+import { stripVTControlCharacters } from 'node:util';
+import {
+  claudeLoginUrl,
+  isClaudeSubscription,
+} from '../lib/claude-runtime.mjs';
 import { AgentRpc } from './agent-rpc.mjs';
 import {
   machineProcess,
@@ -11,12 +16,23 @@ import { attachConnectors } from './connectors.mjs';
 import { connect, metrics } from './ssh.mjs';
 import { assert, redact } from './security.mjs';
 import { machineHome, separateServices } from './workspace-model.mjs';
-import { agentVersion, agentError } from './agent-status.mjs';
+import { agentVersion, agentError, claudeStatus } from './agent-status.mjs';
 import { createAccounts } from './accounts.mjs';
 import { connectorEndpoint } from '../lib/machine-connection.mjs';
 import { createNativeSessions } from './native-sessions.mjs';
 import { metricSample } from '../lib/machine-metrics.mjs';
 import { createAgentLimits, sessionUsage } from './agent-limits.mjs';
+import { createServices } from './services.mjs';
+import {
+  serviceChatBlock,
+  serviceChatCommand,
+  serviceChatRequest,
+  visibleServiceChatInput,
+} from '../lib/service-chat.mjs';
+import {
+  addServiceConversationBatch,
+  serviceConversationInput,
+} from './service-conversation.mjs';
 import {
   removalPlan,
   removalPreview,
@@ -50,6 +66,7 @@ export function createHub(
     resolveHome = machineHome,
     accountOptions = {},
     publicUrl = '',
+    serviceOptions = {},
   } = {},
 ) {
   const connectors = attachConnectors(server, store);
@@ -112,7 +129,7 @@ export function createHub(
           : x,
       );
   const save = (record) => {
-    if (['session', 'workspace'].includes(record.recordType)) {
+    if (['session', 'workspace', 'service'].includes(record.recordType)) {
       assert(
         !deletingMachines.has(record.machineId) &&
           store.get('servers', record.machineId),
@@ -159,6 +176,9 @@ export function createHub(
     return m;
   };
   separateServices(store);
+  const services = createServices({
+    store, machine, save, accounts, openProcess, connectors, ...serviceOptions,
+  });
   const sessions = () =>
     records('session').map((s) => ({
       ...s,
@@ -203,6 +223,7 @@ export function createHub(
     content,
     itemId = randomUUID(),
     append = false,
+    metadata,
   ) {
     if (!content) return;
     updateSession(id, (s) => {
@@ -212,8 +233,41 @@ export function createHub(
         s.secret.messages.push({ id: itemId, role, content, createdAt: now() });
       s.secret.messages = s.secret.messages.slice(-2000);
       const last = s.secret.messages.find((m) => m.id === itemId);
-      if (last) last.content = last.content.slice(-262144);
+      if (last) {
+        last.content = last.content.slice(-262144);
+        if (metadata) Object.assign(last, metadata);
+      }
     });
+  }
+  function serviceTurnFor(runtime, params, turnId = params.turnId) {
+    const turn = runtime.serviceTurn;
+    if (!turn || (params.threadId && params.threadId !== runtime.nativeId))
+      return null;
+    return !turnId || !turn.id || turnId === turn.id ? turn : null;
+  }
+  function assistantMessage(runtime, params, text, id, append) {
+    const turn = serviceTurnFor(runtime, params);
+    const itemId = id || runtime.messageId || randomUUID();
+    if (turn && text) turn.messages.add(itemId);
+    addMessage(runtime.sessionId, 'assistant', text, itemId, append, turn ? { serviceOutput: true } : undefined);
+  }
+  function finishServiceTurn(runtime, session, turn, complete, notice) {
+    if (!turn || runtime.serviceTurn !== turn) return;
+    runtime.serviceTurn = null;
+    if (session.status === 'interrupted') return;
+    if (complete && session.secret.messages.some((message) => turn.messages.has(message.id) && message.content.trim())) {
+      addServiceConversationBatch(session, turn.messages, (fields) =>
+        services.chatDraft(fields, session),
+      );
+      return;
+    }
+    const content = complete
+      ? 'Агент завершил ход без ответа. Можно продолжить оформление следующим сообщением.'
+      : notice;
+    if (content) {
+      session.secret.messages.push({ id: randomUUID(), role: 'system', content, createdAt: now() });
+      session.secret.messages = session.secret.messages.slice(-2000);
+    }
   }
   function onMessage(runtime, message) {
     const { method, params: p = {}, id } = message;
@@ -274,13 +328,17 @@ export function createHub(
       });
       return;
     }
-    if (method === 'turn/started') runtime.turnId = p.turn?.id;
+    if (method === 'turn/started') {
+      runtime.turnId = p.turn?.id;
+      const turn = serviceTurnFor(runtime, p);
+      if (turn) turn.id = runtime.turnId;
+    }
     if (method === 'item/agentMessage/delta')
-      addMessage(sid, 'assistant', p.delta, p.itemId, true);
+      assistantMessage(runtime, p, p.delta, p.itemId, true);
     if (method === 'item/completed' || method === 'item/started') {
       const item = p.item || {};
       if (item.type === 'agentMessage' && item.text)
-        addMessage(sid, 'assistant', item.text, item.id);
+        assistantMessage(runtime, p, item.text, item.id);
       if (item.type === 'commandExecution')
         addMessage(
           sid,
@@ -299,9 +357,21 @@ export function createHub(
     if (method === 'item/commandExecution/outputDelta')
       addMessage(sid, 'tool', p.delta, p.itemId, true);
     if (method === 'turn/completed') {
+      if (p.threadId && p.threadId !== runtime.nativeId) return;
+      if (p.turn?.id && runtime.turnId && p.turn.id !== runtime.turnId) return;
       runtime.turnId = null;
       clearTimeout(runtime.turnTimer);
       updateSession(sid, (s) => {
+        const outcome = p.turn?.status;
+        finishServiceTurn(
+          runtime,
+          s,
+          serviceTurnFor(runtime, p, p.turn?.id),
+          outcome === 'completed',
+          outcome !== 'interrupted' && !p.turn?.error?.message
+            ? 'Агент не завершил оформление. Продолжите в этом чате.'
+            : undefined,
+        );
         s.status =
           p.turn?.status === 'completed'
             ? 'idle'
@@ -345,9 +415,12 @@ export function createHub(
         runtime.modelState = { configOptions: u.configOptions };
       if (
         u.sessionUpdate === 'agent_message_chunk' &&
-        u.content?.type === 'text'
+        u.content?.type === 'text' &&
+        (!runtime.serviceTurn ||
+          (!u._meta?.['opencode/child-session'] &&
+            (!p.sessionId || p.sessionId === runtime.nativeId)))
       )
-        addMessage(sid, 'assistant', u.content.text, runtime.messageId, true);
+        assistantMessage(runtime, p, u.content.text, runtime.messageId, true);
       if (['tool_call', 'tool_call_update'].includes(u.sessionUpdate))
         addMessage(
           sid,
@@ -393,6 +466,15 @@ export function createHub(
     };
     runtimes.set(key, runtime);
     runtime.ready = (async () => {
+      if (provider === 'claude' && session && !accountId) {
+        const auth = await claudeStatus(m, openProcess, connectors);
+        assert(
+          auth.ready,
+          auth.error ||
+            'Войдите с подпиской Claude в настройках аккаунтов или в карточке машины.',
+          403,
+        );
+      }
       const cwd = session
         ? session.cwd ||
           (session.projectId
@@ -504,7 +586,7 @@ export function createHub(
           if (session) {
             assert(
               !session.nativeId || result.agentCapabilities?.loadSession,
-              'Эта версия OpenCode не поддерживает возобновление. Создайте новый диалог.',
+              'Эта версия агента не поддерживает возобновление. Обновите установку или создайте новый диалог.',
               409,
             );
             runtime.replaying = !!session.nativeId;
@@ -562,6 +644,15 @@ export function createHub(
     return runtime.cleanupPromise;
   }
   async function status(m, provider) {
+    if (provider === 'claude')
+      return claudeStatus(
+        m,
+        openProcess,
+        connectors,
+        m.agentAccounts?.claude
+          ? accounts.connected(m.agentAccounts.claude, 'claude')
+          : null,
+      );
     const version = await agentVersion(m, provider, openProcess, connectors);
     if (!version.installed || provider !== 'codex')
       return { ...version, account: null, models: [] };
@@ -608,16 +699,18 @@ export function createHub(
   function snapshot() {
     return {
       accounts: accounts.list(),
+      tasks: [...tasks.values()]
+        .filter((t) => t.status === 'running')
+        .map(({ id, machineId, provider, operation, status }) => ({
+          id,
+          machineId,
+          provider,
+          operation,
+          status,
+        })),
       projects: records('workspace'),
-      services: store.list('projects').map((s) => ({
-        id: s.id,
-        name: s.name,
-        machineId: s.serverId,
-        repo: s.repo,
-        kind: s.kind,
-        status: s.status,
-        domain: s.domain,
-      })),
+      services: services.list(),
+      capabilities: { serviceChat: true },
       sessions: sessions().sort((a, b) =>
         b.updatedAt.localeCompare(a.updatedAt),
       ),
@@ -661,7 +754,21 @@ export function createHub(
         if (s.cwd !== data.cwd) s.projectId = null;
         s.cwd = data.cwd;
         if (allowLegacy && s.provider === 'codex' && mode) s.mode = mode;
-        s.secret.messages = data.messages;
+        let draftingTurn = false;
+        s.secret.messages = data.messages.map((message) => {
+          if (message.role === 'user') {
+            const visible = visibleServiceChatInput(message.content);
+            draftingTurn = visible.content !== message.content;
+            return { ...message, ...visible };
+          }
+          if (
+            message.role === 'assistant' &&
+            draftingTurn &&
+            serviceChatBlock(message.content)
+          )
+            return { ...message, serviceOutput: true };
+          return message;
+        });
         s.secret.approvals = [];
         s.authError = null;
         s.secret.errorMessage = null;
@@ -793,7 +900,7 @@ export function createHub(
       if (t.status !== 'running') return;
       clearTimeout(t.timer);
       t.status = code === 0 ? 'success' : 'error';
-      if (code === 0 && operation === 'install') {
+      if (code === 0 && ['install', 'login', 'logout'].includes(operation)) {
         for (const r of runtimes.values())
           if (r.machineId === m.id && r.provider === provider) r.rpc?.close();
         modelCatalog.invalidate(m.id, provider);
@@ -802,11 +909,18 @@ export function createHub(
       }
       p.close();
     };
+    let terminalOutput = '';
     const capture = (bytes) => {
-      t.output = redact(t.output + bytes.toString(), [
-        ...Object.values(m.secret || {}),
-        ...t.secrets,
-      ]).slice(-32768);
+      if (provider === 'claude')
+        terminalOutput = (terminalOutput + bytes.toString()).slice(-65536);
+      t.output = redact(
+        provider === 'claude'
+          ? stripVTControlCharacters(terminalOutput)
+          : t.output + bytes.toString(),
+        [...Object.values(m.secret || {}), ...t.secrets],
+      ).slice(-32768);
+      if (provider === 'claude' && operation === 'login')
+        t.loginUrl = claudeLoginUrl(terminalOutput) || t.loginUrl;
     };
     p.stdout.on('data', capture);
     p.stderr.on('data', capture);
@@ -930,9 +1044,11 @@ export function createHub(
         store.db.exec('ROLLBACK');
         throw error;
       }
+      services.forgetServices(result.deletedServices);
       if (plan.kind === 'machine') {
+        services.forgetMachine(plan.id);
         connectors.revoke(plan.id);
-        for (const provider of ['codex', 'opencode'])
+        for (const provider of Object.keys(providers))
           modelCatalog.invalidate(plan.id, provider);
         agentLimits.invalidateMachine(plan.id);
         accounts.invalidateMachine(plan.id);
@@ -963,6 +1079,7 @@ export function createHub(
       return true;
     }
     if (await accounts.handle(path, method, body, send)) return true;
+    if (await services.handle(path, method, body, send)) return true;
     if (path === '/api/hub' && method === 'GET') {
       send(snapshot());
       return true;
@@ -1000,7 +1117,7 @@ export function createHub(
       return true;
     }
     const nativeMatch = path.match(
-      /^\/api\/hub\/machines\/([a-f0-9-]+)\/agents\/(codex|opencode)\/native-sessions$/,
+      /^\/api\/hub\/machines\/([a-f0-9-]+)\/agents\/(codex|opencode|claude)\/native-sessions$/,
     );
     if (nativeMatch && method === 'POST') {
       const m = machine(nativeMatch[1]);
@@ -1172,37 +1289,12 @@ export function createHub(
       return true;
     }
     if (projectMatch && method === 'DELETE') {
-      if (body.deleteChats === true) {
-        send(
-          await removeObject(
-            removalPlan(store, 'project', projectMatch[1], {
-              deleteChats: true,
-            }),
-            body,
-          ),
-        );
-        return true;
-      }
-      assert(
-        !sessions().some(
-          (s) =>
-            s.projectId === projectMatch[1] &&
-            ['running', 'connecting', 'approval'].includes(s.status),
-        ),
-        'Остановите активные диалоги',
-        409,
+      const deleteChats = body.deleteChats === true;
+      const result = await removeObject(
+        removalPlan(store, 'project', projectMatch[1], { deleteChats }),
+        deleteChats ? body : { ...body, confirm: true },
       );
-      const project = load(projectMatch[1], 'workspace');
-      // Removing a folder from the sidebar never deletes files or chat history.
-      for (const item of sessions().filter((s) => s.projectId === project.id)) {
-        runtimes.get(item.id)?.rpc?.close();
-        updateSession(item.id, (s) => {
-          s.projectId = null;
-          s.cwd = item.cwd || project.path;
-        });
-      }
-      store.db.prepare('DELETE FROM settings WHERE id=?').run(projectMatch[1]);
-      send({ ok: true });
+      send(deleteChats ? result : { ok: true });
       return true;
     }
     if (path === '/api/hub/sessions' && method === 'POST') {
@@ -1225,8 +1317,8 @@ export function createHub(
         'Выберите режим',
       );
       assert(
-        body.provider !== 'opencode' || body.mode !== 'read-only',
-        'Для OpenCode используйте разрешения его конфигурации',
+        body.provider === 'codex' || body.mode !== 'read-only',
+        'Для этого агента используйте его штатные подтверждения инструментов',
       );
       const session = {
         id: randomUUID(),
@@ -1269,6 +1361,58 @@ export function createHub(
       send(publicRecord(await syncNative(load(syncMatch[1], 'session'))));
       return true;
     }
+    const serviceChatMatch = path.match(
+      /^\/api\/hub\/sessions\/([a-f0-9-]+)\/service-drafts(?:\/([a-f0-9-]+)\/save)?$/,
+    );
+    if (serviceChatMatch && method === (serviceChatMatch[2] ? 'POST' : 'PATCH')) {
+      const [, sessionId, batchId] = serviceChatMatch;
+      const s = load(sessionId, 'session');
+      assert(
+        !s.archived &&
+          !deletingSessions.has(s.id) &&
+          !deletingMachines.has(s.machineId) &&
+          !nativeChanges.has(s.id) &&
+          !['running', 'connecting', 'approval'].includes(s.status),
+        'Дождитесь ответа агента или восстановите чат из архива.',
+        409,
+      );
+      if (!batchId) {
+        assert(typeof body?.active === 'boolean', 'Укажите режим оформления');
+        send(publicRecord(updateSession(s.id, (x) => {
+          x.serviceDrafting = body.active;
+        })));
+        return true;
+      }
+      const batch = s.secret.serviceBatches?.find((entry) => entry.id === batchId);
+      assert(batch, 'Черновики не найдены', 404);
+      const ids = body?.ids;
+      assert(
+        Array.isArray(ids) && ids.length > 0 && ids.length <= 8 &&
+          new Set(ids).size === ids.length,
+        'Выберите карточки для сохранения',
+      );
+      const cards = batch.cards.filter((card) => ids.includes(card.id));
+      assert(cards.length === ids.length, 'Черновик карточки не найден', 404);
+      if (cards.every((card) => card.result)) {
+        send({ results: cards.map((card) => ({ id: card.id, ...card.result })) });
+        return true;
+      }
+      assert(
+        !batch.replaced,
+        'Агент подготовил более новые черновики. Откройте последний ответ.',
+        409,
+      );
+      const results = services.saveChatDrafts(s.machineId, cards, (receipts) => {
+        updateSession(s.id, (x) => {
+          const saved = x.secret.serviceBatches.find((entry) => entry.id === batchId);
+          for (const { id, ...result } of receipts)
+            saved.cards.find((card) => card.id === id).result = result;
+          if (saved.cards.every((card) => card.result)) x.serviceDrafting = false;
+        });
+      });
+      send({ results });
+      return true;
+    }
     const sm = path.match(
       /^\/api\/hub\/sessions\/([a-f0-9-]+)(?:\/(message|stop|approval))?$/,
     );
@@ -1290,6 +1434,7 @@ export function createHub(
             s.cwd ||
             (s.projectId ? load(s.projectId, 'workspace').path : undefined),
           messages: s.secret.messages,
+          serviceBatches: s.secret.serviceBatches || [],
           usage: s.secret.usage || null,
           errorMessage: s.secret.errorMessage || null,
           approvals: s.secret.approvals,
@@ -1467,16 +1612,21 @@ export function createHub(
             body.message.length <= 32000,
           'Сообщение: от 1 до 32000 символов',
         );
+        const serviceRequest = serviceChatRequest(body.message);
+        const command = serviceRequest ? serviceChatCommand : undefined;
+        const message = serviceRequest || body.message.trim();
+        const drafting = !!serviceRequest || !!s.serviceDrafting;
         if (s.accountId) accounts.connected(s.accountId, s.provider);
         updateSession(s.id, (x) => {
           x.status = 'connecting';
           x.authError = null;
           x.secret.errorMessage = null;
+          if (serviceRequest) x.serviceDrafting = true;
           if (
             !x.customTitle &&
             !x.secret.messages.some((m) => m.role === 'user')
           )
-            x.title = body.message.trim().slice(0, 70);
+            x.title = message.slice(0, 70);
         });
         let connectingRuntime;
         try {
@@ -1507,9 +1657,10 @@ export function createHub(
             });
           throw error;
         }
-        addMessage(s.id, 'user', body.message.trim());
+        addMessage(s.id, 'user', message, undefined, false, command ? { command } : undefined);
         // Accept promptly; native agent events update the durable session asynchronously.
         void (async () => {
+          let runningRuntime, messageId;
           try {
             const r = await (
               await runtimeFor(machine(s.machineId), s.provider, s)
@@ -1518,8 +1669,21 @@ export function createHub(
             updateSession(s.id, (x) => {
               x.status = 'running';
             });
-            r.messageId = randomUUID();
-            r.turnTimer = setTimeout(
+            runningRuntime = r;
+            r.cancelled = false;
+            messageId = randomUUID();
+            r.messageId = messageId;
+            const serviceTurn = drafting ? { messages: new Set() } : null;
+            r.serviceTurn = serviceTurn;
+            const text = serviceTurn
+              ? serviceConversationInput(
+                  message, s, machine(s.machineId),
+                  s.projectId ? load(s.projectId, 'workspace') : null,
+                  services.list(),
+                  command,
+                )
+              : message;
+            const timer = setTimeout(
               () => {
                 r.rpc.close();
                 addMessage(
@@ -1530,28 +1694,51 @@ export function createHub(
               },
               30 * 60 * 1000,
             );
-            r.turnTimer.unref();
+            r.turnTimer = timer;
+            timer.unref();
             if (s.provider === 'codex') {
               const result = await r.rpc.request('turn/start', {
                 threadId: r.nativeId,
-                input: [{ type: 'text', text: body.message.trim() }],
+                input: [{ type: 'text', text }],
                 ...(s.model ? { model: s.model } : {}),
                 effort: s.reasoning || r.defaultReasoning || null,
               });
-              r.turnId = result.turn?.id;
+              if (
+                r.messageId === messageId &&
+                (!serviceTurn || r.serviceTurn === serviceTurn)
+              ) {
+                r.turnId = result.turn?.id;
+                if (serviceTurn) serviceTurn.id = r.turnId;
+              }
             } else {
               const result = await r.rpc.request(
                 'session/prompt',
                 {
                   sessionId: r.nativeId,
-                  prompt: [{ type: 'text', text: body.message.trim() }],
+                  prompt: [{ type: 'text', text }],
                 },
                 30 * 60 * 1000,
               );
-              clearTimeout(r.turnTimer);
+              clearTimeout(timer);
+              if (r.messageId !== messageId) return;
               if (r.accountId) await releaseRuntime(r);
-              if (store.get('settings', s.id))
+              if (
+                store.get('settings', s.id) &&
+                !r.cancelled &&
+                r.messageId === messageId
+              )
                 updateSession(s.id, (x) => {
+                  finishServiceTurn(
+                    r,
+                    x,
+                    serviceTurn,
+                    result.stopReason === 'end_turn',
+                    result.stopReason === 'max_tokens'
+                      ? 'Агент остановился на лимите ответа. Продолжите оформление следующим сообщением.'
+                      : result.stopReason !== 'cancelled'
+                        ? 'Агент не завершил оформление. Продолжите в этом чате.'
+                        : undefined,
+                  );
                   if (x.status !== 'interrupted')
                     x.status =
                       result.stopReason === 'cancelled'
@@ -1567,8 +1754,12 @@ export function createHub(
               !store.get('settings', s.id)
             )
               return;
-            const failed = runtimes.get(s.id);
+            if (runningRuntime && runningRuntime.messageId !== messageId)
+              return;
+            const failed = runningRuntime || runtimes.get(s.id);
+            if (failed) failed.serviceTurn = null;
             if (failed?.accountId) await releaseRuntime(failed).catch(() => {});
+            if (runningRuntime?.cancelled) return;
             const stopped = load(s.id, 'session').status === 'interrupted';
             if (!stopped) {
               updateSession(s.id, (x) => {
@@ -1589,7 +1780,11 @@ export function createHub(
       }
       if (method === 'POST' && sm[2] === 'stop') {
         const r = runtimes.get(s.id);
-        if (r) r.cancelled = true;
+        const serviceTurn = r?.serviceTurn;
+        if (r) {
+          r.cancelled = true;
+          r.serviceTurn = null;
+        }
         if (r?.rpc) {
           try {
             if (s.provider === 'codex' && r.turnId)
@@ -1597,13 +1792,15 @@ export function createHub(
                 threadId: r.nativeId,
                 turnId: r.turnId,
               });
-            else if (s.provider === 'opencode')
+            else if (s.provider !== 'codex')
               r.rpc.notify('session/cancel', { sessionId: r.nativeId });
             else r.rpc.close();
           } catch {
             r.rpc.close();
           }
         }
+        if (serviceTurn && r.rpc && !r.rpc.dead)
+          await releaseRuntime(r).catch(() => {});
         updateSession(s.id, (x) => {
           x.status = 'interrupted';
           x.secret.approvals = [];
@@ -1687,11 +1884,45 @@ export function createHub(
       }
     }
     const am = path.match(
-      /^\/api\/hub\/machines\/([a-f0-9-]+)\/agents\/(codex|opencode)(?:\/(install|login|logout|models|limits|account))?$/,
+      /^\/api\/hub\/machines\/([a-f0-9-]+)\/agents\/(codex|opencode|claude)(?:\/(install|login|logout|models|limits|account|subscription))?$/,
     );
     if (am) {
       const m = machine(am[1]),
         provider = am[2];
+      if (am[3] === 'subscription') {
+        assert(
+          provider === 'claude',
+          'Этот способ входа доступен для Claude',
+          400,
+        );
+        assert(
+          ['GET', 'POST'].includes(method),
+          'Метод не поддерживается',
+          405,
+        );
+        if (method === 'POST')
+          assert(
+            body.confirm === true,
+            'Подтвердите использование подписки на машине',
+          );
+        const native = await claudeStatus(m, openProcess, connectors);
+        if (method === 'GET') {
+          send(native);
+          return true;
+        }
+        assert(
+          native.ready && isClaudeSubscription(native.account),
+          'Войдите в Claude с подпиской на этой машине. API-ключ не является подпиской.',
+          403,
+        );
+        const current = machine(m.id);
+        current.agentAccounts = { ...current.agentAccounts, claude: null };
+        saveMachine(current);
+        modelCatalog.invalidate(m.id, provider);
+        agentLimits.invalidateMachine(m.id, provider);
+        send({ ok: true, account: native.account });
+        return true;
+      }
       if (method === 'POST' && am[3] === 'account') {
         const accountId = body.accountId || null;
         if (accountId) accounts.connected(accountId, provider);
@@ -1785,6 +2016,20 @@ export function createHub(
         return true;
       }
       if (method === 'POST' && am[3] === 'logout') {
+        if (provider === 'claude') {
+          assert(body.confirm === true, 'Подтвердите выход из аккаунта машины');
+          assert(
+            !sessions().some(
+              (s) =>
+                s.machineId === m.id &&
+                ['running', 'connecting', 'approval'].includes(s.status),
+            ),
+            'Сначала остановите активные чаты',
+            409,
+          );
+          send(await task(m, provider, 'logout'), 202);
+          return true;
+        }
         assert(provider === 'codex', 'Выйдите из OpenCode через его терминал');
         assert(
           !sessions().some(
@@ -1847,7 +2092,9 @@ export function createHub(
           t.secrets.push(body.input);
           t.output = redact(t.output, t.secrets);
         }
-        t.process.input.write(body.input + '\n');
+        t.process.input.write(
+          body.input + (t.provider === 'claude' ? '\r' : '\n'),
+        );
         send({ ok: true });
         return true;
       }
@@ -1879,6 +2126,7 @@ export function createHub(
       nativeSessions.close();
       if (closed) return;
       closed = true;
+      services.close();
       modelCatalog.close();
       agentLimits.close();
       accounts.close();

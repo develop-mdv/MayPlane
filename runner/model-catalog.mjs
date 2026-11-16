@@ -291,7 +291,9 @@ export function createModelCatalog({
             clientInfo: { name: 'mayplane', version: '0.2.0' },
           });
           const reusable =
-            entry.nativeId && init.agentCapabilities?.loadSession;
+            provider !== 'claude' &&
+            entry.nativeId &&
+            init.agentCapabilities?.loadSession;
           const state = await rpc.request(
             reusable ? 'session/load' : 'session/new',
             {
@@ -308,7 +310,7 @@ export function createModelCatalog({
           const initial = acpOptions(state);
           assert(
             initial.models.length,
-            'OpenCode не вернул модели. Проверьте провайдеров и вход в настройках агента.',
+            'Агент не вернул модели. Проверьте провайдера и авторизацию.',
             409,
           );
           if (refresh || entry.expiresAt <= Date.now()) entry.variants.clear();
@@ -360,7 +362,7 @@ export function createModelCatalog({
     } catch (error) {
       throw Object.assign(
         new Error(
-          `Не удалось получить модели ${provider === 'codex' ? 'Codex' : 'OpenCode'}. ${error.message}`,
+          `Не удалось получить модели ${provider === 'codex' ? 'Codex' : provider === 'claude' ? 'Claude Code' : 'OpenCode'}. ${error.message}`,
         ),
         { status: error.status || 400 },
       );

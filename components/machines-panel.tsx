@@ -2,6 +2,7 @@
 import { lazy, Suspense, useEffect, useRef, useState } from 'react';
 import {
   Server as ServerIcon,
+  Boxes,
   Monitor,
   Plus,
   ArrowLeft,
@@ -28,6 +29,7 @@ import type { Server } from '@/lib/domain';
 import type { Workspace } from '@/lib/use-workspace';
 import {
   providerNames,
+  agentProviders,
   type Hub,
   type AgentProvider,
   type AgentStatus,
@@ -576,10 +578,10 @@ export function PairComputer({
               </>
             )}
             <p className="hub-note">
-              Коннектор запускается от вашего пользователя, видит его
-              Codex/OpenCode и рабочие папки. Локальная модель подключается к
-              агенту на этом же компьютере; её API не нужно публиковать в
-              интернете.
+              Коннектор запускается от вашего пользователя, видит его Codex,
+              OpenCode, Claude Code и рабочие папки. Локальная модель
+              подключается к агенту на этом же компьютере; её API не нужно
+              публиковать в интернете.
             </p>
           </>
         )}
@@ -616,11 +618,25 @@ function ProviderPanel({
       status: string;
       output: string;
       operation: string;
+      loginUrl?: string;
     } | null>(null),
     [input, setInput] = useState(''),
     [confirm, setConfirm] = useState(false);
   const base = `/machines/${machine.id}/agents/${provider}`;
   const api = hub.api;
+  const seenTasks = useRef(new Set<string>());
+  useEffect(() => {
+    const running = hub.data.tasks?.find(
+      (t) =>
+        t.machineId === machine.id &&
+        t.provider === provider &&
+        !seenTasks.current.has(t.id),
+    );
+    if (running && !taskId) {
+      seenTasks.current.add(running.id);
+      setTaskId(running.id);
+    }
+  }, [hub.data.tasks, machine.id, provider, taskId]);
   async function check() {
     setBusy(true);
     try {
@@ -650,6 +666,7 @@ function ProviderPanel({
           status: string;
           output: string;
           operation: string;
+          loginUrl?: string;
         }>(`/hub/tasks/${taskId}`);
         if (active) {
           setTask(result);
@@ -754,7 +771,7 @@ function ProviderPanel({
         >
           <Download size={14} />
           {status?.installed
-            ? provider === 'opencode'
+            ? provider !== 'codex'
               ? 'Проверить установку'
               : 'Обновить'
             : 'Установить'}
@@ -771,13 +788,13 @@ function ProviderPanel({
             ? 'Настроить аккаунт'
             : 'Добавить аккаунт'}
         </button>
-        {provider === 'codex' &&
+        {(provider === 'codex' || provider === 'claude') &&
           status?.account &&
           !machine.agentAccounts?.[provider] && (
             <button
               className="icon-button"
-              title="Выйти из Codex"
-              aria-label="Выйти из Codex"
+              title={`Выйти из ${providerNames[provider]}`}
+              aria-label={`Выйти из ${providerNames[provider]}`}
               onClick={() => void operate('logout')}
               disabled={busy}
             >
@@ -792,6 +809,23 @@ function ProviderPanel({
             Войти непосредственно на этой машине
           </button>
         )}
+      {provider === 'claude' && !machine.agentAccounts?.claude && (
+        <button
+          type="button"
+          className="text-button"
+          disabled={busy || !!taskId || !available(machine)}
+          onClick={() => void operate('login')}
+        >
+          Войти с подпиской Claude на этой машине
+        </button>
+      )}
+      {provider === 'claude' && (
+        <p className="hub-note">
+          Используйте свою подписку Claude без API-ключа или выберите
+          API-аккаунт из настроек. Подписка хранится на этой машине и
+          используется при выборе «Подписка / профиль Claude на машине».
+        </p>
+      )}
       {status?.account && (
         <p className="hub-note">
           <Check size={14} />
@@ -810,8 +844,8 @@ function ProviderPanel({
         )}
       {status?.installed && status.ready === false && (
         <p className="hub-note">
-          Codex установлен, но подключиться к агенту не удалось. Подробности
-          ниже.
+          {providerNames[provider]} установлен, но подключиться к агенту не
+          удалось. Подробности ниже.
         </p>
       )}
       <ErrorText error={status?.error || ''} />
@@ -863,6 +897,16 @@ function ProviderPanel({
             {task.output.replace(/\x1b\[[0-9;?]*[a-zA-Z]/g, '') ||
               'Ожидаем вывод…'}
           </pre>
+          {task.loginUrl && task.status === 'running' && (
+            <a
+              className="hub-button primary"
+              href={task.loginUrl}
+              target="_blank"
+              rel="noreferrer"
+            >
+              Открыть вход Claude Code <ArrowUpRight size={14} />
+            </a>
+          )}
           {task.status === 'running' && task.operation === 'login' && (
             <form
               onSubmit={async (e) => {
@@ -876,10 +920,16 @@ function ProviderPanel({
               }}
             >
               <input
+                type={provider === 'claude' ? 'password' : 'text'}
+                autoComplete="off"
                 value={input}
                 onChange={(e) => setInput(e.target.value)}
-                placeholder="Ответ для CLI (для меню можно использовать SSH-консоль)"
-                aria-label="Ввод для входа OpenCode"
+                placeholder={
+                  provider === 'claude'
+                    ? 'Код со страницы входа, если Claude его запросил'
+                    : 'Ответ для CLI (для меню можно использовать SSH-консоль)'
+                }
+                aria-label={`Ввод для входа ${providerNames[provider]}`}
               />
               <button className="hub-button" type="submit">
                 Отправить
@@ -894,9 +944,18 @@ function ProviderPanel({
           <p>
             Установить{' '}
             <code>
-              {provider === 'codex' ? '@openai/codex' : '@opencode/cli'}
+              {provider === 'codex'
+                ? '@openai/codex'
+                : provider === 'claude'
+                  ? 'Claude Code + Claude Agent ACP'
+                  : '@opencode/cli'}
             </code>{' '}
-            {machine.platform !== 'win32' ? (
+            {provider === 'claude' ? (
+              <>
+                в личный каталог пользователя; при необходимости установится
+                отдельный Node.js для адаптера
+              </>
+            ) : machine.platform !== 'win32' ? (
               <>
                 через официальный установщик {providerNames[provider]} без npm
               </>
@@ -906,16 +965,21 @@ function ProviderPanel({
               </>
             )}{' '}
             на <b>{machine.name}</b> от пользователя{' '}
-            <b>{machine.username || 'владельца коннектора'}</b>? На
-            {machine.platform !== 'win32' ? (
+            <b>{machine.username || 'владельца коннектора'}</b>?{' '}
+            {provider === 'claude' ? (
               <>
-                машине нужен curl.{' '}
+                Установится приватный адаптер. Вход, настройки и проекты
+                сохранятся.
+              </>
+            ) : machine.platform !== 'win32' ? (
+              <>
+                На машине нужен curl.{' '}
                 {provider === 'codex'
                   ? 'Codex будет установлен или обновлён в ~/.local/bin; вход и настройки сохраняются.'
                   : 'Существующая установка, настройки и запущенные процессы сохраняются.'}
               </>
             ) : (
-              <>машине нужны Node.js и npm.</>
+              <>На машине нужны Node.js и npm.</>
             )}
           </p>
           <div>
@@ -943,6 +1007,7 @@ export function MachinesPanel({
   onSelect,
   onAdd,
   onPair,
+  onServices,
   onAccounts,
   onRemove,
 }: {
@@ -952,6 +1017,7 @@ export function MachinesPanel({
   onSelect: (id: string | null) => void;
   onAdd: (server?: Server) => void;
   onPair: () => void;
+  onServices: (id: string) => void;
   onAccounts: () => void;
   onRemove: (machine: Server) => void;
 }) {
@@ -1024,6 +1090,10 @@ export function MachinesPanel({
               </p>
             </div>
             <div className="heading-actions">
+              <button type="button" className="hub-button" onClick={() => onServices(machine.id)}>
+                <Boxes size={15} />
+                Сервисы <span>{hub.data.services.filter((s) => s.machineId === machine.id).length}</span>
+              </button>
               <button
                 type="button"
                 className="hub-button danger"
@@ -1262,7 +1332,7 @@ export function MachinesPanel({
             <span className="muted">Аккаунт панели или профиль машины</span>
           </div>
           <div className="agents-grid">
-            {(['codex', 'opencode'] as const).map((p) => (
+            {agentProviders.map((p) => (
               <ProviderPanel
                 key={machine.id + p}
                 machine={machine}

@@ -120,6 +120,7 @@ export function NativeSessionImport({
             >
               <option value="codex">Codex · CLI и приложение</option>
               <option value="opencode">OpenCode</option>
+              <option value="claude">Claude Code · CLI</option>
             </select>
           </Field>
         </div>

@@ -10,7 +10,8 @@ export type HubProject = {
   repo: string;
   createdAt: string;
 };
-export type AgentProvider = 'codex' | 'opencode';
+export type AgentProvider = 'codex' | 'opencode' | 'claude';
+export const agentProviders = ['codex', 'opencode', 'claude'] as const;
 export type RemovalKind = 'chat' | 'project' | 'service' | 'machine';
 export type RemovalTarget = { kind: RemovalKind; id: string; name: string };
 export type RemovalPreview = RemovalTarget & {
@@ -18,6 +19,7 @@ export type RemovalPreview = RemovalTarget & {
   projects: number;
   chats: number;
   services: number;
+  detachedServices: number;
   pendingCredentials: number;
 };
 export type RemovalResult = {
@@ -42,6 +44,7 @@ export type AgentSession = {
   nativeSource?: boolean;
   nativeSyncedAt?: string;
   authError?: string | null;
+  serviceDrafting?: boolean;
   mode: string;
   status:
     | 'idle'
@@ -59,6 +62,8 @@ export type AgentMessage = {
   role: 'user' | 'assistant' | 'tool' | 'system';
   content: string;
   createdAt: string;
+  serviceOutput?: boolean;
+  command?: '/services';
 };
 export type AgentApproval = {
   id: string;
@@ -90,6 +95,7 @@ export type SessionDetail = AgentSession & {
   errorMessage?: string | null;
   messages: AgentMessage[];
   approvals: AgentApproval[];
+  serviceBatches?: ServiceConversationBatch[];
 };
 export type LimitWindow = {
   usedPercent: number;
@@ -118,17 +124,102 @@ export type AgentLimits = {
     } | null;
   }[];
 };
-export type HubSnapshot = {
-  accounts?: AgentAccount[];
-  services: {
-    id: string;
-    name: string;
-    machineId: string;
-    repo: string;
-    kind: string;
-    status: string;
-    domain?: string;
+export type ServiceSource =
+  | { type: 'manual' }
+  | { type: 'docker'; container: string }
+  | { type: 'compose'; stack: string; component: string }
+  | { type: 'systemd'; unit: string };
+export type ServiceStatus =
+  | 'running'
+  | 'stopped'
+  | 'failed'
+  | 'starting'
+  | 'degraded'
+  | 'missing'
+  | 'unknown'
+  | 'unconfigured';
+export type ServiceHealth = 'healthy' | 'unhealthy' | 'starting';
+export type ServiceHttpStatus = 'ok' | 'failed' | 'unknown';
+export type ServiceFields = {
+  name: string;
+  projectId: string | null;
+  machineId: string;
+  description: string;
+  environment: string;
+  directory: string;
+  url: string;
+  repo?: string;
+  healthUrl: string;
+  notes: string;
+  source: ServiceSource;
+  additionalSources?: ServiceSource[];
+};
+export type HubService = ServiceFields & {
+  id: string;
+  status: ServiceStatus;
+  legacy?: boolean;
+  checkedAt?: string;
+  attemptedAt?: string;
+  error?: string;
+  startedAt?: string | null;
+  restarts?: number | null;
+  instances?: { running: number; found: number };
+  unitState?: string;
+  cpuCores?: number | null;
+  memoryBytes?: number | null;
+  health?: ServiceHealth | null;
+  http?: { status: ServiceHttpStatus; code: number | null };
+  components?: {
+    source: ServiceSource;
+    status: ServiceStatus;
+    health?: ServiceHealth | null;
+    error?: string;
+    cpuCores?: number | null;
+    memoryBytes?: number | null;
   }[];
+};
+export type ServiceConversationCard = {
+  id: string;
+  fields: ServiceFields;
+  result?: { serviceId: string; existing: boolean };
+};
+export type ServiceConversationBatch = {
+  id: string;
+  messageId: string;
+  cards: ServiceConversationCard[];
+  warnings: string[];
+  replaced?: boolean;
+};
+export type ServiceEvent = {
+  at: string;
+  status: ServiceStatus;
+  health: ServiceHealth | null;
+  http: ServiceHttpStatus | null;
+};
+export type ServiceCandidate = Pick<HubService, 'source' | 'name' | 'description' | 'directory' | 'status'> & {
+  serviceId?: string;
+};
+export type ServiceDraft = {
+  status: 'collecting' | 'analysing' | 'ready' | 'failed';
+  warning?: string;
+  error?: string;
+  suggestion?: Pick<ServiceFields, 'name' | 'description' | 'environment' | 'notes' | 'directory' | 'projectId'>;
+};
+export type ServiceLogs = {
+  lines: { at: string | null; source: string; text: string }[];
+  warning: string;
+};
+export type HubSnapshot = {
+  capabilities?: { serviceChat?: boolean };
+  accounts?: AgentAccount[];
+  tasks?: {
+    id: string;
+    machineId: string;
+    provider: AgentProvider;
+    operation: string;
+    status: string;
+  }[];
+  services: HubService[];
   projects: HubProject[];
   sessions: AgentSession[];
   localMachineId?: string;
@@ -172,6 +263,7 @@ export type ModelCatalog = {
 };
 export type AgentStatus = {
   installed: boolean;
+  adapterVersion?: string | null;
   version?: string;
   ready?: boolean;
   missing?: boolean;
@@ -180,7 +272,11 @@ export type AgentStatus = {
   models: AgentModel[];
   login?: { completed?: boolean; success?: boolean; error?: string };
 };
-export const providerNames = { codex: 'Codex', opencode: 'OpenCode' };
+export const providerNames = {
+  codex: 'Codex',
+  opencode: 'OpenCode',
+  claude: 'Claude Code',
+};
 export const sessionLabels: Record<AgentSession['status'], string> = {
   idle: 'Готов',
   connecting: 'Подключение',

@@ -94,7 +94,10 @@ export function createNativeSessions({ openProcess, connectors }) {
   }
   return {
     async list(machine, provider, { cursor = null, cwd } = {}) {
-      assert(['codex', 'opencode'].includes(provider), 'Выберите агента');
+      assert(
+        ['codex', 'opencode', 'claude'].includes(provider),
+        'Выберите агента',
+      );
       assert(
         cursor === null ||
           (typeof cursor === 'string' && cursor.length <= 4096),
@@ -102,10 +105,10 @@ export function createNativeSessions({ openProcess, connectors }) {
       );
       if (cwd) cwd = projectPath(cwd, machine.platform || 'linux');
       return probe(machine, provider, async (rpc, init) => {
-        if (provider === 'opencode')
+        if (provider !== 'codex')
           assert(
             init.agentCapabilities?.sessionCapabilities?.list,
-            'Эта версия OpenCode не поддерживает список диалогов через ACP. Обновите OpenCode до версии 2.',
+            'Эта версия агента не поддерживает список диалогов через ACP. Обновите установку агента.',
             409,
           );
         const result = await rpc.request(
@@ -137,7 +140,7 @@ export function createNativeSessions({ openProcess, connectors }) {
     },
     async read(machine, provider, nativeId, cwd) {
       assert(
-        ['codex', 'opencode'].includes(provider) && validId(nativeId),
+        ['codex', 'opencode', 'claude'].includes(provider) && validId(nativeId),
         'Некорректный диалог',
       );
       return probe(machine, provider, async (rpc, init) => {

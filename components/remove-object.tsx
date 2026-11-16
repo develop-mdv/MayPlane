@@ -13,7 +13,7 @@ import { Modal, Field, ErrorText } from './hub-ui';
 const labels = {
   chat: 'Удалить чат?',
   project: 'Удалить проект?',
-  service: 'Удалить сервис?',
+  service: 'Убрать сервис из списка?',
   machine: 'Удалить машину?',
 };
 export function RemoveObject({
@@ -70,7 +70,7 @@ export function RemoveObject({
           {target.kind === 'chat' && (
             <p className="hub-note">
               История и сообщения этого чата будут удалены из панели без
-              возможности восстановления. Нативная история Codex/OpenCode на
+              возможности восстановления. Нативная история агентов на
               машине и файлы проекта сохранятся.
             </p>
           )}
@@ -102,6 +102,12 @@ export function RemoveObject({
               Карточка и сохранённые настройки сервиса будут удалены из панели.
               Само приложение продолжит работать: контейнеры, файлы, домен и
               данные на сервере сохранятся. Проекты и чаты останутся.
+            </p>
+          )}
+          {preview.detachedServices > 0 && (
+            <p className="hub-note">
+              У связанных сервисов ({preview.detachedServices}) будет очищена
+              ссылка на проект. Карточки останутся в разделе «Сервисы».
             </p>
           )}
           {target.kind === 'machine' && (
