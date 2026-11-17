@@ -66,6 +66,7 @@ function serviceMeasurement(service, machine, inventory, connectionError) {
       instances: entry?.instances,
       cpuCores: entry?.cpuCores,
       memoryBytes: entry?.memoryBytes,
+      metricsError: entry?.metricsError,
       unitState: entry?.unitState,
     };
   });
@@ -268,12 +269,14 @@ export function createServices({
     }
   }
 
-  function refreshMachine(id, force = false) {
+  function refreshMachine(id, { force = false, repeat = false } = {}) {
     if (controller.signal.aborted || !store.get('servers', id))
       return Promise.resolve();
     const current = pending.get(id);
     if (current)
-      return force ? current.then(() => refreshMachine(id, true)) : current;
+      return repeat
+        ? current.then(() => refreshMachine(id, { force }))
+        : current;
     if (!force && Date.now() - (attempts.get(id) || 0) < 10000)
       return Promise.resolve();
     attempts.set(id, Date.now());
@@ -343,7 +346,8 @@ export function createServices({
     saveRecord(service);
     if (changed) {
       observations.delete(service.id);
-      if (watches(service)) void refreshMachine(selected.id, true);
+      if (watches(service))
+        void refreshMachine(selected.id, { force: true, repeat: true });
     }
     return snapshotOf({
       ...service,
@@ -434,7 +438,8 @@ export function createServices({
       store.db.exec('ROLLBACK');
       throw error;
     }
-    if (created.some(watches)) void refreshMachine(selected.id, true);
+    if (created.some(watches))
+      void refreshMachine(selected.id, { force: true, repeat: true });
     return receipts;
   }
 
@@ -485,6 +490,11 @@ export function createServices({
         return true;
       }
       if (path === root + '/refresh') {
+        if (body.wait === true) {
+          await refreshMachine(machine(body.machineId).id, { force: true });
+          send({ ok: true });
+          return true;
+        }
         if (body.machineId) void refreshMachine(machine(body.machineId).id);
         else refreshAll();
         send({ ok: true }, 202);

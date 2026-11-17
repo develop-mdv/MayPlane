@@ -319,12 +319,14 @@ function ServiceDetails({
   const [tab, setTab] = useState<'overview' | 'logs'>('overview');
   const [history, setHistory] = useState<ServiceEvent[]>([]);
   const [error, setError] = useState('');
-  const [refreshNote, setRefreshNote] = useState('');
+  const [refreshing, setRefreshing] = useState(false);
   const now = useNow();
   const api = hub.api;
   const automatic = service.source.type !== 'manual';
   const grouped = !!service.additionalSources?.length;
-  const { id, attemptedAt } = service;
+  const { id, attemptedAt, checkedAt } = service;
+  const lastFailedAttempt =
+    attemptedAt && (!checkedAt || attemptedAt > checkedAt) ? attemptedAt : null;
   useEffect(() => {
     if (tab !== 'overview') return;
     let active = true;
@@ -341,15 +343,16 @@ function ServiceDetails({
   }, [api, attemptedAt, id, tab]);
   const refresh = async () => {
     setError('');
-    setRefreshNote('Запрашиваем проверку…');
+    setRefreshing(true);
     try {
-      await api('/hub/services/refresh', 'POST', {
+      await hub.mutate('/services/refresh', {
         machineId: service.machineId,
+        wait: true,
       });
-      setRefreshNote('Проверка запрошена');
     } catch (reason) {
-      setRefreshNote('');
       setError((reason as Error).message);
+    } finally {
+      setRefreshing(false);
     }
   };
   const metrics = [
@@ -540,26 +543,40 @@ function ServiceDetails({
                 <button
                   type="button"
                   className="hub-button"
+                  disabled={refreshing}
                   onClick={() => void refresh()}
                 >
-                  <RefreshCw size={14} /> Проверить
+                  <RefreshCw
+                    size={14}
+                    className={
+                      refreshing ? 'motion-safe:animate-spin' : undefined
+                    }
+                  />{' '}
+                  Проверить
                 </button>
               )}
             </div>
             {service.error && <p className="hub-note">{service.error}</p>}
+            {service.metricsError && (
+              <p className="hub-note">{service.metricsError}</p>
+            )}
             <output className="hub-note">
-              {refreshNote ||
-                (service.checkedAt
-                  ? 'Последняя успешная проверка · ' +
-                    dateFormat.format(new Date(service.checkedAt))
-                  : automatic || service.healthUrl
-                    ? 'Ожидает проверки'
-                    : 'Укажите источник в настройках карточки, чтобы видеть состояние и логи.')}
+              {refreshing
+                ? 'Проверяем состояние и метрики…'
+                : lastFailedAttempt
+                  ? 'Последняя попытка · ' +
+                    dateFormat.format(new Date(lastFailedAttempt))
+                  : checkedAt
+                    ? 'Последняя успешная проверка · ' +
+                      dateFormat.format(new Date(checkedAt))
+                    : automatic || service.healthUrl
+                      ? 'Ожидает проверки'
+                      : 'Укажите источник в настройках карточки, чтобы видеть состояние и логи.'}
             </output>
-            {refreshNote && service.checkedAt && (
+            {lastFailedAttempt && checkedAt && (
               <p className="hub-note">
                 Последняя успешная проверка ·{' '}
-                {dateFormat.format(new Date(service.checkedAt))}
+                {dateFormat.format(new Date(checkedAt))}
               </p>
             )}
             {!!metrics.length && (
@@ -630,6 +647,9 @@ function ServiceDetails({
                           </span>
                           {component?.error && <small>{component.error}</small>}
                           {usage && <small>{usage}</small>}
+                          {component?.metricsError && (
+                            <small>{component.metricsError}</small>
+                          )}
                         </li>
                       );
                     },

@@ -57,7 +57,7 @@ function fakeCodex(messages) {
   return { input, stdout, stderr, events, close: () => events.emit('close') };
 }
 
-function fixture(t) {
+function fixture(t, { docker } = {}) {
   const directory = mkdtempSync(join(tmpdir(), 'mayplane-services-'));
   const store = openStore(directory, randomBytes(32));
   const host = randomUUID(),
@@ -99,8 +99,12 @@ function fixture(t) {
       withMachine: async (machine, work) => {
         assert.equal(machine.id, remote);
         if (!online) throw new Error('SSH-соединение недоступно.');
-        return work(async (file, args) => {
+        return work(async (file, args, options) => {
           calls.push([file, ...args]);
+          if (file === 'docker' && docker) {
+            const output = await docker(args, options);
+            if (output !== undefined) return output;
+          }
           if (file === 'docker' && args[0] === 'ps')
             return JSON.stringify({
               id: container,
@@ -292,6 +296,96 @@ test('service discovery and observations follow a Compose service through recrea
   assert.equal(failed.data.checkedAt, service.checkedAt);
   assert.equal(failed.data.error, 'SSH-соединение недоступно.');
   assert.equal(failed.data.history.length, 2);
+});
+
+test('a Compose group reports metrics for containers with and without a healthcheck', async (t) => {
+  const webSource = { type: 'compose', stack: 'shop', component: 'web' };
+  const apiId = 'a'.repeat(64);
+  const webId = 'b'.repeat(64);
+  const statsError = 'Docker не вернул замеры CPU и памяти.';
+  const lines = (rows) => rows.map((row) => JSON.stringify(row)).join('\n');
+  let statsUnavailable = false;
+  let webDisappeared = false;
+  const f = fixture(t, {
+    docker(args, options) {
+      if (args[0] === 'ps')
+        return lines([
+          { id: apiId, name: 'shop-api-1', ...appSource },
+          { id: webId, name: 'shop-web-1', ...webSource },
+        ]);
+      if (args[0] === 'inspect') {
+        const template = args[args.indexOf('--format') + 1];
+        // In Docker's strict Go template, accessing .State.Health directly fails for web.
+        assert.match(template, /"health":\{\{with index \.State "Health"\}\}/);
+        const api = { id: apiId, state: 'running', health: 'healthy' };
+        if (!webDisappeared)
+          return lines([api, { id: webId, state: 'running', health: null }]);
+        const mixedOutput = lines([api]) + '\nError: No such object: ' + webId;
+        assert.equal(options.partial(mixedOutput), true);
+        assert.equal(
+          options.partial(mixedOutput + '\npermission denied'),
+          false,
+        );
+        return mixedOutput;
+      }
+      if (args[0] === 'stats') {
+        if (statsUnavailable) throw new Error(statsError);
+        const resources = { cpu: '25.00%', memory: '8MiB / 1GiB' };
+        return lines([
+          { id: apiId, ...resources },
+          ...(!webDisappeared ? [{ id: webId, ...resources }] : []),
+        ]);
+      }
+    },
+  });
+  const service = await f.request('/services', 'POST', {
+    machineId: f.remote,
+    name: 'Магазин',
+    source: appSource,
+    additionalSources: [webSource],
+  });
+  assert.equal(service.status, 201);
+  const path = '/services/' + service.data.id;
+  const refresh = () =>
+    f.request('/services/refresh', 'POST', { machineId: f.remote, wait: true });
+  assert.equal((await refresh()).status, 200);
+  const { data: measured } = await f.request(path);
+  assert.equal(measured.status, 'running', measured.error);
+  assert.ok(measured.checkedAt);
+  assert.equal(measured.cpuCores, 0.5);
+  assert.equal(measured.memoryBytes, 16 * 1024 * 1024);
+  assert.deepEqual(
+    measured.components.map(({ health }) => health),
+    ['healthy', null],
+  );
+
+  statsUnavailable = true;
+  const before = f.calls.length;
+  const results = await Promise.all([refresh(), refresh()]);
+  assert.deepEqual(
+    results.map(({ status }) => status),
+    [200, 200],
+  );
+  assert.equal(
+    f.calls.slice(before).filter(([, command]) => command === 'stats').length,
+    1,
+  );
+  const { data: withoutStats } = await f.request(path);
+  assert.equal(withoutStats.status, 'running');
+  assert.equal(withoutStats.cpuCores, undefined);
+  assert.deepEqual(
+    withoutStats.components.map(({ metricsError }) => metricsError),
+    [statsError, statsError],
+  );
+
+  statsUnavailable = false;
+  webDisappeared = true;
+  await refresh();
+  const { data: recreating } = await f.request(path);
+  assert.equal(recreating.status, 'degraded');
+  assert.equal(recreating.components[0].cpuCores, 0.25);
+  assert.equal(recreating.components[0].metricsError, undefined);
+  assert.equal(recreating.components[1].status, 'missing');
 });
 
 test('native Codex on the panel host receives selected service facts and prepares an unsaved draft', async (t) => {

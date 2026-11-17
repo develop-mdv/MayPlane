@@ -167,6 +167,7 @@ export type HubService = ServiceFields & {
   unitState?: string;
   cpuCores?: number | null;
   memoryBytes?: number | null;
+  metricsError?: string;
   health?: ServiceHealth | null;
   http?: { status: ServiceHttpStatus; code: number | null };
   components?: {
@@ -176,6 +177,7 @@ export type HubService = ServiceFields & {
     error?: string;
     cpuCores?: number | null;
     memoryBytes?: number | null;
+    metricsError?: string;
   }[];
 };
 export type ServiceConversationCard = {

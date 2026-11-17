@@ -9,23 +9,46 @@ const maxDiscovery = 160;
 const maxLogs = 200;
 const dockerList =
   '{"id":{{json .ID}},"name":{{json .Names}},"stack":{{json (.Label "com.docker.compose.project")}},"component":{{json (.Label "com.docker.compose.service")}},"oneOff":{{json (.Label "com.docker.compose.oneoff")}}}';
-const dockerInspect =
-  '{"id":{{json .Id}},"image":{{json .Config.Image}},"state":{{json .State.Status}},"exitCode":{{json .State.ExitCode}},"started":{{json .State.StartedAt}},"restarts":{{json .RestartCount}},"health":{{if .State.Health}}{{json .State.Health.Status}}{{else}}null{{end}},"directory":{{json (index .Config.Labels "com.docker.compose.project.working_dir")}},"ports":{{json .HostConfig.PortBindings}}}';
+// Docker's template is strict, and inspect omits Health for containers without a healthcheck.
+const dockerInspect = [
+  '{"id":{{json .Id}},"image":{{json .Config.Image}},"state":{{json .State.Status}}',
+  '"exitCode":{{json (index .State "ExitCode")}},"started":{{json (index .State "StartedAt")}},"restarts":{{json (index . "RestartCount")}}',
+  '"health":{{with index .State "Health"}}{{json (index . "Status")}}{{else}}null{{end}}',
+  '"directory":{{with index .Config "Labels"}}{{json (index . "com.docker.compose.project.working_dir")}}{{else}}null{{end}}',
+  '"ports":{{json (index .HostConfig "PortBindings")}}}',
+].join(',');
 const dockerStats =
   '{"id":{{json .ID}},"cpu":{{json .CPUPerc}},"memory":{{json .MemUsage}}}';
 const unitFields =
   'Id,LoadState,ActiveState,SubState,Description,WorkingDirectory,FragmentPath,Type,ActiveEnterTimestampMonotonic,ExecMainStartTimestampMonotonic,NRestarts,MemoryCurrent';
 const remoteError = (message, status = 502) =>
   Object.assign(new Error(message), { status });
+const missingContainer =
+  /^(?:Error(?: response from daemon)?:\s*)?No such (?:object|container): [a-f0-9]{64}$/i;
+const dockerStages = {
+  ps: 'список контейнеров',
+  inspect: 'состояние контейнеров',
+  stats: 'CPU и память контейнеров',
+};
 
-function commandError(error, output) {
+function dockerContainerGone(output) {
+  const errors = output
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => line && !line.startsWith('{'));
+  return (
+    errors.length > 0 && errors.every((line) => missingContainer.test(line))
+  );
+}
+
+function commandError(error, output, file, args, aborted = false) {
   const curlCode = /\bcurl: \((\d+)\)/.exec(output)?.[1];
   if (curlCode)
     return Object.assign(new Error('HTTP-проверка не завершилась.'), {
       curlCode: Number(curlCode),
     });
-  if (error.code === 'ENOENT')
-    return remoteError('На машине отсутствует нужная команда.');
+  if (error.code === 'ENOENT' || /\bcommand not found\b/i.test(output))
+    return remoteError('На машине отсутствует команда «' + file + '».');
   if (
     /permission denied|access is denied|not authorized|insufficient permissions|access denied/i.test(
       output,
@@ -37,12 +60,35 @@ function commandError(error, output) {
     /лимит вывода/.test(error.message)
   )
     return remoteError('Вывод команды превысил допустимый размер.');
+  const stage = file === 'docker' && dockerStages[args[0]];
   if (
+    aborted ||
     error.killed ||
     error.name === 'AbortError' ||
-    /превышено время/i.test(error.message)
+    /превышено время|кодом 124$/i.test(error.message)
   )
-    return remoteError('Машина не ответила вовремя.', 504);
+    return remoteError(
+      stage
+        ? 'Docker не ответил вовремя. Этап · ' + stage + '.'
+        : 'Машина не ответила вовремя.',
+      504,
+    );
+  if (file === 'docker') {
+    if (
+      /cannot connect to the docker daemon|is the docker daemon running/i.test(
+        output,
+      )
+    )
+      return remoteError('Не удалось подключиться к Docker на машине.');
+    if (stage)
+      return remoteError(
+        /template parsing error|error parsing template/i.test(output)
+          ? 'Docker не смог сформировать данные для проверки. Этап · ' +
+              stage +
+              '.'
+          : 'Docker не вернул данные. Этап · ' + stage + '.',
+      );
+  }
   return remoteError(
     'Не удалось прочитать данные. Проверьте наличие и доступность источника на машине.',
   );
@@ -60,7 +106,7 @@ export async function withServiceMachine(machine, work, signal) {
     const execute = (
       file,
       args,
-      { timeout = 6000, limit = 1048576, merge = false, partial = false } = {},
+      { timeout = 6000, limit = 1048576, merge = false, partial } = {},
     ) =>
       new Promise((resolve, reject) => {
         execFile(
@@ -70,10 +116,11 @@ export async function withServiceMachine(machine, work, signal) {
           (error, stdout, stderr) => {
             if (
               !error ||
-              (partial && typeof error.code === 'number' && stdout.trim())
+              (typeof error.code === 'number' &&
+                partial?.(stdout + '\n' + stderr))
             )
               resolve(merge ? stdout + '\n' + stderr : stdout);
-            else reject(commandError(error, stderr));
+            else reject(commandError(error, stderr, file, args));
           },
         );
       });
@@ -91,11 +138,7 @@ export async function withServiceMachine(machine, work, signal) {
   try {
     abort.throwIfAborted();
     return await work(
-      async (
-        file,
-        args,
-        { timeout = 6000, limit = 1048576, partial = false } = {},
-      ) => {
+      async (file, args, { timeout = 6000, limit = 1048576, partial } = {}) => {
         let output = '';
         try {
           return await run(ssh, 'exec ' + [file, ...args].map(q).join(' '), {
@@ -107,15 +150,9 @@ export async function withServiceMachine(machine, work, signal) {
             },
           });
         } catch (error) {
-          if (
-            partial &&
-            /кодом \d+/.test(error.message) &&
-            /^Id=/m.test(output)
-          )
+          if (/кодом \d+/.test(error.message) && partial?.(output))
             return output;
-          if (abort.aborted)
-            throw remoteError('Машина не ответила вовремя.', 504);
-          throw commandError(error, output);
+          throw commandError(error, output, file, args, abort.aborted);
         }
       },
     );
@@ -176,7 +213,7 @@ function containerStatus(row) {
   return 'stopped';
 }
 
-function summarizeDocker(entries, stats, siblings) {
+function summarizeDocker(entries, stats, siblings, statsErrors) {
   const { source, directory } = entries[0];
   const states = entries.map(containerStatus);
   const running = entries.filter((row) => row.state === 'running');
@@ -196,6 +233,13 @@ function summarizeDocker(entries, stats, siblings) {
     ),
   );
   const used = running.map((row) => stats.get(row.id) || {});
+  const cpuCores = total(used, 'cpuCores');
+  const memoryBytes = total(used, 'memoryBytes');
+  const metricsError =
+    statsErrors && running.length && (cpuCores == null || memoryBytes == null)
+      ? running.map((row) => statsErrors.get(row.id)).find(Boolean) ||
+        'Docker не вернул часть замеров CPU и памяти.'
+      : undefined;
   return {
     source,
     name: source.type === 'compose' ? source.component : source.container,
@@ -216,8 +260,9 @@ function summarizeDocker(entries, stats, siblings) {
         : null,
     restarts: total(entries, 'restarts'),
     instances: { running: running.length, found: entries.length },
-    cpuCores: total(used, 'cpuCores'),
-    memoryBytes: total(used, 'memoryBytes'),
+    cpuCores,
+    memoryBytes,
+    metricsError,
     images: [...new Set(entries.map((row) => row.image).filter(Boolean))].slice(
       0,
       12,
@@ -247,13 +292,11 @@ async function readDocker(execute, sources, collectStats) {
   for (let index = 0; index < selected.length; index += 80) {
     const ids = selected.slice(index, index + 80).map((row) => row.id);
     for (const row of jsonLines(
-      await execute('docker', [
-        'inspect',
-        '--type=container',
-        '--format',
-        dockerInspect,
-        ...ids,
-      ]),
+      await execute(
+        'docker',
+        ['inspect', '--type=container', '--format', dockerInspect, ...ids],
+        { partial: dockerContainerGone },
+      ),
     ))
       inspected.set(row.id, row);
   }
@@ -266,21 +309,26 @@ async function readDocker(execute, sources, collectStats) {
     bySource.get(key).push({ ...data, source: row.source });
   }
   const stats = new Map();
+  const statsErrors = collectStats ? new Map() : undefined;
   const runningIds = [...inspected.values()]
     .filter((row) => row.state === 'running')
     .map((row) => row.id);
-  if (collectStats && runningIds.length) {
-    try {
-      for (let index = 0; index < runningIds.length; index += 80) {
-        const ids = runningIds.slice(index, index + 80);
-        const output = await execute('docker', [
-          'stats',
-          '--no-stream',
-          '--no-trunc',
-          '--format',
-          dockerStats,
-          ...ids,
-        ]);
+  if (statsErrors) {
+    for (let index = 0; index < runningIds.length; index += 80) {
+      const ids = runningIds.slice(index, index + 80);
+      try {
+        const output = await execute(
+          'docker',
+          [
+            'stats',
+            '--no-stream',
+            '--no-trunc',
+            '--format',
+            dockerStats,
+            ...ids,
+          ],
+          { partial: dockerContainerGone },
+        );
         for (const row of jsonLines(output)) {
           const parsed = /^([\d.]+)%$/.exec(row.cpu);
           const cpu = parsed ? Number(parsed[1]) / 100 : null;
@@ -289,8 +337,10 @@ async function readDocker(execute, sources, collectStats) {
             memoryBytes: bytes(row.memory?.split('/')[0].trim()),
           });
         }
+      } catch (error) {
+        for (const id of ids) statsErrors.set(id, error.message);
       }
-    } catch {}
+    }
   }
   const components = new Map();
   for (const { source } of rows) {
@@ -303,6 +353,7 @@ async function readDocker(execute, sources, collectStats) {
       group,
       stats,
       [...(components.get(group[0].source.stack) || [])].slice(0, 24),
+      statsErrors,
     ),
   );
   return { records, limited: !sources && rows.length > maxDiscovery };
@@ -355,7 +406,7 @@ async function readSystemd(execute, sources) {
         '--',
         ...selected.slice(index, index + 60),
       ],
-      { partial: true },
+      { partial: (output) => /^Id=/m.test(output) },
     );
     for (const unit of unitRecords(output)) {
       if (unit.LoadState === 'not-found') continue;
