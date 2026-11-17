@@ -4,6 +4,7 @@ import { MigrationDecisions } from './migration-progress';
 import { cancellableJobs, jobStatus } from '@/lib/job-actions.mjs';
 import { projectNamePattern, projectNameHint } from '@/lib/project-name.mjs';
 import { ExistingProjectPanel, runtimeLabels } from './adopt-project';
+import { PathPicker } from './path-picker';
 import type { GitRepo } from './git-connections';
 import { OperationsChat } from './operations-chat';
 import { WorkflowPanel } from './workflow-panel';
@@ -789,6 +790,7 @@ function MigrationForm({
   const restoredProject = useRef('');
   const [confirmed, setConfirmed] = useState(false);
   const [paths, setPaths] = useState('');
+  const [selectPath, setSelectPath] = useState(false);
   const [units, setUnits] = useState('');
   const [check, setCheck] = useState('');
   const [stopSignal, setStopSignal] = useState('');
@@ -796,6 +798,7 @@ function MigrationForm({
   const [error, setError] = useState('');
   const [repairScanId, setRepairScanId] = useState<string | null>(null);
   const p = ws.data.projects.find((p) => p.id === projectId);
+  const sourceMachine = ws.data.servers.find((server) => server.id === p?.serverId);
   const matches = (candidate: Project['migrationPlan']) =>
     candidate?.sourceId === p?.serverId &&
     candidate?.targetId === target &&
@@ -1315,6 +1318,18 @@ function MigrationForm({
                 placeholder="/var/lib/my-app"
               />
             </Field>
+            <div>
+              <Button type="button" variant="outline" disabled={active || !p?.serverId} onClick={() => setSelectPath(true)}>
+                <FolderIcon /> Выбрать папку или файл
+              </Button>
+              {selectPath && p?.serverId && <PathPicker api={ws.api} machineId={p.serverId} machineName={sourceMachine?.name}
+                platform={sourceMachine?.platform} mode="any" onClose={() => setSelectPath(false)}
+                onSelect={(path) => {
+                  setPaths((current) => current.split('\n').some((item) => item.trim() === path) ? current : [current.trimEnd(), path].filter(Boolean).join('\n'));
+                  setSelectPath(false);
+                  changed();
+                }} />}
+            </div>
             <Field
               label="Службы systemd"
               hint="Для своего способа запуска укажите все службы проекта, по одной в строке."

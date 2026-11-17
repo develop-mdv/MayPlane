@@ -91,6 +91,7 @@ export type AgentApproval = {
   };
 };
 export type SessionDetail = AgentSession & {
+  changedTurns?: string[];
   usage?: {
     used: number;
     size: number;

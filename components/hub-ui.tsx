@@ -15,12 +15,14 @@ export function Modal({
   children,
   onClose,
   wide = false,
+  className = '',
 }: {
   title: string;
   description?: string;
   children: ReactNode;
   onClose: () => void;
   wide?: boolean;
+  className?: string;
 }) {
   return (
     <Dialog
@@ -29,7 +31,7 @@ export function Modal({
         if (!open) onClose();
       }}
     >
-      <DialogContent className={`hub-modal ${wide ? 'hub-modal-wide' : ''}`}>
+      <DialogContent className={`hub-modal ${wide ? 'hub-modal-wide' : ''} ${className}`}>
         <DialogHeader>
           <DialogTitle>{title}</DialogTitle>
           <DialogDescription>
@@ -58,6 +60,7 @@ export function CopyButton({
   return (
     <>
       <button
+        type="button"
         className="icon-button"
         aria-label={copied ? 'Скопировано' : label}
         title={copied ? 'Скопировано' : label}

@@ -13,6 +13,7 @@ import type {
   ServiceSource,
 } from '@/lib/hub';
 import { ErrorText, Field, Modal, Submit } from './hub-ui';
+import { PathField } from './path-picker';
 
 export const serviceSourceNames: Record<ServiceSource['type'], string> = {
   manual: 'Ручная карточка',
@@ -579,16 +580,9 @@ export function ServiceForm({
             />
           </Field>
           <div className="form-grid">
-            <Field label="Каталог запуска">
-              <input
-                value={form.directory}
-                maxLength={1024}
-                placeholder={
-                  machine?.platform === 'win32' ? 'C:\\Apps\\app' : '/srv/app'
-                }
-                onChange={(event) => field('directory', event.target.value)}
-              />
-            </Field>
+            <PathField api={api} machineId={machine?.id} machineName={machine?.name} platform={machine?.platform}
+              startPath={projects.find((p) => p.id === form.projectId && p.machineId === form.machineId)?.path}
+              label="Каталог запуска" value={form.directory} onChange={(path) => field('directory', path)} disabled={locked} />
             <Field label="Адрес приложения">
               <input
                 type="url"

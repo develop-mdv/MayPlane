@@ -7,6 +7,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { PassThrough } from 'node:stream';
 import test from 'node:test';
+import { setTimeout as delay } from 'node:timers/promises';
 import { unwrapHarnessInput } from '../lib/chat-harness.mjs';
 import { visibleServiceChatInput } from '../lib/service-chat.mjs';
 import { createHub } from '../runner/hub.mjs';
@@ -169,8 +170,15 @@ test('chat modes work with Codex, OpenCode and Claude and revoke auto approval d
             },
           });
         else process.reply(call.id, { stopReason: 'end_turn' });
-        await new Promise((resolve) => setImmediate(resolve));
-        const result = await read();
+        const until = AbortSignal.timeout(7500);
+        let result = await read();
+        while (
+          ['running', 'approval'].includes(result.status) &&
+          !until.aborted
+        ) {
+          await delay(10);
+          result = await read();
+        }
         assert.equal(result.status, 'idle');
         return result;
       }

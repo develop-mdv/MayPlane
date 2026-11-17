@@ -2,7 +2,7 @@
 import { useEffect, useState } from 'react';
 import { Download, Link2, Search, Unlink } from 'lucide-react';
 import { Button } from '@/components/ui/button';
-import { Input } from '@/components/ui/input';
+import { PathField } from './path-picker';
 import {
   AlertDialog,
   AlertDialogContent,
@@ -68,6 +68,7 @@ export function ExistingProjectPanel({
   ws: Workspace;
 }) {
   const { api } = ws;
+  const machine = ws.data.servers.find((server) => server.id === p.serverId);
   const [directory, setDirectory] = useState('');
   const [scan, setScan] = useState<Discovery | null>(null);
   const [selected, setSelected] = useState('');
@@ -201,21 +202,9 @@ export function ExistingProjectPanel({
             сервере. Поиск и привязка только читают данные: процессы продолжат
             работать.
           </p>
-          <label className="form-field" htmlFor={`adoption-directory-${p.id}`}>
-            <span>Каталог приложения, если известен</span>
-            <Input
-              id={`adoption-directory-${p.id}`}
-              aria-label="Каталог существующего приложения"
-              value={directory}
-              onChange={(e) => setDirectory(e.target.value)}
-              placeholder="/srv/my-app"
-              disabled={pending}
-            />
-            <small>
-              Необязательно. Помогает найти Git и позволяет привязать каталог с
-              другим способом запуска.
-            </small>
-          </label>
+          <PathField api={api} machineId={p.serverId} machineName={machine?.name} platform={machine?.platform}
+            label="Каталог приложения · необязательно" value={directory} onChange={setDirectory} disabled={pending}
+            hint="Помогает найти Git и позволяет привязать каталог с другим способом запуска." />
           <Button
             variant="outline"
             disabled={pending}

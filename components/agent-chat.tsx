@@ -16,6 +16,7 @@ import {
   ShieldAlert,
   Settings2,
   ArrowUpRight,
+  FileDiff,
 } from 'lucide-react';
 import type { Server } from '@/lib/domain';
 import {
@@ -53,6 +54,7 @@ import {
   ServiceCommandTag,
 } from './service-chat';
 import { ServiceCustomizationCard } from './service-customization';
+import { PathField } from './path-picker';
 const chatDrafts = new WeakMap<object, Map<string, string>>();
 const chatCustomization = new WeakMap<object, Map<string, string>>();
 
@@ -118,6 +120,12 @@ export function NewSession({
       '',
   );
   const [provider, setProvider] = useState<AgentProvider>('codex');
+  const [cwd, setCwd] = useState('');
+  const [modelCwd, setModelCwd] = useState('');
+  useEffect(() => {
+    const timer = setTimeout(() => setModelCwd(cwd.trim()), 450);
+    return () => clearTimeout(timer);
+  }, [cwd]);
   const [accountChoice, setAccountChoice] = useState('__default');
   const [model, setModel] = useState(''),
     [reasoning, setReasoning] = useState(''),
@@ -148,7 +156,10 @@ export function NewSession({
           setError('');
           try {
             const s = await hub.mutate<AgentSession>('/sessions', {
-              ...(service ? { serviceId: service.id, serviceCwd: serviceLocation?.cwd } : { projectId: projectId || null }),
+              ...(service ? { serviceId: service.id, serviceCwd: serviceLocation?.cwd } : {
+                projectId: projectId || null,
+                ...(!projectId && cwd.trim() ? { cwd: cwd.trim() } : {}),
+              }),
               machineId: chatMachine,
               provider,
               ...(accountChoice === '__default'
@@ -177,6 +188,8 @@ export function NewSession({
             value={projectId}
             onChange={(e) => {
               setProjectId(e.target.value);
+              setCwd('');
+              setModelCwd('');
               setAccountChoice('__default');
               setModel('');
               setReasoning('');
@@ -193,16 +206,16 @@ export function NewSession({
           </select>
         </Field>}
         {!service && !projectId && (
-          <Field
-            label="Машина"
-            hint="Чат начнётся в домашнем каталоге пользователя агента. Проект можно выбрать позже."
-          >
+          <>
+          <Field label="Машина">
             <select
               aria-label="Машина"
               required
               value={machineId}
               onChange={(e) => {
                 setMachineId(e.target.value);
+                setCwd('');
+                setModelCwd('');
                 setAccountChoice('__default');
                 setModel('');
                 setReasoning('');
@@ -218,6 +231,10 @@ export function NewSession({
               ))}
             </select>
           </Field>
+          <PathField api={hub.api} machineId={selectedMachine?.id} machineName={selectedMachine?.name} platform={selectedMachine?.platform}
+            label="Рабочая папка · необязательно" hint="Если оставить пустым, чат начнётся в домашней папке на выбранной машине."
+            value={cwd} onChange={(path) => { setCwd(path); setModel(''); setReasoning(''); }} />
+          </>
         )}
         <div className="hub-field">
           <span>Агент</span>
@@ -268,6 +285,7 @@ export function NewSession({
           provider={provider}
           projectId={chatProject || undefined}
           serviceId={service?.id}
+          cwd={!chatProject && !service ? modelCwd || undefined : undefined}
           accountId={
             accountChoice === '__default' ? undefined : accountChoice || null
           }
@@ -513,6 +531,7 @@ export function AgentChat({
   onNewSession,
   onAccounts,
   onOpenService,
+  onOpenChanges,
   disabled,
 }: {
   session?: AgentSession;
@@ -525,6 +544,7 @@ export function AgentChat({
   onNewSession: () => void;
   onAccounts: () => void;
   onOpenService: (id: string) => void;
+  onOpenChanges: (turnId: string) => void;
   disabled: boolean;
 }) {
   const api = hub.api;
@@ -977,6 +997,11 @@ export function AgentChat({
                           </div>
                         )}
                       {text && <RichText text={text} />}
+                      {m.role === 'user' && currentDetail?.changedTurns?.includes(m.id) && (
+                        <button type="button" className="text-button chat-turn-changes" onClick={() => onOpenChanges(m.id)}>
+                          <FileDiff size={14} /> Правки по этому запросу
+                        </button>
+                      )}
                       {batches
                         .filter((batch) => batch.messageId === m.id)
                         .map(renderServiceBatch)}

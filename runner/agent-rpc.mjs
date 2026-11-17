@@ -1,4 +1,5 @@
 import { EventEmitter } from 'node:events';
+import { StringDecoder } from 'node:string_decoder';
 
 // Both Codex app-server and ACP use newline-delimited JSON-RPC over stdio.
 export class AgentRpc extends EventEmitter {
@@ -10,8 +11,9 @@ export class AgentRpc extends EventEmitter {
     this.buffer = '';
     this.timeout = timeout;
     this.dead = false;
+    const decoder = new StringDecoder('utf8');
     process.stdout.on('data', (chunk) => {
-      this.buffer += chunk.toString();
+      this.buffer += typeof chunk === 'string' ? chunk : decoder.write(chunk);
       if (this.buffer.length > 8 * 1024 * 1024)
         return this.close(new Error('Превышен размер события агента'));
       let end;

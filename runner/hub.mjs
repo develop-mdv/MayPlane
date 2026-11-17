@@ -23,6 +23,14 @@ import { attachConnectors } from './connectors.mjs';
 import { connect, metrics } from './ssh.mjs';
 import { assert, redact } from './security.mjs';
 import { machineHome, separateServices } from './workspace-model.mjs';
+import { createWorkspaceInspector } from './workspace-transport.mjs';
+import {
+  acpFileEdits,
+  addAgentFileChanges,
+  agentChangeSummaries,
+  codexFileEdits,
+  compareWorkspaceSnapshots,
+} from './agent-file-changes.mjs';
 import { agentVersion, agentError, claudeStatus } from './agent-status.mjs';
 import { createAccounts } from './accounts.mjs';
 import { connectorEndpoint } from '../lib/machine-connection.mjs';
@@ -81,6 +89,7 @@ export function createHub(
   } = {},
 ) {
   const connectors = attachConnectors(server, store);
+  const inspect = createWorkspaceInspector(connectors);
   const connectorUrl = publicUrl ? connectorEndpoint(publicUrl) : null;
   const nativeSessions = createNativeSessions({ openProcess, connectors });
   const nativeChanges = new Set();
@@ -277,6 +286,39 @@ export function createHub(
     clearTimeout(runtime.turnTimer);
     runtime.turnTimer = null;
   }
+  function canUpdateSession(id) {
+    if (closed || deletingSessions.has(id)) return false;
+    const session = store.get('settings', id);
+    return !!session && !deletingMachines.has(session.machineId) && !deletingProjects.has(session.projectId);
+  }
+  function recordWorkspaceChanges(runtime) {
+    const turn = runtime?.changeTurn;
+    if (!turn?.baseline || closed) return null;
+    return (turn.recording ??= (async () => {
+      try {
+        const after = await inspect(machine(runtime.machineId), 'snapshot', { root: turn.cwd });
+        const workspace = compareWorkspaceSnapshots(turn.baseline, after);
+        if (workspace?.edits.length && canUpdateSession(runtime.sessionId))
+          updateSession(runtime.sessionId, (s) => addAgentFileChanges(s.secret, turn, { workspace }));
+      } catch {
+        // File access is optional. The agent and its protocol reports still work.
+      } finally {
+        turn.baseline = null;
+      }
+    })());
+  }
+  function startTurnCompletion(runtime) {
+    clearTurnTimer(runtime);
+    runtime.finishingTurn = true;
+    const recording = recordWorkspaceChanges(runtime);
+    if (recording && canUpdateSession(runtime.sessionId) && load(runtime.sessionId, 'session').status === 'approval') {
+      updateSession(runtime.sessionId, (s) => {
+        s.status = 'running';
+        s.secret.approvals = [];
+      });
+    }
+    return recording;
+  }
   function assistantMessage(runtime, params, text, id, append) {
     const turn = serviceTurnFor(runtime, params);
     const harness = currentTurnEvent(runtime, params) ? runtime.harnessTurn : null;
@@ -359,7 +401,7 @@ export function createHub(
       return;
     }
     if (id !== undefined) {
-      if (runtime.cancelled) return runtime.rpc.reject(id);
+      if (runtime.cancelled || runtime.finishingTurn) return runtime.rpc.reject(id);
       const approval = runtime.provider === 'codex'
         ? ['item/commandExecution/requestApproval', 'item/fileChange/requestApproval'].includes(method)
         : method === 'session/request_permission';
@@ -404,6 +446,10 @@ export function createHub(
       const turn = serviceTurnFor(runtime, p);
       if (turn) turn.id = runtime.turnId;
     }
+    const changeTurn = runtime.turnTimer && !runtime.cancelled &&
+      currentTurnEvent(runtime, p) ? runtime.changeTurn : null;
+    if (changeTurn && method === 'turn/diff/updated' && typeof p.diff === 'string')
+      updateSession(sid, (s) => addAgentFileChanges(s.secret, changeTurn, { aggregate: p.diff }));
     if (method === 'item/agentMessage/delta')
       assistantMessage(runtime, p, p.delta, p.itemId, true);
     if (method === 'item/completed' || method === 'item/started') {
@@ -430,48 +476,45 @@ export function createHub(
           JSON.stringify(item.changes || [], null, 2),
           item.id,
         );
+      if (changeTurn && method === 'item/completed') {
+        const edits = codexFileEdits(item);
+        if (edits.length) updateSession(sid, (s) => addAgentFileChanges(s.secret, changeTurn, { edits }));
+      }
     }
     if (method === 'item/commandExecution/outputDelta')
       addMessage(sid, 'tool', p.delta, p.itemId, true);
     if (method === 'turn/completed') {
+      if (!runtime.turnTimer || runtime.cancelled) return;
       if (p.threadId && p.threadId !== runtime.nativeId) return;
       if (p.turn?.id && runtime.turnId && p.turn.id !== runtime.turnId) return;
+      const turn = runtime.changeTurn;
       runtime.turnId = null;
-      clearTurnTimer(runtime);
-      updateSession(sid, (s) => {
-        const outcome = p.turn?.status;
-        closeHarnessTurn(
-          runtime,
-          s,
-          outcome === 'completed' && s.status !== 'interrupted',
-        );
-        finishServiceTurn(
-          runtime,
-          s,
-          serviceTurnFor(runtime, p, p.turn?.id),
-          outcome === 'completed',
-          outcome !== 'interrupted' && !p.turn?.error?.message
-            ? 'Агент не завершил оформление. Продолжите в этом чате.'
-            : undefined,
-        );
-        s.status =
-          p.turn?.status === 'completed'
-            ? 'idle'
-            : p.turn?.status === 'interrupted'
-              ? 'interrupted'
-              : 'error';
-        s.secret.approvals = [];
-        if (authorizationError(p.turn?.error?.message))
-          s.authError = signInHelp;
-      });
-      if (p.turn?.error?.message)
-        addMessage(
-          sid,
-          'system',
-          authorizationError(p.turn.error.message)
-            ? signInHelp
-            : p.turn.error.message,
-        );
+      const recording = startTurnCompletion(runtime);
+      const finish = () => {
+        runtime.finishingTurn = false;
+        if (!canUpdateSession(sid) || runtime.cancelled || runtime.changeTurn !== turn) return;
+        runtime.changeTurn = null;
+        updateSession(sid, (s) => {
+          const outcome = p.turn?.status;
+          closeHarnessTurn(runtime, s, outcome === 'completed' && s.status !== 'interrupted');
+          finishServiceTurn(
+            runtime,
+            s,
+            serviceTurnFor(runtime, p, p.turn?.id),
+            outcome === 'completed',
+            outcome !== 'interrupted' && !p.turn?.error?.message
+              ? 'Агент не завершил оформление. Продолжите в этом чате.'
+              : undefined,
+          );
+          s.status = outcome === 'completed' ? 'idle' : outcome === 'interrupted' ? 'interrupted' : 'error';
+          s.secret.approvals = [];
+          if (authorizationError(p.turn?.error?.message)) s.authError = signInHelp;
+        });
+        if (p.turn?.error?.message)
+          addMessage(sid, 'system', authorizationError(p.turn.error.message) ? signInHelp : p.turn.error.message);
+      };
+      if (recording) void recording.then(finish);
+      else finish();
     }
     if (method === 'serverRequest/resolved')
       updateSession(sid, (s) => {
@@ -503,7 +546,7 @@ export function createHub(
             (!p.sessionId || p.sessionId === runtime.nativeId)))
       )
         assistantMessage(runtime, p, u.content.text, runtime.messageId, true);
-      if (['tool_call', 'tool_call_update'].includes(u.sessionUpdate))
+      if (['tool_call', 'tool_call_update'].includes(u.sessionUpdate)) {
         addMessage(
           sid,
           'tool',
@@ -519,6 +562,11 @@ export function createHub(
           ),
           u.toolCallId,
         );
+        if (changeTurn) {
+          const edits = acpFileEdits(changeTurn, u);
+          if (edits.length) updateSession(sid, (s) => addAgentFileChanges(s.secret, changeTurn, { edits }));
+        }
+      }
       if (
         runtime.harnessTurn &&
         ['tool_call', 'tool_call_update'].includes(u.sessionUpdate) &&
@@ -607,13 +655,21 @@ export function createHub(
         runtimes.delete(key);
         if (runtime.releaseAccount)
           void releaseRuntime(runtime).catch(() => {});
-        if (session && !expected && store.get('settings', session.id))
-          updateSession(session.id, (s) => {
-            closeHarnessTurn(runtime, s);
-            if (['running', 'connecting', 'approval'].includes(s.status))
-              s.status = 'interrupted';
-            s.secret.approvals = [];
-          });
+        if (session && !expected && !runtime.finishingTurn && !runtime.cancelled && canUpdateSession(session.id)) {
+          const finish = () => {
+            runtime.changeTurn = null;
+            if (!canUpdateSession(session.id)) return;
+            updateSession(session.id, (s) => {
+              closeHarnessTurn(runtime, s);
+              if (['running', 'connecting', 'approval'].includes(s.status))
+                s.status = 'interrupted';
+              s.secret.approvals = [];
+            });
+          };
+          const recording = recordWorkspaceChanges(runtime);
+          if (recording) void recording.then(finish);
+          else finish();
+        }
       });
       try {
         if (provider === 'codex') {
@@ -1180,6 +1236,32 @@ export function createHub(
   }
   async function handle(path, method, body, send) {
     if (!path.startsWith('/api/hub')) return false;
+    const browse = path.match(/^\/api\/hub\/machines\/([a-f0-9-]+)\/files\/(browse|roots)$/);
+    if (browse && method === 'POST') {
+      send(await inspect(machine(browse[1]), browse[2], body));
+      return true;
+    }
+    const files = path.match(/^\/api\/hub\/(projects|sessions)\/([a-f0-9-]+)\/files\/(tree|file|git|patch)$/);
+    if (files && method === 'POST') {
+      const [, kind, id, operation] = files;
+      const work = load(id, kind === 'projects' ? 'workspace' : 'session');
+      const m = machine(work.machineId);
+      assert(!deletingSessions.has(id) && !deletingProjects.has(id), 'Рабочая папка удаляется из панели', 409);
+      const root = work.path || work.cwd || (work.projectId
+        ? load(work.projectId, 'workspace').path : await resolveHome(m));
+      send(await inspect(m, operation, { ...body, root }));
+      return true;
+    }
+    const history = path.match(/^\/api\/hub\/sessions\/([a-f0-9-]+)\/changes(?:\/([a-f0-9-]+))?$/);
+    if (history && method === 'GET') {
+      const { secret } = load(history[1], 'session');
+      if (history[2]) {
+        const turn = secret.fileChanges?.find((item) => item.id === history[2]);
+        assert(turn, 'Отчёт об изменениях больше не доступен', 404);
+        send(turn);
+      } else send({ turns: agentChangeSummaries(secret) });
+      return true;
+    }
     const removal = path.match(
       /^\/api\/hub\/removals\/(chat|project|service|machine)\/([a-f0-9-]+)$/,
     );
@@ -1440,7 +1522,7 @@ export function createHub(
         projectId: p?.id || null,
         machineId: m.id,
         ...(location ? { serviceId: body.serviceId } : {}),
-        cwd: projectPath(p?.path || location?.cwd || (await resolveHome(m)), m.platform || 'linux'),
+        cwd: projectPath(p?.path || location?.cwd || (!location && body.cwd) || (await resolveHome(m)), m.platform || 'linux'),
         provider: body.provider,
         accountId: accountId || null,
         mode:
@@ -1575,6 +1657,7 @@ export function createHub(
             s.cwd ||
             (s.projectId ? load(s.projectId, 'workspace').path : undefined),
           messages: s.secret.messages,
+          changedTurns: (s.secret.fileChanges || []).map((item) => item.id),
           serviceBatches: s.secret.serviceBatches || [],
           serviceCustomizations: s.secret.serviceCustomizations || [],
           usage: s.secret.usage || null,
@@ -1842,7 +1925,8 @@ export function createHub(
             });
           throw error;
         }
-        addMessage(s.id, 'user', message, undefined, false, command ? { command } : undefined);
+        const userMessageId = randomUUID();
+        addMessage(s.id, 'user', message, userMessageId, false, command ? { command } : undefined);
         // Accept promptly; native agent events update the durable session asynchronously.
         void (async () => {
           let runningRuntime, messageId;
@@ -1858,6 +1942,10 @@ export function createHub(
             r.cancelled = false;
             messageId = randomUUID();
             r.messageId = messageId;
+            const changeTurn = { id: userMessageId, at: now(), cwd: r.cwd, pending: new Map() };
+            r.changeTurn = changeTurn;
+            changeTurn.baseline = await inspect(sessionMachine, 'snapshot', { root: r.cwd }).catch(() => null);
+            if (r.cancelled || r.rpc.dead || r.changeTurn !== changeTurn || !canUpdateSession(s.id)) return;
             r.autoApproved = 0;
             const serviceTurn = drafting || customization ? { messages: new Set() } : null;
             if (customization) serviceTurn.customization = {
@@ -1900,6 +1988,7 @@ export function createHub(
               });
               if (
                 r.messageId === messageId &&
+                r.turnTimer === timer &&
                 (!serviceTurn || r.serviceTurn === serviceTurn)
               ) {
                 r.turnId = result.turn?.id;
@@ -1916,10 +2005,13 @@ export function createHub(
               );
               clearTimeout(timer);
               if (r.messageId !== messageId) return;
-              r.turnTimer = null;
+              const recording = startTurnCompletion(r);
+              if (recording) await recording;
+              r.finishingTurn = false;
+              if (r.changeTurn === changeTurn) r.changeTurn = null;
               if (r.accountId) await releaseRuntime(r);
               if (
-                store.get('settings', s.id) &&
+                canUpdateSession(s.id) &&
                 !r.cancelled &&
                 r.messageId === messageId
               )
@@ -1961,7 +2053,10 @@ export function createHub(
             clearTurnTimer(failed);
             if (failed) failed.serviceTurn = null;
             if (failed?.accountId) await releaseRuntime(failed).catch(() => {});
-            if (runningRuntime?.cancelled) return;
+            const recording = recordWorkspaceChanges(failed);
+            if (recording) await recording;
+            if (failed) failed.changeTurn = null;
+            if (runningRuntime?.cancelled || !canUpdateSession(s.id)) return;
             const stopped = load(s.id, 'session').status === 'interrupted';
             if (!stopped) {
               updateSession(s.id, (x) => {
@@ -2006,6 +2101,9 @@ export function createHub(
         }
         if (closeAfterStop && r?.rpc && !r.rpc.dead)
           await releaseRuntime(r).catch(() => {});
+        const recording = recordWorkspaceChanges(r);
+        if (recording) await recording;
+        if (r) r.changeTurn = null;
         updateSession(s.id, (x) => {
           closeHarnessTurn(r, x);
           x.status = 'interrupted';
@@ -2178,7 +2276,8 @@ export function createHub(
         const location = body.serviceId && !session ? locationForService(body.serviceId) : null;
         assert(!location || location.machineId === m.id, 'Сервис использует рабочую папку на другой машине');
         const cwd = projectPath(
-          session?.cwd || location?.cwd || project?.path || (await resolveHome(m)),
+          session?.cwd || location?.cwd || project?.path ||
+            (!session && !location && body.cwd) || (await resolveHome(m)),
           m.platform || 'linux',
         );
         send(

@@ -6,6 +6,7 @@ import { WebSocket } from 'ws';
 import { localMetrics, localProcess, projectPath } from './machine-process.mjs';
 import { assert } from './security.mjs';
 import { configureConnectorService } from './connector-service.mjs';
+import { inspectWorkspace, workspaceTimeout } from './workspace-files.mjs';
 
 if (process.argv.includes('--help')) {
   console.log(
@@ -79,23 +80,40 @@ function connect() {
     headers: { Authorization: `Bearer ${token}` },
     maxPayload: 1024 * 1024,
   });
+  const connection = socket;
+  const inspections = new Map();
   const send = (data) => {
-    if (socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify(data));
+    if (connection.readyState === WebSocket.OPEN) connection.send(JSON.stringify(data));
   };
+  const metrics = () => send({ type: 'metrics', metrics: localMetrics(), workspaceFiles: true });
   let interval;
   socket.on('open', () => {
     console.log('MayPlane: защищённое соединение с панелью открыто');
-    send({ type: 'metrics', metrics: localMetrics() });
-    interval = setInterval(
-      () => send({ type: 'metrics', metrics: localMetrics() }),
-      10000,
-    );
+    metrics();
+    interval = setInterval(metrics, 10000);
   });
   socket.on('message', (raw) => {
     let message;
     try {
       message = JSON.parse(raw.toString());
     } catch {
+      return;
+    }
+    if (message.type === 'workspace-cancel') {
+      inspections.get(message.id)?.abort();
+      return;
+    }
+    if (message.type === 'workspace') {
+      if (typeof message.id !== 'string' || inspections.has(message.id)) return;
+      const reply = (body) => send({ type: 'workspace-result', id: message.id, ...body });
+      if (inspections.size >= 8)
+        return reply({ error: 'Компьютер обрабатывает другие запросы. Повторите попытку.', status: 429 });
+      const controller = new AbortController();
+      const signal = AbortSignal.any([controller.signal, AbortSignal.timeout(workspaceTimeout)]);
+      inspections.set(message.id, controller);
+      void inspectWorkspace(message.operation, message.options, undefined, signal)
+        .then((result) => reply({ result }), (error) => reply({ error: error.message, status: error.status }))
+        .finally(() => inspections.delete(message.id));
       return;
     }
     if (message.type === 'paired') {
@@ -167,6 +185,7 @@ function connect() {
       console.log('Подключение передано другому экземпляру коннектора.');
     }
     clearInterval(interval);
+    for (const controller of inspections.values()) controller.abort();
     for (const p of processes.values()) p.close();
     processes.clear();
     if (!stopped) {

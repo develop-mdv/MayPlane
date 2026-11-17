@@ -7,6 +7,7 @@ import type { Hub, HubProject } from '@/lib/hub';
 import type { Workspace } from '@/lib/use-workspace';
 import { ErrorText, Field, Modal, Submit } from './hub-ui';
 import { AccountsSettings } from './agent-accounts';
+import { PathField } from './path-picker';
 
 export function NewProject({
   hub,
@@ -93,22 +94,9 @@ export function NewProject({
             Сначала подключить машину
           </button>
         )}
-        <Field
-          label="Путь к рабочей папке"
-          hint="Укажите существующую папку на выбранной машине. Панель не клонирует репозиторий и не меняет её содержимое при добавлении."
-        >
-          <input
-            required
-            value={path}
-            onChange={(e) => setPath(e.target.value)}
-            placeholder={
-              machine?.platform === 'win32'
-                ? 'D:\\Projects\\my-app'
-                : '/home/deploy/projects/my-app'
-            }
-            maxLength={1024}
-          />
-        </Field>
+        <PathField api={hub.api} machineId={machine?.id} machineName={machine?.name} platform={machine?.platform}
+          label="Рабочая папка" hint="Выберите существующую папку на машине или введите её полный путь."
+          value={path} onChange={setPath} required />
         <Field
           label="Git-репозиторий · необязательно"
           hint="Ссылка для быстрого перехода. Git использует доступы, настроенные на машине проекта."

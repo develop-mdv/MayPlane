@@ -7,8 +7,10 @@ import {
   Boxes,
   ChevronRight,
   Command,
+  FileDiff,
   FolderGit2,
   FolderInput,
+  FolderOpen,
   GitBranch,
   LayoutGrid,
   Menu,
@@ -46,6 +48,8 @@ import { ProjectServices, ServicesPanel, type ServiceView } from './services-pan
 import { NativeSessionImport } from './native-session-import';
 import { CopyButton, ErrorText, Field, Modal, Submit, Toast } from './hub-ui';
 import { RemoveObject } from './remove-object';
+import { WorkspaceBrowser } from './workspace-browser';
+import type { WorkspaceMode } from '@/lib/workspace-files';
 
 type View = 'chat' | 'projects' | 'services' | 'servers' | 'settings';
 export default function WorkspaceMain() {
@@ -82,6 +86,7 @@ export default function WorkspaceMain() {
     [removal, setRemoval] = useState<RemovalTarget | null>(null),
     [modalBusy, setModalBusy] = useState(false),
     [modalError, setModalError] = useState('');
+  const [browser, setBrowser] = useState<{ id: string; session: boolean; mode: WorkspaceMode; turn?: string } | null>(null);
   const searchInput = useRef<HTMLInputElement>(null);
   const session = hub.data.sessions.find((s) => s.id === selectedSession);
   const project = hub.data.projects.find(
@@ -90,6 +95,9 @@ export default function WorkspaceMain() {
   const machine = ws.data.servers.find(
     (m) => m.id === (session?.machineId || project?.machineId),
   );
+  const browserChat = browser?.session ? hub.data.sessions.find((s) => s.id === browser.id) : undefined;
+  const browserProject = browser ? hub.data.projects.find((p) => p.id === (browser.session ? browserChat?.projectId : browser.id)) : undefined;
+  const browserMachineId = browserChat?.machineId || browserProject?.machineId;
   const connected = !!ws.connection && !ws.error;
   const closeToast = useCallback(() => setToast(''), []);
   const visible = hub.data.sessions.filter(
@@ -371,6 +379,14 @@ export default function WorkspaceMain() {
                   <i />
                   {sessionLabels[session.status]}
                 </span>
+                <button type="button" className="icon-button workspace-header-files" aria-label="Файлы чата" title="Файлы чата"
+                  disabled={!connected} onClick={() => setBrowser({ id: session.id, session: true, mode: 'files' })}>
+                  <FolderOpen size={17} /><span>Файлы</span>
+                </button>
+                <button type="button" className="icon-button workspace-header-files" aria-label="Изменения в чате" title="Изменения в чате"
+                  disabled={!connected} onClick={() => setBrowser({ id: session.id, session: true, mode: 'agent' })}>
+                  <FileDiff size={17} /><span>Изменения</span>
+                </button>
                 <button
                   className="icon-button"
                   aria-label="Переместить чат в проект"
@@ -527,6 +543,10 @@ export default function WorkspaceMain() {
                           Открыть чаты
                           <ChevronRight size={14} />
                         </button>
+                        <button type="button" className="icon-button" title="Файлы и Git" aria-label={`Файлы проекта ${p.name}`}
+                          disabled={!connected} onClick={() => setBrowser({ id: p.id, session: false, mode: 'files' })}>
+                          <FolderOpen size={16} />
+                        </button>
                         <button
                           className="icon-button"
                           title="Переименовать проект"
@@ -587,6 +607,7 @@ export default function WorkspaceMain() {
               onNewSession={() => startSession()}
               onAccounts={() => setView('settings')}
               onOpenService={(serviceId) => navigate('services', { serviceId })}
+              onOpenChanges={(turn) => setBrowser({ id: session.id, session: true, mode: 'agent', turn })}
               disabled={!connected}
             />
           ) : (
@@ -615,6 +636,12 @@ export default function WorkspaceMain() {
                   )}
                 </div>
                 <div className="heading-actions">
+                  {project && (
+                    <button type="button" className="hub-button" disabled={!connected}
+                      onClick={() => setBrowser({ id: project.id, session: false, mode: 'files' })}>
+                      <FolderOpen size={16} /> Файлы и Git
+                    </button>
+                  )}
                   {project && (
                     <button
                       className="hub-button"
@@ -792,6 +819,13 @@ export default function WorkspaceMain() {
           )}
         </div>
       </main>
+      {browser && (browser.session ? browserChat : browserProject) && (
+        <WorkspaceBrowser key={`${browser.id}:${browserChat?.cwd || browserProject?.path || ''}`} api={hub.api}
+          id={browser.id} session={browser.session} title={browserChat?.title || browserProject?.name || 'Рабочая папка'}
+          path={browserChat?.cwd || browserProject?.path} active={activeSession(browserChat)}
+          machineName={ws.data.servers.find((m) => m.id === browserMachineId)?.name}
+          initialMode={browser.mode} initialTurn={browser.turn} onClose={() => setBrowser(null)} />
+      )}
       {newProject && (
         <NewProject
           hub={hub}

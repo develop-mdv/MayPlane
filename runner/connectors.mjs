@@ -5,6 +5,7 @@ import { PassThrough } from 'node:stream';
 import { WebSocketServer, WebSocket } from 'ws';
 import { assert, equal, requestPath } from './security.mjs';
 import { projectPath } from './machine-process.mjs';
+import { workspaceOperations, workspaceTimeoutError } from './workspace-files.mjs';
 
 export function attachConnectors(server, store) {
   const peers = new Map(),
@@ -46,9 +47,10 @@ export function attachConnectors(server, store) {
     wss.handleUpgrade(req, socket, head, (ws) => {
       const id = machine?.id || randomUUID();
       const token = machine ? null : randomBytes(32).toString('base64url');
-      const peer = { ws, streams: new Map(), alive: true, id };
+      const peer = { ws, streams: new Map(), inspections: new Map(), workspaceFiles: false, alive: true, id };
       const previous = peers.get(id);
       if (previous) {
+        for (const finish of previous.inspections.values()) finish(null, 'Подключение заменено другим коннектором', 409);
         for (const stream of previous.streams.values())
           stream.events.emit(
             'error',
@@ -103,6 +105,7 @@ export function attachConnectors(server, store) {
           const s = store.get('servers', id);
           if (!s) return ws.close();
           const m = data.metrics;
+          peer.workspaceFiles = data.workspaceFiles === true;
           Object.assign(s, {
             ...resourceMetrics(m),
             status: 'online',
@@ -135,6 +138,10 @@ export function attachConnectors(server, store) {
           s.history = [...(s.history || []), metricSample(s)].slice(-120);
           store.save('servers', s);
         }
+        if (data.type === 'workspace-result') {
+          peer.inspections.get(data.id)?.(data.result, data.error, data.status);
+          return;
+        }
         const stream = peer.streams.get(data.id);
         if (!stream) return;
         if (data.type === 'stdout' || data.type === 'stderr')
@@ -157,6 +164,7 @@ export function attachConnectors(server, store) {
       });
       ws.on('error', () => {});
       ws.on('close', () => {
+        for (const finish of peer.inspections.values()) finish(null, 'Компьютер отключился', 409);
         if (closed || peers.get(id) !== peer) return;
         peers.delete(id);
         const s = store.get('servers', id);
@@ -233,6 +241,31 @@ export function attachConnectors(server, store) {
     },
     revoke(id) {
       peers.get(id)?.ws.close(1000, 'Доступ отозван');
+    },
+    inspect(id, operation, options, signal) {
+      const peer = peers.get(id);
+      assert(peer, 'Компьютер отключён. Запустите коннектор.', 409);
+      assert(peer.workspaceFiles, 'Обновите коннектор на компьютере для просмотра файлов и Git.', 409);
+      assert(workspaceOperations.includes(operation), 'Неизвестная операция просмотра');
+      assert(!signal.aborted, workspaceTimeoutError().message, 504);
+      const requestId = randomUUID();
+      return new Promise((resolve, reject) => {
+        const finish = (result, error, status) => {
+          signal.removeEventListener('abort', abort);
+          peer.inspections.delete(requestId);
+          if (result && typeof result === 'object') resolve(result);
+          else reject(Object.assign(new Error(typeof error === 'string' ? error.slice(0, 300) : 'Коннектор не вернул данные.'), {
+            status: Number.isInteger(status) && status >= 400 && status <= 599 ? status : 502,
+          }));
+        };
+        const abort = () => {
+          send(peer.ws, { type: 'workspace-cancel', id: requestId });
+          finish(null, workspaceTimeoutError().message, 504);
+        };
+        signal.addEventListener('abort', abort, { once: true });
+        peer.inspections.set(requestId, finish);
+        send(peer.ws, { type: 'workspace', id: requestId, operation, options });
+      });
     },
     async open(id, options) {
       const peer = peers.get(id);
