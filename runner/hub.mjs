@@ -6,6 +6,13 @@ import {
   isClaudeSubscription,
 } from '../lib/claude-runtime.mjs';
 import { AgentRpc } from './agent-rpc.mjs';
+import { automaticApproval } from './agent-approvals.mjs';
+import { unwrapHarnessInput, harnessReport } from '../lib/chat-harness.mjs';
+import {
+  beginHarnessTurn,
+  finishHarnessTurn,
+  recordHarnessEvidence,
+} from './chat-harness.mjs';
 import {
   machineProcess,
   localMetrics,
@@ -23,6 +30,10 @@ import { createNativeSessions } from './native-sessions.mjs';
 import { metricSample } from '../lib/machine-metrics.mjs';
 import { createAgentLimits, sessionUsage } from './agent-limits.mjs';
 import { createServices } from './services.mjs';
+import { serviceCustomization } from './service-model.mjs';
+import { addCustomizationDraft, customizationRevision, customizeServiceInput } from './service-customization.mjs';
+import { serviceCustomizationBlock, unwrapServiceCustomizationInput } from '../lib/service-customization.mjs';
+import { sameWorkspaceDirectory, serviceChatLocation } from '../lib/service-workspace.mjs';
 import {
   serviceChatBlock,
   serviceChatCommand,
@@ -186,6 +197,15 @@ export function createHub(
         s.cwd ||
         (s.projectId ? load(s.projectId, 'workspace').path : undefined),
     }));
+  function locationForService(id) {
+    const service = services.get(id);
+    return serviceChatLocation(service, records('workspace'), machine(service.machineId).platform);
+  }
+  function customizationTarget(id) {
+    const service = services.get(id);
+    const selected = machine(service.machineId);
+    return { service, selected };
+  }
   // No turn is replayed after a runner restart. Native IDs remain resumable.
   for (const s of sessions())
     if (['running', 'connecting', 'approval'].includes(s.status)) {
@@ -245,20 +265,50 @@ export function createHub(
       return null;
     return !turnId || !turn.id || turnId === turn.id ? turn : null;
   }
+  function currentTurnEvent(runtime, params) {
+    return (
+      (!params.threadId || params.threadId === runtime.nativeId) &&
+      (!params.turnId || !runtime.turnId || params.turnId === runtime.turnId) &&
+      (!params.sessionId || params.sessionId === runtime.nativeId)
+    );
+  }
+  function clearTurnTimer(runtime) {
+    if (!runtime) return;
+    clearTimeout(runtime.turnTimer);
+    runtime.turnTimer = null;
+  }
   function assistantMessage(runtime, params, text, id, append) {
     const turn = serviceTurnFor(runtime, params);
+    const harness = currentTurnEvent(runtime, params) ? runtime.harnessTurn : null;
     const itemId = id || runtime.messageId || randomUUID();
     if (turn && text) turn.messages.add(itemId);
-    addMessage(runtime.sessionId, 'assistant', text, itemId, append, turn ? { serviceOutput: true } : undefined);
+    if (harness && text) harness.messages.add(itemId);
+    addMessage(runtime.sessionId, 'assistant', text, itemId, append, {
+      ...(turn?.customization ? { serviceCustomizationOutput: true } : turn ? { serviceOutput: true } : {}),
+      ...(harness ? { harnessOutput: true } : {}),
+    });
+  }
+  function closeHarnessTurn(runtime, session, complete = false) {
+    if (!runtime?.harnessTurn) return;
+    finishHarnessTurn(
+      session,
+      runtime.harnessTurn,
+      complete && !runtime.cancelled,
+    );
+    runtime.harnessTurn = null;
   }
   function finishServiceTurn(runtime, session, turn, complete, notice) {
     if (!turn || runtime.serviceTurn !== turn) return;
     runtime.serviceTurn = null;
-    if (session.status === 'interrupted') return;
+    if (session.status === 'interrupted' || runtime.cancelled) return;
     if (complete && session.secret.messages.some((message) => turn.messages.has(message.id) && message.content.trim())) {
-      addServiceConversationBatch(session, turn.messages, (fields) =>
-        services.chatDraft(fields, session),
-      );
+      if (turn.customization) {
+        const { service, selected } = turn.customization;
+        addCustomizationDraft(session, turn, (fields, previous) =>
+          serviceCustomization(fields, selected, service.healthUrl, previous));
+      } else {
+        addServiceConversationBatch(session, turn.messages, (fields) => services.chatDraft(fields, session));
+      }
       return;
     }
     const content = complete
@@ -270,7 +320,8 @@ export function createHub(
     }
   }
   function onMessage(runtime, message) {
-    const { method, params: p = {}, id } = message;
+    const { method, params, id } = message;
+    const p = params ?? {};
     if (
       method === 'account/rateLimits/updated' &&
       id === undefined &&
@@ -308,13 +359,33 @@ export function createHub(
       return;
     }
     if (id !== undefined) {
-      const approval = [
-        'session/request_permission',
-        'item/commandExecution/requestApproval',
-        'item/fileChange/requestApproval',
-      ].includes(method);
+      if (runtime.cancelled) return runtime.rpc.reject(id);
+      const approval = runtime.provider === 'codex'
+        ? ['item/commandExecution/requestApproval', 'item/fileChange/requestApproval'].includes(method)
+        : method === 'session/request_permission';
       const input = method === 'item/tool/requestUserInput';
       if (!approval && !input) return runtime.rpc.reject(id);
+      const session = load(sid, 'session');
+      if (
+        approval &&
+        session.autoApprove === true &&
+        !session.archived &&
+        runtime.turnTimer &&
+        ['running', 'approval'].includes(session.status) &&
+        currentTurnEvent(runtime, p)
+      ) {
+        const response = automaticApproval(method, p);
+        if (response) {
+          runtime.autoApproved++;
+          addMessage(
+            sid,
+            'system',
+            `Автоматически одобрено действий · ${runtime.autoApproved}`,
+            `${runtime.messageId}:auto-approval`,
+          );
+          return runtime.rpc.respond(id, response);
+        }
+      }
       updateSession(sid, (s) => {
         s.status = 'approval';
         s.secret.approvals.push({
@@ -346,6 +417,12 @@ export function createHub(
           `${item.command || ''}${item.aggregatedOutput ? '\n' + item.aggregatedOutput : ''}\n${item.status || ''}`,
           item.id,
         );
+      if (
+        method === 'item/completed' &&
+        item.type === 'commandExecution' &&
+        item.exitCode === 0 &&
+        currentTurnEvent(runtime, p)
+      ) recordHarnessEvidence(runtime.harnessTurn, item.aggregatedOutput);
       if (item.type === 'fileChange')
         addMessage(
           sid,
@@ -360,9 +437,14 @@ export function createHub(
       if (p.threadId && p.threadId !== runtime.nativeId) return;
       if (p.turn?.id && runtime.turnId && p.turn.id !== runtime.turnId) return;
       runtime.turnId = null;
-      clearTimeout(runtime.turnTimer);
+      clearTurnTimer(runtime);
       updateSession(sid, (s) => {
         const outcome = p.turn?.status;
+        closeHarnessTurn(
+          runtime,
+          s,
+          outcome === 'completed' && s.status !== 'interrupted',
+        );
         finishServiceTurn(
           runtime,
           s,
@@ -416,7 +498,7 @@ export function createHub(
       if (
         u.sessionUpdate === 'agent_message_chunk' &&
         u.content?.type === 'text' &&
-        (!runtime.serviceTurn ||
+        (!(runtime.serviceTurn || runtime.harnessTurn) ||
           (!u._meta?.['opencode/child-session'] &&
             (!p.sessionId || p.sessionId === runtime.nativeId)))
       )
@@ -437,6 +519,19 @@ export function createHub(
           ),
           u.toolCallId,
         );
+      if (
+        runtime.harnessTurn &&
+        ['tool_call', 'tool_call_update'].includes(u.sessionUpdate) &&
+        u.status === 'completed' &&
+        currentTurnEvent(runtime, p)
+      ) {
+        const output = typeof u.rawOutput === 'string'
+          ? u.rawOutput
+          : Array.isArray(u.content)
+            ? u.content.map((entry) => entry?.content?.text || '').join('\n')
+            : '';
+        recordHarnessEvidence(runtime.harnessTurn, output);
+      }
     }
   }
   async function runtimeFor(m, provider, session) {
@@ -481,6 +576,7 @@ export function createHub(
             ? load(session.projectId, 'workspace').path
             : await resolveHome(m))
         : undefined;
+      runtime.cwd = cwd;
       if (accountId)
         runtime.releaseAccount = await accounts.prepare(
           m,
@@ -507,12 +603,13 @@ export function createHub(
       runtime.rpc.on('message', (msg) => onMessage(runtime, msg));
       runtime.rpc.on('disconnected', () => {
         const expected = runtime.managedClose;
-        clearTimeout(runtime.turnTimer);
+        clearTurnTimer(runtime);
         runtimes.delete(key);
         if (runtime.releaseAccount)
           void releaseRuntime(runtime).catch(() => {});
         if (session && !expected && store.get('settings', session.id))
           updateSession(session.id, (s) => {
+            closeHarnessTurn(runtime, s);
             if (['running', 'connecting', 'approval'].includes(s.status))
               s.status = 'interrupted';
             s.secret.approvals = [];
@@ -710,7 +807,7 @@ export function createHub(
         })),
       projects: records('workspace'),
       services: services.list(),
-      capabilities: { serviceChat: true },
+      capabilities: { serviceChat: true, chatExecution: true, serviceWorkspace: true },
       sessions: sessions().sort((a, b) =>
         b.updatedAt.localeCompare(a.updatedAt),
       ),
@@ -751,22 +848,38 @@ export function createHub(
       return updateSession(session.id, (s) => {
         s.nativeSource = true;
         s.nativeModelProvider = data.modelProvider;
-        if (s.cwd !== data.cwd) s.projectId = null;
+        if (!sameWorkspaceDirectory(s.cwd, data.cwd, machine(s.machineId).platform)) s.projectId = null;
         s.cwd = data.cwd;
         if (allowLegacy && s.provider === 'codex' && mode) s.mode = mode;
-        let draftingTurn = false;
+        let draftingTurn = false, harnessTurn = false, customizingTurn = false;
         s.secret.messages = data.messages.map((message) => {
           if (message.role === 'user') {
-            const visible = visibleServiceChatInput(message.content);
-            draftingTurn = visible.content !== message.content;
+            const task = unwrapHarnessInput(message.content);
+            harnessTurn = task !== null;
+            const input = task ?? message.content;
+            const customization = unwrapServiceCustomizationInput(input);
+            customizingTurn = customization !== null;
+            if (customizingTurn) {
+              draftingTurn = false;
+              return { ...message, content: customization };
+            }
+            const visible = visibleServiceChatInput(input);
+            draftingTurn = visible.content !== input;
             return { ...message, ...visible };
           }
-          if (
-            message.role === 'assistant' &&
-            draftingTurn &&
-            serviceChatBlock(message.content)
-          )
-            return { ...message, serviceOutput: true };
+          if (message.role === 'assistant') {
+            let content = harnessTurn
+              ? (harnessReport(message.content)?.text ?? message.content)
+              : message.content;
+            if (customizingTurn) content = serviceCustomizationBlock(content)?.text ?? content;
+            return {
+              ...message,
+              content,
+              ...(draftingTurn && serviceChatBlock(content)
+                ? { serviceOutput: true }
+                : {}),
+            };
+          }
           return message;
         });
         s.secret.approvals = [];
@@ -1191,12 +1304,8 @@ export function createHub(
           body.nativeId,
           body.cwd,
         );
-        const samePath = (path) =>
-          m.platform === 'win32'
-            ? path?.toLowerCase() === data.cwd.toLowerCase()
-            : path === data.cwd;
         const project = records('workspace').find(
-          (p) => p.machineId === m.id && samePath(p.path),
+          (p) => p.machineId === m.id && sameWorkspaceDirectory(p.path, data.cwd, m.platform),
         );
         const session = {
           id: randomUUID(),
@@ -1245,7 +1354,7 @@ export function createHub(
       const path = projectPath(body.path, m.platform || 'linux');
       assert(
         !records('workspace').some(
-          (p) => p.machineId === m.id && p.path === path,
+          (p) => p.machineId === m.id && sameWorkspaceDirectory(p.path, path, m.platform),
         ),
         'Этот каталог уже добавлен',
         409,
@@ -1298,16 +1407,21 @@ export function createHub(
       return true;
     }
     if (path === '/api/hub/sessions' && method === 'POST') {
-      const p = body.projectId ? load(body.projectId, 'workspace') : null;
-      const m = machine(p?.machineId || body.machineId);
+      const location = body.serviceId ? locationForService(body.serviceId) : null;
+      const projectId = location ? location.projectId : body.projectId;
+      const p = projectId ? load(projectId, 'workspace') : null;
+      const m = machine(location?.machineId || p?.machineId || body.machineId);
+      if (location && Object.hasOwn(body, 'serviceCwd'))
+        assert(body.serviceCwd === location.cwd || sameWorkspaceDirectory(body.serviceCwd, location.cwd, m.platform),
+          'Рабочая папка сервиса изменилась. Откройте создание чата ещё раз.', 409);
       const accountId = Object.hasOwn(body, 'accountId')
         ? body.accountId
         : m.agentAccounts?.[body.provider] || null;
       if (accountId) accounts.connected(accountId, body.provider);
-      if (p && body.machineId)
+      if ((p || location) && body.machineId)
         assert(
-          p.machineId === body.machineId,
-          'Проект находится на другой машине',
+          m.id === body.machineId,
+          'Рабочая папка находится на другой машине',
         );
       assert(providers[body.provider], 'Выберите агента');
       assert(
@@ -1325,8 +1439,8 @@ export function createHub(
         recordType: 'session',
         projectId: p?.id || null,
         machineId: m.id,
-        cwd:
-          p?.path || projectPath(await resolveHome(m), m.platform || 'linux'),
+        ...(location ? { serviceId: body.serviceId } : {}),
+        cwd: projectPath(p?.path || location?.cwd || (await resolveHome(m)), m.platform || 'linux'),
         provider: body.provider,
         accountId: accountId || null,
         mode:
@@ -1352,6 +1466,8 @@ export function createHub(
         validateSelection(catalog, session.model, session.reasoning);
       } else
         validateSelection({ models: [] }, session.model, session.reasoning);
+      if (location) assert(JSON.stringify(locationForService(body.serviceId)) === JSON.stringify(location),
+        'Рабочая папка сервиса изменилась. Откройте создание чата ещё раз.', 409);
       save(session);
       send(publicRecord(session), 201);
       return true;
@@ -1359,6 +1475,31 @@ export function createHub(
     const syncMatch = path.match(/^\/api\/hub\/sessions\/([a-f0-9-]+)\/sync$/);
     if (syncMatch && method === 'POST') {
       send(publicRecord(await syncNative(load(syncMatch[1], 'session'))));
+      return true;
+    }
+    const customizationMatch = path.match(
+      /^\/api\/hub\/sessions\/([a-f0-9-]+)\/service-customizations\/([a-f0-9-]+)\/apply$/,
+    );
+    if (customizationMatch && method === 'POST') {
+      const [, sessionId, draftId] = customizationMatch;
+      const session = load(sessionId, 'session');
+      assert(!session.archived && !deletingSessions.has(sessionId) && !deletingMachines.has(session.machineId) &&
+        !nativeChanges.has(sessionId) && !['running', 'connecting', 'approval'].includes(session.status),
+        'Дождитесь ответа агента или восстановите чат из архива.', 409);
+      const draft = session.secret.serviceCustomizations?.find((entry) => entry.id === draftId);
+      assert(draft?.configuration, 'Предложение не найдено', 404);
+      let appliedAt = draft.appliedAt;
+      if (!appliedAt) {
+        assert(!draft.replaced, 'В чате есть более новое предложение для этого сервиса.', 409);
+        const service = services.get(draft.serviceId);
+        appliedAt = now();
+        services.saveCustomization(service, draft.configuration, draft.revision, () => {
+          updateSession(sessionId, (record) => {
+            record.secret.serviceCustomizations.find((entry) => entry.id === draftId).appliedAt = appliedAt;
+          });
+        });
+      }
+      send({ serviceId: draft.serviceId, appliedAt });
       return true;
     }
     const serviceChatMatch = path.match(
@@ -1414,7 +1555,7 @@ export function createHub(
       return true;
     }
     const sm = path.match(
-      /^\/api\/hub\/sessions\/([a-f0-9-]+)(?:\/(message|stop|approval))?$/,
+      /^\/api\/hub\/sessions\/([a-f0-9-]+)(?:\/(message|stop|approval|execution))?$/,
     );
     if (sm) {
       const s = load(sm[1], 'session');
@@ -1435,10 +1576,49 @@ export function createHub(
             (s.projectId ? load(s.projectId, 'workspace').path : undefined),
           messages: s.secret.messages,
           serviceBatches: s.secret.serviceBatches || [],
+          serviceCustomizations: s.secret.serviceCustomizations || [],
           usage: s.secret.usage || null,
           errorMessage: s.secret.errorMessage || null,
           approvals: s.secret.approvals,
         });
+        return true;
+      }
+      if (sm[2] === 'execution' && method === 'PATCH') {
+        const changes = {};
+        for (const key of ['harnessEnabled', 'autoApprove']) {
+          if (!Object.hasOwn(body, key)) continue;
+          assert(
+            typeof body[key] === 'boolean',
+            'Укажите состояние переключателя',
+          );
+          if (body[key] !== (s[key] === true)) changes[key] = body[key];
+        }
+        const keys = Object.keys(changes);
+        assert(
+          Object.hasOwn(body, 'harnessEnabled') || Object.hasOwn(body, 'autoApprove'),
+          'Выберите режим выполнения',
+        );
+        if (!keys.length) {
+          send(publicRecord(s));
+          return true;
+        }
+        assert(!s.archived, 'Восстановите чат из архива', 409);
+        const onlyRevoking = keys.length === 1 && changes.autoApprove === false;
+        if (!onlyRevoking)
+          assert(
+            !['running', 'connecting', 'approval'].includes(s.status) &&
+              !modelChanges.has(s.id) && !nativeChanges.has(s.id),
+            'Дождитесь завершения хода или остановите чат',
+            409,
+          );
+        if (changes.autoApprove === true)
+          assert(
+            body.confirmAutoApprove === true,
+            'Подтвердите включение автоаппрува',
+          );
+        send(publicRecord(updateSession(s.id, (session) => {
+          Object.assign(session, changes);
+        })));
         return true;
       }
       if (!sm[2] && method === 'PATCH') {
@@ -1567,6 +1747,11 @@ export function createHub(
             });
         }
         if (typeof body.archived === 'boolean') s.archived = body.archived;
+        // Preserve settings saved through /execution while an edit was awaiting a probe.
+        const latest = load(s.id, 'session');
+        for (const key of ['harnessEnabled', 'autoApprove']) {
+          if (Object.hasOwn(latest, key)) s[key] = latest[key];
+        }
         runtimes.get(s.id)?.rpc?.close();
         save(s);
         send(publicRecord(s));
@@ -1580,21 +1765,19 @@ export function createHub(
         );
         if (s.nativeSource) {
           await syncNative(s);
-          s.secret = load(s.id, 'session').secret;
+          Object.assign(s, load(s.id, 'session'));
         }
         assert(!modelChanges.has(s.id), 'Дождитесь сохранения модели', 409);
         assert(!s.archived, 'Восстановите диалог из архива', 409);
+        const sessionMachine = machine(s.machineId);
+        const cwd = s.cwd || (s.projectId ? load(s.projectId, 'workspace').path : undefined);
         assert(
           s.mode === 'read-only' ||
             !sessions().some(
               (other) =>
                 other.id !== s.id &&
                 other.machineId === s.machineId &&
-                other.cwd ===
-                  (s.cwd ||
-                    (s.projectId
-                      ? load(s.projectId, 'workspace').path
-                      : undefined)) &&
+                sameWorkspaceDirectory(other.cwd, cwd, sessionMachine.platform) &&
                 other.mode !== 'read-only' &&
                 ['running', 'connecting', 'approval'].includes(other.status),
             ),
@@ -1613,9 +1796,11 @@ export function createHub(
           'Сообщение: от 1 до 32000 символов',
         );
         const serviceRequest = serviceChatRequest(body.message);
+        assert(!serviceRequest || !body.customizeServiceId, 'Выберите оформление или настройку сервиса для этого сообщения');
+        const customization = body.customizeServiceId ? customizationTarget(body.customizeServiceId) : null;
         const command = serviceRequest ? serviceChatCommand : undefined;
         const message = serviceRequest || body.message.trim();
-        const drafting = !!serviceRequest || !!s.serviceDrafting;
+        const drafting = !customization && (!!serviceRequest || !!s.serviceDrafting);
         if (s.accountId) accounts.connected(s.accountId, s.provider);
         updateSession(s.id, (x) => {
           x.status = 'connecting';
@@ -1631,7 +1816,7 @@ export function createHub(
         let connectingRuntime;
         try {
           connectingRuntime = await runtimeFor(
-            machine(s.machineId),
+              sessionMachine,
             s.provider,
             s,
           );
@@ -1673,16 +1858,26 @@ export function createHub(
             r.cancelled = false;
             messageId = randomUUID();
             r.messageId = messageId;
-            const serviceTurn = drafting ? { messages: new Set() } : null;
+            r.autoApproved = 0;
+            const serviceTurn = drafting || customization ? { messages: new Set() } : null;
+            if (customization) serviceTurn.customization = {
+              ...customization,
+              revision: customizationRevision(customization.service),
+            };
             r.serviceTurn = serviceTurn;
-            const text = serviceTurn
-              ? serviceConversationInput(
-                  message, s, machine(s.machineId),
+            const task = customization
+              ? customizeServiceInput(message, customization.service, customization.selected, s)
+              : drafting ? serviceConversationInput(
+                  message, s, sessionMachine,
                   s.projectId ? load(s.projectId, 'workspace') : null,
                   services.list(),
                   command,
                 )
-              : message;
+                : message;
+            r.harnessTurn = s.harnessEnabled === true
+              ? beginHarnessTurn(s, r.cwd, task)
+              : null;
+            const text = r.harnessTurn?.input ?? task;
             const timer = setTimeout(
               () => {
                 r.rpc.close();
@@ -1721,6 +1916,7 @@ export function createHub(
               );
               clearTimeout(timer);
               if (r.messageId !== messageId) return;
+              r.turnTimer = null;
               if (r.accountId) await releaseRuntime(r);
               if (
                 store.get('settings', s.id) &&
@@ -1728,6 +1924,11 @@ export function createHub(
                 r.messageId === messageId
               )
                 updateSession(s.id, (x) => {
+                  closeHarnessTurn(
+                    r,
+                    x,
+                    result.stopReason === 'end_turn' && x.status !== 'interrupted',
+                  );
                   finishServiceTurn(
                     r,
                     x,
@@ -1757,12 +1958,14 @@ export function createHub(
             if (runningRuntime && runningRuntime.messageId !== messageId)
               return;
             const failed = runningRuntime || runtimes.get(s.id);
+            clearTurnTimer(failed);
             if (failed) failed.serviceTurn = null;
             if (failed?.accountId) await releaseRuntime(failed).catch(() => {});
             if (runningRuntime?.cancelled) return;
             const stopped = load(s.id, 'session').status === 'interrupted';
             if (!stopped) {
               updateSession(s.id, (x) => {
+                closeHarnessTurn(failed, x);
                 x.status = 'error';
                 if (authorizationError(error.message)) x.authError = signInHelp;
                 x.secret.approvals = [];
@@ -1780,10 +1983,12 @@ export function createHub(
       }
       if (method === 'POST' && sm[2] === 'stop') {
         const r = runtimes.get(s.id);
-        const serviceTurn = r?.serviceTurn;
+        const closeAfterStop = r?.serviceTurn || r?.harnessTurn ||
+          r?.autoApproved > 0 || s.autoApprove === true;
         if (r) {
           r.cancelled = true;
           r.serviceTurn = null;
+          clearTurnTimer(r);
         }
         if (r?.rpc) {
           try {
@@ -1799,9 +2004,10 @@ export function createHub(
             r.rpc.close();
           }
         }
-        if (serviceTurn && r.rpc && !r.rpc.dead)
+        if (closeAfterStop && r?.rpc && !r.rpc.dead)
           await releaseRuntime(r).catch(() => {});
         updateSession(s.id, (x) => {
+          closeHarnessTurn(r, x);
           x.status = 'interrupted';
           x.secret.approvals = [];
         });
@@ -1969,8 +2175,10 @@ export function createHub(
           send(limits);
           return true;
         }
+        const location = body.serviceId && !session ? locationForService(body.serviceId) : null;
+        assert(!location || location.machineId === m.id, 'Сервис использует рабочую папку на другой машине');
         const cwd = projectPath(
-          session?.cwd || project?.path || (await resolveHome(m)),
+          session?.cwd || location?.cwd || project?.path || (await resolveHome(m)),
           m.platform || 'linux',
         );
         send(

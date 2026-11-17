@@ -2,7 +2,7 @@ import { execFile } from 'node:child_process';
 import { stripVTControlCharacters } from 'node:util';
 import { connect, run } from './ssh.mjs';
 import { assert, q, redact } from './security.mjs';
-import { serviceSource, sourceKey, unitName } from './service-model.mjs';
+import { serviceSource, serviceUrl, sourceKey, unitName } from './service-model.mjs';
 
 const containerId = /^[a-f0-9]{64}$/;
 const maxDiscovery = 160;
@@ -539,6 +539,32 @@ export async function checkServiceHttp(execute, machine, url) {
         : 'unknown',
       code: null,
     };
+  }
+}
+
+export async function readServiceMetricJson(execute, machine, url) {
+  try {
+    const output = await execute(
+      machine.transport === 'local' && machine.platform === 'win32' ? 'curl.exe' : 'curl',
+      [
+        '--disable', '--noproxy', '*', '--proto', '=http', '--globoff',
+        '--max-time', '4', '--max-filesize', '65536', '--silent', '--show-error',
+        '--header', 'Accept: application/json', '--write-out', '\\n%{http_code}',
+        '--', serviceUrl(url, true, 'Эндпоинт метрик'),
+      ],
+      { limit: 65540 },
+    );
+    const end = output.lastIndexOf('\n');
+    const status = output.slice(end + 1).trim();
+    if (end < 0 || !/^2\d\d$/.test(status))
+      return { error: 'Эндпоинт метрик не вернул успешный HTTP-ответ.' };
+    try {
+      const document = JSON.parse(output.slice(0, end));
+      if (document && typeof document === 'object') return { document };
+    } catch {}
+    return { error: 'Эндпоинт метрик должен вернуть JSON-объект или массив.' };
+  } catch {
+    return { error: 'Не удалось прочитать JSON-метрики на машине сервиса.' };
   }
 }
 

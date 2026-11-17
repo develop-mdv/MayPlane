@@ -34,8 +34,10 @@ import {
   useHub,
   type AgentSession,
   type HubProject,
+  type HubService,
   type RemovalTarget,
 } from '@/lib/hub';
+import { serviceProjects } from '@/lib/service-workspace.mjs';
 import { AgentChat, NewSession } from './agent-chat';
 import { NewProject, SettingsPanel } from './workspace-forms';
 import { MachinesPanel, PairComputer, ServerForm } from './machines-panel';
@@ -54,6 +56,8 @@ export default function WorkspaceMain() {
     [selectedMachine, setSelectedMachine] = useState<string | null>(null),
     [scope, setScope] = useState('all');
   const [serviceView, setServiceView] = useState<ServiceView>({});
+  const [sessionService, setSessionService] = useState<{ service: HubService; customize: boolean } | null>(null);
+  const [chatCustomizationId, setChatCustomizationId] = useState<string>();
   const [newProject, setNewProject] = useState(false),
     [newSession, setNewSession] = useState(false),
     [importSession, setImportSession] = useState(false),
@@ -118,8 +122,9 @@ export default function WorkspaceMain() {
     setSidebar(false);
     setError('');
   }
-  function openSession(s: AgentSession) {
+  function openSession(s: AgentSession, customizeServiceId?: string) {
     setSelectedSession(s.id);
+    setChatCustomizationId(customizeServiceId);
     setScope(s.projectId || 'loose');
     setArchive(s.archived);
     setSearch(false);
@@ -132,8 +137,19 @@ export default function WorkspaceMain() {
     navigate('chat');
   }
   function startSession(id?: string | null) {
+    setSessionService(null);
     setSessionProject(id === undefined ? project?.id || null : id);
     setNewSession(true);
+  }
+  function startServiceChat(service: HubService, customize = false) {
+    setSessionProject(null);
+    setSessionService({ service, customize });
+    setNewSession(true);
+  }
+  function servicesInProject(project: HubProject) {
+    return hub.data.services.filter((service) => serviceProjects(
+      service, [project], ws.data.servers.find((item) => item.id === service.machineId)?.platform,
+    ).length > 0);
   }
   function renameChat(s: AgentSession) {
     setEdit({ kind: 'chat', id: s.id, title: s.title });
@@ -429,6 +445,9 @@ export default function WorkspaceMain() {
               machines={ws.data.servers}
               scope={serviceView}
               onProject={selectProject}
+              onOpenChat={openSession}
+              onNewChat={startServiceChat}
+              connected={connected}
               onMachine={(id) => {
                 setSelectedMachine(id);
                 navigate('servers');
@@ -498,7 +517,7 @@ export default function WorkspaceMain() {
                         onClick={() => navigate('services', { projectId: p.id })}
                       >
                         <Boxes size={14} /> Сервисы
-                        <span>{hub.data.services.filter((s) => s.projectId === p.id).length}</span>
+                        <span>{servicesInProject(p).length}</span>
                       </button>
                       <footer>
                         <button
@@ -561,6 +580,8 @@ export default function WorkspaceMain() {
               session={session}
               project={project}
               machine={machine}
+              machines={ws.data.servers}
+              initialCustomizeServiceId={chatCustomizationId}
               hub={hub}
               onNewProject={() => setNewProject(true)}
               onNewSession={() => startSession()}
@@ -623,7 +644,7 @@ export default function WorkspaceMain() {
               </div>
               {project && (
                 <ProjectServices
-                  services={hub.data.services.filter((s) => s.projectId === project.id)}
+                  services={servicesInProject(project)}
                   machines={ws.data.servers}
                   disabled={!connected}
                   onOpen={(serviceId) => navigate('services', { projectId: project.id, serviceId })}
@@ -793,6 +814,7 @@ export default function WorkspaceMain() {
           projects={hub.data.projects}
           machines={ws.data.servers}
           initialProject={sessionProject || undefined}
+          service={sessionService?.service}
           onClose={() => setNewSession(false)}
           onAccounts={() => {
             setNewSession(false);
@@ -800,7 +822,7 @@ export default function WorkspaceMain() {
           }}
           onCreated={(s) => {
             setNewSession(false);
-            openSession(s);
+            openSession(s, sessionService?.customize ? sessionService.service.id : undefined);
           }}
         />
       )}

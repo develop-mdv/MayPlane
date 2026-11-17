@@ -110,6 +110,7 @@ export function AgentModelSelector({
   machineId,
   provider,
   projectId,
+  serviceId,
   sessionId,
   accountId,
   model,
@@ -122,6 +123,7 @@ export function AgentModelSelector({
   machineId: string;
   provider: AgentProvider;
   projectId?: string;
+  serviceId?: string;
   sessionId?: string;
   accountId?: string | null;
   model: string;
@@ -158,7 +160,7 @@ export function AgentModelSelector({
         const next = await api<ModelCatalog>(
           `/hub/machines/${machineId}/agents/${provider}/models`,
           'POST',
-          { projectId, sessionId, accountId, model: modelRef.current, refresh },
+          { projectId, serviceId, sessionId, accountId, model: modelRef.current, refresh },
         );
         if (request === generation.current) setCatalog(next);
       } catch (e) {
@@ -171,7 +173,7 @@ export function AgentModelSelector({
         }
       }
     },
-    [api, machineId, provider, projectId, sessionId, accountId],
+    [api, machineId, provider, projectId, serviceId, sessionId, accountId],
   );
   useEffect(() => {
     invalidate();

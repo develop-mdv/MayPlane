@@ -12,6 +12,7 @@ import {
 import type { Hub, ServiceConversationBatch } from '@/lib/hub';
 import { serviceChatCommand } from '@/lib/service-chat.mjs';
 import { ErrorText } from './hub-ui';
+import { ServiceDashboard } from './service-customization';
 import { serviceSourceLabel, serviceSourceNames } from './service-form';
 
 export function ServiceCommandTag({ onRemove }: { onRemove?: () => void }) {
@@ -213,6 +214,9 @@ export function ServiceChatBatch({
                 )}
                 {fields.notes && <p>{fields.notes}</p>}
               </details>
+            )}
+            {fields.customization && (
+              <ServiceDashboard configuration={fields.customization} preview />
             )}
           </div>
         );

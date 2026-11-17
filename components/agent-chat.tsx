@@ -13,6 +13,9 @@ import {
   Folder,
   LoaderCircle,
   Boxes,
+  ShieldAlert,
+  Settings2,
+  ArrowUpRight,
 } from 'lucide-react';
 import type { Server } from '@/lib/domain';
 import {
@@ -25,15 +28,21 @@ import {
   type SessionDetail,
   type AgentApproval,
   type HubProject,
+  type HubService,
   type AgentProvider,
   type ServiceConversationBatch,
+  type ServiceCustomizationDraft,
 } from '@/lib/hub';
 import {
+  attachServiceChatCommand,
   serviceChatBlock,
   serviceChatCommand,
   splitServiceChatCommand,
   suggestsServiceChatCommand,
 } from '@/lib/service-chat.mjs';
+import { serviceCustomizationBlock } from '@/lib/service-customization.mjs';
+import { serviceChatLocation, serviceHasChat } from '@/lib/service-workspace.mjs';
+import { harnessReport } from '@/lib/chat-harness.mjs';
 import { CopyButton, ErrorText, Field, Modal, Submit } from './hub-ui';
 import { AgentModelSelector, ChatModelSettings } from './agent-model-selector';
 import { AccountSelect } from './agent-accounts';
@@ -43,13 +52,48 @@ import {
   ServiceCommandSuggestion,
   ServiceCommandTag,
 } from './service-chat';
+import { ServiceCustomizationCard } from './service-customization';
 const chatDrafts = new WeakMap<object, Map<string, string>>();
+const chatCustomization = new WeakMap<object, Map<string, string>>();
+
+function ChatExecutionSwitch({
+  label,
+  hint,
+  checked,
+  disabled,
+  risky = false,
+  onClick,
+}: {
+  label: string;
+  hint: string;
+  checked: boolean;
+  disabled: boolean;
+  risky?: boolean;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      role="switch"
+      aria-checked={checked}
+      className={`chat-execution-switch${risky ? ' risky' : ''}`}
+      title={hint}
+      disabled={disabled}
+      onClick={onClick}
+    >
+      {risky && <ShieldAlert size={13} aria-hidden="true" />}
+      {label}
+      <span className="chat-execution-track" aria-hidden="true" />
+    </button>
+  );
+}
 
 export function NewSession({
   hub,
   projects,
   machines,
   initialProject,
+  service,
   onCreated,
   onClose,
   onAccounts,
@@ -58,10 +102,14 @@ export function NewSession({
   projects: HubProject[];
   machines: Server[];
   initialProject?: string;
+  service?: HubService;
   onCreated: (s: AgentSession) => void;
   onClose: () => void;
   onAccounts: () => void;
 }) {
+  const serviceLocation = service ? serviceChatLocation(
+    service, projects, machines.find((m) => m.id === service.machineId)?.platform,
+  ) : null;
   const [projectId, setProjectId] = useState(initialProject || '');
   const [machineId, setMachineId] = useState(
     projects.find((p) => p.id === initialProject)?.machineId ||
@@ -77,11 +125,10 @@ export function NewSession({
       initialProject ? 'workspace-write' : 'read-only',
     );
   const [loadingModels, setLoadingModels] = useState(false);
-  const selectedMachine = machines.find(
-    (m) =>
-      m.id ===
-      (projects.find((p) => p.id === projectId)?.machineId || machineId),
-  );
+  const chatProject = serviceLocation ? serviceLocation.projectId : projectId;
+  const chatMachine = serviceLocation?.machineId ||
+    projects.find((p) => p.id === projectId)?.machineId || machineId;
+  const selectedMachine = machines.find((m) => m.id === chatMachine);
   const defaultAccount = (hub.data.accounts || []).find(
     (a) => a.id === selectedMachine?.agentAccounts?.[provider],
   );
@@ -90,7 +137,7 @@ export function NewSession({
   return (
     <Modal
       title="Новый чат"
-      description="Начните чат в рабочей папке проекта или без проекта на выбранной машине."
+      description={service ? 'Агент будет работать в рабочей папке сервиса.' : 'Начните чат в рабочей папке проекта или без проекта на выбранной машине.'}
       onClose={onClose}
     >
       <form
@@ -101,10 +148,8 @@ export function NewSession({
           setError('');
           try {
             const s = await hub.mutate<AgentSession>('/sessions', {
-              projectId: projectId || null,
-              machineId: projectId
-                ? projects.find((p) => p.id === projectId)?.machineId
-                : machineId,
+              ...(service ? { serviceId: service.id, serviceCwd: serviceLocation?.cwd } : { projectId: projectId || null }),
+              machineId: chatMachine,
               provider,
               ...(accountChoice === '__default'
                 ? {}
@@ -121,7 +166,12 @@ export function NewSession({
           }
         }}
       >
-        <Field label="Проект">
+        {service ? (
+          <div className="hub-field">
+            <span>{service.name} · {selectedMachine?.name || 'Машина сервиса'}</span>
+            <code>{serviceLocation?.cwd || 'Домашний каталог'}</code>
+          </div>
+        ) : <Field label="Проект">
           <select
             aria-label="Проект"
             value={projectId}
@@ -141,8 +191,8 @@ export function NewSession({
               </option>
             ))}
           </select>
-        </Field>
-        {!projectId && (
+        </Field>}
+        {!service && !projectId && (
           <Field
             label="Машина"
             hint="Чат начнётся в домашнем каталоге пользователя агента. Проект можно выбрать позже."
@@ -212,13 +262,12 @@ export function NewSession({
           Добавить или настроить аккаунты
         </button>
         <AgentModelSelector
-          key={provider + ':' + (projectId || machineId) + ':' + accountChoice}
+          key={provider + ':' + (service?.id || chatProject || chatMachine) + ':' + accountChoice}
           hub={hub}
-          machineId={
-            projects.find((p) => p.id === projectId)?.machineId || machineId
-          }
+          machineId={chatMachine}
           provider={provider}
-          projectId={projectId || undefined}
+          projectId={chatProject || undefined}
+          serviceId={service?.id}
           accountId={
             accountChoice === '__default' ? undefined : accountChoice || null
           }
@@ -457,6 +506,8 @@ export function AgentChat({
   session,
   project,
   machine,
+  machines,
+  initialCustomizeServiceId,
   hub,
   onNewProject,
   onNewSession,
@@ -467,6 +518,8 @@ export function AgentChat({
   session?: AgentSession;
   project?: HubProject;
   machine?: Server;
+  machines: Server[];
+  initialCustomizeServiceId?: string;
   hub: Hub;
   onNewProject: () => void;
   onNewSession: () => void;
@@ -476,13 +529,19 @@ export function AgentChat({
 }) {
   const api = hub.api;
   const sessionId = session?.id;
+  const [customizeServiceId, setCustomizeServiceId] = useState(() => initialCustomizeServiceId ||
+    (sessionId ? chatCustomization.get(api)?.get(sessionId) || '' : ''));
   const [detail, setDetail] = useState<SessionDetail | null>(null),
-    [draft, setDraft] = useState(() =>
-      sessionId ? chatDrafts.get(api)?.get(sessionId) || '' : '',
-    ),
+    [draft, setDraft] = useState<string>(() => {
+      const saved = sessionId ? chatDrafts.get(api)?.get(sessionId) || '' : '';
+      return customizeServiceId ? (splitServiceChatCommand(saved)?.content ?? saved) : saved;
+    }),
     [error, setError] = useState(''),
     [sending, setSending] = useState(false),
     [changingMode, setChangingMode] = useState(false);
+  const [changingExecution, setChangingExecution] = useState(false);
+  const [autoApproveDialog, setAutoApproveDialog] = useState<string | null>(null);
+  const [executionError, setExecutionError] = useState('');
   const [composerFocused, setComposerFocused] = useState(false);
   const [commandsDismissed, setCommandsDismissed] = useState(false);
   const commandMenuId = useId();
@@ -543,18 +602,45 @@ export function AgentChat({
     if (follow.current)
       bottom.current?.scrollIntoView({ behavior: 'instant', block: 'end' });
   }, [detail]);
+  useEffect(() => {
+    if (!sessionId) return;
+    let choices = chatCustomization.get(api);
+    if (!choices) {
+      if (!customizeServiceId) return;
+      choices = new Map();
+      chatCustomization.set(api, choices);
+    }
+    if (customizeServiceId) choices.set(sessionId, customizeServiceId);
+    else choices.delete(sessionId);
+  }, [api, customizeServiceId, sessionId]);
   const currentDetail = detail?.id === session?.id ? detail : null;
   const live = currentDetail || session;
   const drafting = !!live?.serviceDrafting;
+  const harnessEnabled = live?.harnessEnabled === true;
+  const autoApprove = live?.autoApprove === true;
   const chatBusy =
     disabled ||
     sending ||
     changingMode ||
+    changingExecution ||
     activeSession(live) ||
     !!session?.archived;
   const command = splitServiceChatCommand(draft);
   const commandAttached = !!command?.separated;
   const serviceChatAvailable = !!hub.data.capabilities?.serviceChat;
+  const executionAvailable = !!hub.data.capabilities?.chatExecution;
+  const customizationsAvailable = !!hub.data.capabilities?.serviceWorkspace;
+  const availableServices = session && customizationsAvailable ? hub.data.services : [];
+  const relatedServices = session
+    ? availableServices.filter((service) => serviceHasChat(
+        service, session, hub.data.projects,
+        machines.find((item) => item.id === service.machineId)?.platform,
+      ))
+    : [];
+  const otherServices = availableServices.filter((service) => !relatedServices.includes(service));
+  const customizeService = availableServices.find((service) => service.id === customizeServiceId);
+  const missingCustomization = !!customizeServiceId && !customizeService;
+  const serviceLink = customizeService || relatedServices.find((service) => service.id === session?.serviceId);
   const commandUnavailable = !!command && !serviceChatAvailable;
   const commandMenuOpen =
     composerFocused &&
@@ -563,8 +649,14 @@ export function AgentChat({
     !session?.archived &&
     suggestsServiceChatCommand(draft);
   const draftContent = commandAttached && command ? command.content : draft;
+  function chooseCustomization(id: string) {
+    setCustomizeServiceId(id);
+    if (id && command) rememberDraft(command.content);
+    composer.current?.focus();
+  }
   function chooseCommand() {
-    rememberDraft(serviceChatCommand + ' ');
+    if (customizeServiceId) setCustomizeServiceId('');
+    rememberDraft(attachServiceChatCommand(draft));
     composer.current?.focus();
   }
   function removeCommand() {
@@ -591,15 +683,48 @@ export function AgentChat({
       setChangingMode(false);
     }
   }
+  async function changeExecution(
+    key: 'harnessEnabled' | 'autoApprove',
+    value: boolean,
+  ) {
+    if (!session || disabled || session.archived || changingExecution) return;
+    const enablingAuto = key === 'autoApprove' && value;
+    setChangingExecution(true);
+    setExecutionError('');
+    try {
+      const updated = await hub.mutate<AgentSession>(
+        `/sessions/${session.id}/execution`,
+        { [key]: value, ...(enablingAuto ? { confirmAutoApprove: true } : {}) },
+        'PATCH',
+      );
+      setDetail((current) =>
+        current?.id === updated.id
+          ? {
+              ...current,
+              autoApprove: updated.autoApprove,
+              harnessEnabled: updated.harnessEnabled,
+            }
+          : current,
+      );
+      if (enablingAuto) setAutoApproveDialog(null);
+    } catch (reason) {
+      setExecutionError((reason as Error).message);
+    } finally {
+      setChangingExecution(false);
+    }
+  }
   async function send() {
-    if (!session || !draft.trim() || chatBusy || commandUnavailable) return;
+    if (!session || !draft.trim() || chatBusy || commandUnavailable || missingCustomization) return;
     const text = draft;
     setSending(true);
     setError('');
     try {
-      await hub.mutate(`/sessions/${session.id}/message`, { message: text });
+      await hub.mutate(`/sessions/${session.id}/message`, {
+        message: text,
+        ...(customizeService ? { customizeServiceId: customizeService.id } : {}),
+      });
       const drafts = chatDrafts.get(api);
-      if (drafts?.get(session.id) === text) drafts.delete(session.id);
+      if (drafts && drafts.get(session.id) === text) drafts.delete(session.id);
       if (mounted.current) {
         setDraft((value) => (value === text ? '' : value));
         follow.current = true;
@@ -614,6 +739,7 @@ export function AgentChat({
   }
   const messages = currentDetail?.messages || [];
   const batches = currentDetail?.serviceBatches || [];
+  const customizations = currentDetail?.serviceCustomizations || [];
   const messageIds = new Set(messages.map((message) => message.id));
   function renderServiceBatch(batch: ServiceConversationBatch) {
     return (
@@ -631,8 +757,48 @@ export function AgentChat({
       )
     );
   }
+  function renderCustomization(draft: ServiceCustomizationDraft) {
+    return session && <ServiceCustomizationCard
+      key={draft.id}
+      draft={draft}
+      sessionId={session.id}
+      hub={hub}
+      disabled={chatBusy}
+      onOpen={onOpenService}
+      onRefresh={reload}
+    />;
+  }
   return (
     <div className="chat-layout">
+      {session && autoApproveDialog === session.id && (
+        <Modal
+          title="Включить автоаппрув?"
+          description="Одноразовые запросы на команды, изменение файлов и расширение доступа будут одобряться автоматически. Эти действия могут затронуть данные и запущенные сервисы."
+          onClose={() => {
+            if (!changingExecution) setAutoApproveDialog(null);
+          }}
+        >
+          <ErrorText error={executionError} />
+          <div className="form-actions">
+            <button
+              className="hub-button"
+              type="button"
+              disabled={changingExecution}
+              onClick={() => setAutoApproveDialog(null)}
+            >
+              Отмена
+            </button>
+            <button
+              className="hub-button auto-approve-confirm"
+              type="button"
+              disabled={chatBusy}
+              onClick={() => void changeExecution('autoApprove', true)}
+            >
+              {changingExecution ? 'Включаем…' : 'Включить для этого чата'}
+            </button>
+          </div>
+        </Modal>
+      )}
       {session?.nativeSource && (
         <div className="native-chat-notice">
           <span>
@@ -770,9 +936,14 @@ export function AgentChat({
         ) : (
           <div className="conversation">
             {messages.map((m) => {
-              const text = m.serviceOutput
-                ? (serviceChatBlock(m.content)?.text ?? m.content)
+              const content = m.harnessOutput
+                ? (harnessReport(m.content)?.text ?? m.content)
                 : m.content;
+              const text = m.serviceCustomizationOutput
+                ? (serviceCustomizationBlock(content)?.text ?? content)
+                : m.serviceOutput
+                ? (serviceChatBlock(content)?.text ?? content)
+                : content;
               return (
                 <article key={m.id} className={`chat-message ${m.role}`}>
                   {m.role === 'tool' ? (
@@ -809,6 +980,7 @@ export function AgentChat({
                       {batches
                         .filter((batch) => batch.messageId === m.id)
                         .map(renderServiceBatch)}
+                      {customizations.filter((draft) => draft.messageId === m.id).map(renderCustomization)}
                       {m.role === 'assistant' && text && (
                         <div className="message-actions">
                           <CopyButton value={text} />
@@ -826,6 +998,11 @@ export function AgentChat({
                   {renderServiceBatch(batch)}
                 </article>
               ))}
+            {customizations.filter((draft) => !messageIds.has(draft.messageId)).map((draft) => (
+              <article key={draft.id} className="chat-message assistant">
+                {renderCustomization(draft)}
+              </article>
+            ))}
             {currentDetail?.approvals.map((a) => (
               <ApprovalCard
                 key={a.id}
@@ -850,7 +1027,7 @@ export function AgentChat({
         <div className="composer-area">
           <ErrorText
             error={
-              commandUnavailable
+              missingCustomization ? 'Карточка недоступна из этого чата. Выберите другой сервис или сбросьте настройку.' : commandUnavailable
                 ? 'Команда /services доступна после обновления серверной части MayPlane.'
                 : error || live?.authError || currentDetail?.errorMessage || ''
             }
@@ -860,6 +1037,7 @@ export function AgentChat({
               Подключить аккаунт в настройках
             </button>
           )}
+          {autoApproveDialog !== session.id && <ErrorText error={executionError} />}
           <div className="composer-entry">
             <form
               className={`chat-composer ${disabled || session.archived ? 'disabled' : ''}${commandAttached ? ' with-command' : ''}`}
@@ -889,6 +1067,8 @@ export function AgentChat({
                 placeholder={
                   session.archived
                     ? 'Диалог в архиве'
+                    : customizeService
+                      ? 'Что изменить в карточке «' + customizeService.name + '»?'
                     : drafting || commandAttached
                       ? 'Что оформить? Можно добавить ссылку на репозиторий…'
                       : 'Сообщение агенту. Введите / для подсказок…'
@@ -901,6 +1081,7 @@ export function AgentChat({
                 onBlur={() => setComposerFocused(false)}
                 onChange={(e) => {
                   setCommandsDismissed(false);
+                  if (customizeServiceId && splitServiceChatCommand(e.target.value)) setCustomizeServiceId('');
                   rememberDraft(
                     commandAttached
                       ? serviceChatCommand + ' ' + e.target.value
@@ -945,22 +1126,84 @@ export function AgentChat({
                   <button
                     type="button"
                     className="chat-service-trigger"
-                    aria-pressed={drafting}
-                    title={
-                      drafting
-                        ? 'Завершить оформление сервисов'
-                        : 'Команда ' + serviceChatCommand
-                    }
-                    disabled={chatBusy || !serviceChatAvailable}
-                    onClick={() => void changeServiceMode(!drafting)}
+                    title={'Добавить команду ' + serviceChatCommand}
+                    disabled={disabled || !serviceChatAvailable}
+                    onClick={chooseCommand}
                   >
-                    {changingMode ? (
-                      <LoaderCircle size={14} className="spin" />
-                    ) : (
-                      <Boxes size={14} />
-                    )}
-                    {drafting ? 'Оформление сервисов' : 'Оформить сервисы'}
+                    <Boxes size={14} />
+                    Оформить сервисы
                   </button>
+                  {drafting && (
+                    <button
+                      type="button"
+                      className="chat-service-trigger"
+                      disabled={chatBusy || !serviceChatAvailable}
+                      onClick={() => void changeServiceMode(false)}
+                    >
+                      {changingMode && <LoaderCircle size={14} className="spin" />}
+                      Завершить оформление
+                    </button>
+                  )}
+                  {(availableServices.length > 0 || missingCustomization) && (
+                    <label className="composer-service-picker">
+                      <Settings2 size={14} aria-hidden="true" />
+                      <select
+                        aria-label="Настроить карточку сервиса"
+                        disabled={disabled}
+                        value={customizeServiceId}
+                        onChange={(event) => chooseCustomization(event.target.value)}
+                      >
+                        <option value="">Настроить сервис…</option>
+                        {missingCustomization && <option value={customizeServiceId}>Карточка недоступна</option>}
+                        {relatedServices.length > 0 && <optgroup label="Связанные с чатом">
+                          {relatedServices.map((service) => <option key={service.id} value={service.id}>{service.name}</option>)}
+                        </optgroup>}
+                        {otherServices.length > 0 && <optgroup label="Другие сервисы">
+                          {otherServices.map((service) => (
+                            <option key={service.id} value={service.id}>
+                              {service.name} · {machines.find((item) => item.id === service.machineId)?.name || 'Машина недоступна'}
+                            </option>
+                          ))}
+                        </optgroup>}
+                      </select>
+                    </label>
+                  )}
+                  {serviceLink && <button type="button" className="chat-service-trigger" onClick={() => onOpenService(serviceLink.id)}>
+                    Карточка сервиса <ArrowUpRight size={13} />
+                  </button>}
+                  {executionAvailable && (
+                    <>
+                      <ChatExecutionSwitch
+                        label="Harness²"
+                        hint="Агент сравнит подходы, проверит выбранный вариант и учтёт наблюдения из этого чата."
+                        checked={harnessEnabled}
+                        disabled={chatBusy}
+                        onClick={() =>
+                          void changeExecution('harnessEnabled', !harnessEnabled)
+                        }
+                      />
+                      <ChatExecutionSwitch
+                        label="Автоаппрув"
+                        hint={
+                          autoApprove
+                            ? 'Отключить автоматическое разрешение действий'
+                            : 'Разрешать действия агента автоматически'
+                        }
+                        checked={autoApprove}
+                        disabled={
+                          disabled || changingExecution || (!autoApprove && chatBusy)
+                        }
+                        risky
+                        onClick={() => {
+                          if (autoApprove) void changeExecution('autoApprove', false);
+                          else {
+                            setExecutionError('');
+                            setAutoApproveDialog(session.id);
+                          }
+                        }}
+                      />
+                    </>
+                  )}
                   {(drafting || commandAttached) && (
                     <span>
                       {providerNames[session.provider]} использует контекст
@@ -998,12 +1241,14 @@ export function AgentChat({
                       session.archived
                     }
                   />
-                  <span className="composer-mode">
-                    <ShieldCheck size={13} />
-                    {session.mode === 'read-only'
-                      ? 'Только чтение'
-                      : 'Права по запросу'}
-                  </span>
+                  {(!autoApprove || session.provider === 'codex') && (
+                    <span className="composer-mode">
+                      <ShieldCheck size={13} />
+                      {session.mode === 'read-only'
+                        ? (autoApprove ? 'Песочница чтения' : 'Только чтение')
+                        : (autoApprove ? 'Песочница проекта' : 'Права по запросу')}
+                    </span>
+                  )}
                   <AgentLimitsControl
                     key={`${session.id}:${live?.accountId || 'native'}`}
                     hub={hub}
@@ -1035,7 +1280,7 @@ export function AgentChat({
                   <button
                     className="send-button"
                     type="submit"
-                    disabled={!draft.trim() || chatBusy || commandUnavailable}
+                    disabled={!draft.trim() || chatBusy || commandUnavailable || missingCustomization}
                     aria-label="Отправить сообщение"
                   >
                     {sending ? (

@@ -9,7 +9,14 @@ import { PassThrough, Writable } from 'node:stream';
 import { setTimeout as pause } from 'node:timers/promises';
 import { createHub } from '../runner/hub.mjs';
 import { openStore } from '../runner/store.mjs';
+import { serviceHasChat } from '../lib/service-workspace.mjs';
 import {
+  serviceFieldLink,
+  serviceMetricKey,
+  unwrapServiceCustomizationInput,
+} from '../lib/service-customization.mjs';
+import {
+  attachServiceChatCommand,
   serviceChatCommand,
   serviceChatDefaultRequest,
   serviceChatInput,
@@ -148,7 +155,7 @@ function fixture(t, provider = 'opencode') {
   const hub = createHub(new EventEmitter(), store, {
     resolveHome: async () => '/home/owner',
     openProcess: async (machine, options) => {
-      assert.equal(machine.id, machineId);
+      assert([machineId, dev].includes(machine.id));
       assert.equal(options.provider, provider);
       return fakeAgent(
         () => {
@@ -164,6 +171,11 @@ function fixture(t, provider = 'opencode') {
         assert.equal(machine.id, machineId);
         return work(async (file, args) => {
           calls.push([file, ...args]);
+          if (file === 'curl') {
+            return args.at(-1).endsWith('/other.json')
+              ? '{"queue":{"waiting":7}}\n200'
+              : '{"queue":{"waiting":0,"workers":3,"private":"not-a-metric"}}\n200';
+          }
           assert.equal(file, 'docker');
           const selected = listed.filter((entry) => args.includes(entry.id));
           if (args[0] === 'ps')
@@ -221,7 +233,16 @@ function fixture(t, provider = 'opencode') {
     }
     return reply;
   }
-  return { machineId, projectId, provider, messages, calls, replies, request };
+  return {
+    machineId,
+    dev,
+    projectId,
+    provider,
+    messages,
+    calls,
+    replies,
+    request,
+  };
 }
 
 async function waitFor(read, condition) {
@@ -242,9 +263,12 @@ async function chat(f) {
   return '/sessions/' + data.id;
 }
 
-async function turn(f, path, message, reply) {
+async function turn(f, path, message, reply, options = {}) {
   f.replies.push(reply);
-  const result = await f.request(path + '/message', 'POST', { message });
+  const result = await f.request(path + '/message', 'POST', {
+    message,
+    ...options,
+  });
   assert.equal(result.status, 202, result.data.error);
   return waitFor(
     () => f.request(path),
@@ -252,9 +276,256 @@ async function turn(f, path, message, reply) {
   );
 }
 
+test('service chats resolve the real folder with or without a registered project', async (t) => {
+  const f = fixture(t);
+  const { data: service } = await f.request('/services', 'POST', {
+    name: 'Worker',
+    machineId: f.machineId,
+    directory: '/srv/worker/',
+  });
+  const start = () =>
+    f.request('/sessions', 'POST', {
+      provider: f.provider,
+      serviceId: service.id,
+      serviceCwd: '/srv/worker/',
+    });
+  const { data: loose, status } = await start();
+  assert.equal(status, 201);
+  assert.equal(loose.cwd, '/srv/worker/');
+  assert.equal(loose.projectId, null);
+  assert.equal(loose.serviceId, service.id);
+  const { data: project } = await f.request('/projects', 'POST', {
+    name: 'Worker project',
+    machineId: f.machineId,
+    path: '/srv/worker',
+  });
+  assert.equal(
+    (
+      await f.request('/sessions', 'POST', {
+        provider: f.provider,
+        serviceId: service.id,
+        serviceCwd: '/srv/outdated',
+      })
+    ).status,
+    409,
+  );
+  const { data: linked } = await start();
+  assert.equal(linked.cwd, '/srv/worker');
+  assert.equal(linked.projectId, project.id);
+  assert.equal(
+    serviceHasChat(
+      service,
+      { ...loose, serviceId: undefined },
+      [project],
+      'linux',
+    ),
+    true,
+  );
+  assert.equal(
+    serviceHasChat(
+      service,
+      { ...loose, cwd: '/srv/worker/other', serviceId: undefined },
+      [project],
+      'linux',
+    ),
+    false,
+  );
+  assert.equal(
+    serviceHasChat(
+      service,
+      { ...loose, machineId: 'elsewhere' },
+      [project],
+      'linux',
+    ),
+    false,
+  );
+  assert.equal(
+    serviceHasChat(
+      { ...service, directory: 'D:\\Apps\\Worker\\' },
+      { ...loose, cwd: 'd:/apps/worker/.', serviceId: undefined },
+      [],
+      'win32',
+    ),
+    true,
+  );
+});
+
+test('service fields link to HTTP(S) destinations, including saved Markdown values', () => {
+  const url = 'https://example.test/admin';
+  const link = {
+    type: 'link',
+    label: 'Ссылка на панель',
+    value: 'Открыть',
+    url,
+  };
+  assert.deepEqual(serviceFieldLink(link), { label: 'Открыть', url });
+  assert.deepEqual(
+    serviceFieldLink({ label: link.label, value: '[Открыть](' + url + ')' }),
+    { label: 'Открыть', url },
+  );
+  assert.equal(
+    serviceFieldLink({ value: '[Открыть](javascript:alert(1))' }),
+    null,
+  );
+  assert.equal(
+    serviceFieldLink({ ...link, url: 'https://example:secret@example.test/' }),
+    null,
+  );
+  assert.equal(serviceFieldLink({ ...link, type: 'code', value: url }), null);
+});
+
+test('a proposal from another machine customizes the selected service and measures its sources after approval', async (t) => {
+  const f = fixture(t, 'codex');
+  const { data: service } = await f.request('/services', 'POST', {
+    name: 'Worker',
+    machineId: f.machineId,
+    directory: '/srv/worker',
+    source: web,
+  });
+  const { data: session, status } = await f.request('/sessions', 'POST', {
+    machineId: f.dev,
+    projectId: f.projectId,
+    provider: f.provider,
+  });
+  assert.equal(status, 201);
+  assert.equal(session.machineId, f.dev);
+  assert.equal(serviceHasChat(service, session, [], 'linux'), false);
+  const path = '/sessions/' + session.id;
+  const servicePath = '/services/' + service.id;
+  const target = { customizeServiceId: service.id };
+  const fields = [{ label: 'Обработка', value: 'Фоновая' }];
+  const metrics = [
+    { label: 'Ожидают', path: 'queue.waiting', unit: 'зад.' },
+    { label: 'Воркеры', path: 'queue.workers' },
+    { label: 'Среднее время', path: 'latency.avg', unit: 'мс' },
+  ];
+  const metricsUrl = 'http://127.0.0.1:8080/metrics.json';
+  const alternate = {
+    label: 'Другая очередь',
+    path: 'queue.waiting',
+    unit: 'зад.',
+    url: 'http://127.0.0.1:9090/other.json',
+    warningAt: 3,
+    criticalAt: 6,
+    alertWhen: 'above',
+  };
+  const runtime = {
+    label: 'Процессор',
+    path: 'cpuCores',
+    unit: 'vCPU',
+    source: 'runtime',
+  };
+  const link = {
+    type: 'link',
+    label: 'Управление',
+    value: 'Открыть',
+    url: 'https://example.test/admin',
+  };
+  const sections = [
+    {
+      title: 'Управление и нагрузка',
+      layout: 'grid',
+      description: 'Воркеры по очередям',
+      fields: [link],
+      metrics: [alternate, runtime],
+    },
+  ];
+  const formatCustomization = (configuration) =>
+    'Предлагаю такую карточку.\n\n```mayplane-service-config\n' +
+    JSON.stringify(configuration) +
+    '\n```';
+  const message = 'Покажи очередь и режим обработки';
+  const detail = await turn(
+    f,
+    path,
+    message,
+    formatCustomization({
+      fields,
+      metrics,
+      metricsUrl,
+      sections,
+      name: 'Это не имя сервиса',
+      serviceId: randomUUID(),
+    }),
+    target,
+  );
+  const input = f.messages.find((entry) => entry.method === 'turn/start').params
+    .input[0].text;
+  assert.equal(unwrapServiceCustomizationInput(input), message);
+  assert.match(input, /"machine":"Test VPS","onServiceMachine":false/);
+  const draft = detail.serviceCustomizations[0];
+  assert.deepEqual(draft.configuration.fields, fields);
+  assert.equal(draft.configuration.metricsUrl, metricsUrl);
+  assert.equal((await f.request(servicePath)).data.customization, undefined);
+  assert.ok(!f.calls.some(([file]) => file === 'curl'));
+
+  const apply = (id) =>
+    f.request(path + '/service-customizations/' + id + '/apply', 'POST');
+  const saved = await apply(draft.id);
+  assert.equal(saved.status, 200);
+  assert.deepEqual((await apply(draft.id)).data, saved.data);
+  await f.request('/services/refresh', 'POST', {
+    machineId: f.machineId,
+    wait: true,
+  });
+  const card = (await f.request(servicePath)).data;
+  assert.equal(card.name, 'Worker');
+  assert.deepEqual(card.customization.fields, fields);
+  assert.deepEqual(card.customization.sections, sections);
+  assert.deepEqual(card.customMetricValues, {
+    'queue.waiting': 0,
+    'queue.workers': 3,
+    [serviceMetricKey(alternate)]: 7,
+    [serviceMetricKey(runtime)]: 0.05,
+  });
+  assert.ok(
+    f.calls.some(
+      ([file, ...args]) => file === 'curl' && args.at(-1) === metricsUrl,
+    ),
+  );
+
+  const next = await turn(
+    f,
+    path,
+    'Убери основное поле',
+    formatCustomization({ fields: [] }),
+    target,
+  );
+  const pending = next.serviceCustomizations.at(-1);
+  assert.deepEqual(pending.removedFields, ['Обработка']);
+  assert.deepEqual(pending.configuration.sections, sections);
+  assert.deepEqual(pending.configuration.metrics, card.customization.metrics);
+  await f.request(servicePath, 'PATCH', {
+    customization: { fields: [{ label: 'Вручную', value: 'Сохранено' }] },
+  });
+  assert.equal((await apply(pending.id)).status, 409);
+  const invalid = await turn(
+    f,
+    path,
+    'Предложи другой источник',
+    formatCustomization({
+      fields,
+      metrics,
+      metricsUrl: 'http://example.test/metrics',
+    }),
+    target,
+  );
+  assert.ok(invalid.serviceCustomizations.at(-1).warning);
+  assert.equal(invalid.serviceCustomizations.at(-1).configuration, undefined);
+  assert.deepEqual((await f.request(servicePath)).data.customization.fields, [
+    { label: 'Вручную', value: 'Сохранено' },
+  ]);
+});
+
 test('OpenCode chat asks for a repository, then drafts two services and follows each component after saving', async (t) => {
   const f = fixture(t);
   const path = await chat(f);
+  const badge = {
+    label: 'Среда',
+    value: 'Внутренняя',
+    type: 'badge',
+    tone: 'good',
+  };
   await turn(
     f,
     path,
@@ -287,6 +558,7 @@ test('OpenCode chat asks for a repository, then drafts two services and follows 
         notes: 'Сайт и API',
         machineId: 'wrong',
         healthUrl: 'http://127.0.0.1:50',
+        customization: { sections: [{ title: 'Доступ', fields: [badge] }] },
       },
       { name: 'Тасктрекер', sources: [tracker] },
     ]),
@@ -335,6 +607,7 @@ test('OpenCode chat asks for a repository, then drafts two services and follows 
     [web, api],
   );
   assert.equal(service.cpuCores, 0.1);
+  assert.deepEqual(service.customization.sections[0].fields, [badge]);
   assert.equal(
     (await f.request(servicePath + '/logs/0')).data.lines[0].text,
     'intranet-web',
@@ -404,6 +677,11 @@ test('slash completion distinguishes a partial prefix, an attached command and o
     content: 'Сайт и API',
     separated: true,
   });
+  assert.equal(attachServiceChatCommand(''), '/services ');
+  assert.equal(attachServiceChatCommand('/serv'), '/services ');
+  const attached = attachServiceChatCommand('Оформи сайт и API');
+  assert.equal(attached, '/services Оформи сайт и API');
+  assert.equal(attachServiceChatCommand(attached), attached);
   assert.equal(serviceChatRequest('/services '), serviceChatDefaultRequest);
   assert.equal(serviceChatRequest('/services/other'), null);
   assert.deepEqual(

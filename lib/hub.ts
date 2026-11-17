@@ -33,6 +33,7 @@ export type RemovalResult = {
 export type AgentSession = {
   id: string;
   projectId: string | null;
+  serviceId?: string;
   cwd?: string;
   machineId: string;
   provider: AgentProvider;
@@ -45,6 +46,8 @@ export type AgentSession = {
   nativeSyncedAt?: string;
   authError?: string | null;
   serviceDrafting?: boolean;
+  harnessEnabled?: boolean;
+  autoApprove?: boolean;
   mode: string;
   status:
     | 'idle'
@@ -63,6 +66,8 @@ export type AgentMessage = {
   content: string;
   createdAt: string;
   serviceOutput?: boolean;
+  serviceCustomizationOutput?: boolean;
+  harnessOutput?: boolean;
   command?: '/services';
 };
 export type AgentApproval = {
@@ -96,6 +101,7 @@ export type SessionDetail = AgentSession & {
   messages: AgentMessage[];
   approvals: AgentApproval[];
   serviceBatches?: ServiceConversationBatch[];
+  serviceCustomizations?: ServiceCustomizationDraft[];
 };
 export type LimitWindow = {
   usedPercent: number;
@@ -140,6 +146,50 @@ export type ServiceStatus =
   | 'unconfigured';
 export type ServiceHealth = 'healthy' | 'unhealthy' | 'starting';
 export type ServiceHttpStatus = 'ok' | 'failed' | 'unknown';
+export type ServiceCardField = {
+  label: string;
+  value: string;
+  type?: 'text' | 'link' | 'badge' | 'note' | 'code';
+  url?: string;
+  tone?: 'neutral' | 'good' | 'warning' | 'danger';
+};
+export type ServiceCardMetric = {
+  label: string;
+  path: string;
+  unit: string;
+  source?: 'runtime';
+  url?: string;
+  warningAt?: number;
+  criticalAt?: number;
+  alertWhen?: 'above' | 'below';
+};
+export type ServiceCardSection = {
+  title: string;
+  description?: string;
+  layout: 'rows' | 'grid';
+  fields: ServiceCardField[];
+  metrics: ServiceCardMetric[];
+};
+export type ServiceCustomization = {
+  fields: ServiceCardField[];
+  metrics: ServiceCardMetric[];
+  sections?: ServiceCardSection[];
+  metricsUrl: string;
+  metricsMachineId?: string;
+};
+export type ServiceCustomizationDraft = {
+  id: string;
+  messageId: string;
+  serviceId: string;
+  serviceName: string;
+  configuration?: ServiceCustomization;
+  removedFields?: string[];
+  removedMetrics?: string[];
+  removedSections?: string[];
+  warning?: string;
+  replaced?: boolean;
+  appliedAt?: string;
+};
 export type ServiceFields = {
   name: string;
   projectId: string | null;
@@ -153,6 +203,7 @@ export type ServiceFields = {
   notes: string;
   source: ServiceSource;
   additionalSources?: ServiceSource[];
+  customization?: ServiceCustomization;
 };
 export type HubService = ServiceFields & {
   id: string;
@@ -168,6 +219,8 @@ export type HubService = ServiceFields & {
   cpuCores?: number | null;
   memoryBytes?: number | null;
   metricsError?: string;
+  customMetricValues?: Record<string, number>;
+  customMetricError?: string;
   health?: ServiceHealth | null;
   http?: { status: ServiceHttpStatus; code: number | null };
   components?: {
@@ -212,7 +265,7 @@ export type ServiceLogs = {
   warning: string;
 };
 export type HubSnapshot = {
-  capabilities?: { serviceChat?: boolean };
+  capabilities?: { serviceChat?: boolean; chatExecution?: boolean; serviceWorkspace?: boolean };
   accounts?: AgentAccount[];
   tasks?: {
     id: string;

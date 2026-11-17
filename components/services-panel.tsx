@@ -7,15 +7,19 @@ import {
   Boxes,
   ChevronRight,
   Folder,
+  MessageSquare,
   Monitor,
   Pencil,
   Plus,
   RefreshCw,
+  Settings2,
   Trash2,
 } from 'lucide-react';
 import type { Server } from '@/lib/domain';
 import type {
+  AgentSession,
   Hub,
+  HubProject,
   HubService,
   ServiceEvent,
   ServiceHealth,
@@ -23,9 +27,13 @@ import type {
   ServiceLogs,
   ServiceStatus,
 } from '@/lib/hub';
+import { activeSession, providerNames } from '@/lib/hub';
+import { allServiceMetrics } from '@/lib/service-customization.mjs';
+import { serviceHasChat, serviceProjects } from '@/lib/service-workspace.mjs';
 import { formatBytes } from '@/lib/machine-metrics.mjs';
 import { useNow } from '@/lib/use-now';
 import { CopyButton, ErrorText, Field } from './hub-ui';
+import { ServiceDashboard } from './service-customization';
 import {
   ServiceForm,
   serviceSourceLabel,
@@ -295,34 +303,110 @@ function runningFor(startedAt: string, now: number) {
     : Math.floor(hours / 24) + ' д ' + (hours % 24) + ' ч';
 }
 
+function ServiceWorkspaceLinks({ projects, chats, onProject, onChat }: {
+  projects: HubProject[];
+  chats: AgentSession[];
+  onProject: (id: string) => void;
+  onChat: (session: AgentSession) => void;
+}) {
+  return (
+    <div className="service-details-grid">
+      <section className="detail-card service-detail-card">
+        <h2>Проекты</h2>
+        {projects.length ? (
+          <div className="service-related-list">
+            {projects.map((project) => (
+              <button key={project.id} type="button" onClick={() => onProject(project.id)}>
+                <Folder size={15} /> <strong>{project.name}</strong>
+                <small>{project.path}</small> <ArrowUpRight size={13} />
+              </button>
+            ))}
+          </div>
+        ) : <p className="hub-note">В каталоге сервиса пока нет проекта.</p>}
+      </section>
+      <section className="detail-card service-detail-card">
+        <h2>Чаты</h2>
+        {chats.length ? (
+          <div className="service-related-list">
+            {chats.map((chat) => (
+              <button key={chat.id} type="button" onClick={() => onChat(chat)}>
+                <MessageSquare size={15} /> <strong>{chat.title}</strong>
+                <small>{providerNames[chat.provider]}{chat.archived ? ' · Архив' : ''}</small>
+                <ArrowUpRight size={13} />
+              </button>
+            ))}
+          </div>
+        ) : <p className="hub-note">Создайте чат для работы с этим сервисом.</p>}
+      </section>
+    </div>
+  );
+}
+
+function ServiceExtraDetails({ service, canCustomize, onCustomize }: {
+  service: HubService;
+  canCustomize: boolean;
+  onCustomize: () => void;
+}) {
+  const { customization } = service;
+  const hasMetrics = allServiceMetrics(customization).length > 0;
+  const hasWidgets = hasMetrics || !!customization?.fields.length || !!customization?.sections?.length;
+  return (
+    <section className="detail-card service-detail-card service-extra-details">
+      <div className="service-related-heading">
+        <h2>Поля и метрики</h2>
+        <button type="button" className="hub-button" disabled={!canCustomize} onClick={onCustomize}>
+          <Settings2 size={15} /> Настроить в чате
+        </button>
+      </div>
+      {!hasWidgets && (
+        <p className="hub-note">Добавьте сведения и показатели, которые нужны этому приложению.</p>
+      )}
+      {hasWidgets && <ServiceDashboard configuration={customization} values={service.customMetricValues} />}
+      {hasMetrics && (customization?.metricsMachineId !== service.machineId ? (
+        <p className="hub-note">Обновите источник метрик после смены машины.</p>
+      ) : service.customMetricError && <p className="hub-note">{service.customMetricError}</p>)}
+    </section>
+  );
+}
+
 function ServiceDetails({
   service,
   machine,
-  project,
+  projects,
+  chats,
   hub,
+  connected,
   onBack,
   onEdit,
   onRemove,
   onMachine,
   onProject,
+  onOpenChat,
+  onNewChat,
 }: {
   service: HubService;
   machine?: Server;
-  project?: string;
+  projects: HubProject[];
+  chats: AgentSession[];
   hub: Hub;
+  connected: boolean;
   onBack: () => void;
   onEdit: () => void;
   onRemove: () => void;
   onMachine: () => void;
-  onProject: () => void;
+  onProject: (id: string) => void;
+  onOpenChat: (session: AgentSession, customizeServiceId?: string) => void;
+  onNewChat: (customize?: boolean) => void;
 }) {
-  const [tab, setTab] = useState<'overview' | 'logs'>('overview');
+  const [tab, setTab] = useState<'overview' | 'logs' | 'workspace'>('overview');
   const [history, setHistory] = useState<ServiceEvent[]>([]);
   const [error, setError] = useState('');
   const [refreshing, setRefreshing] = useState(false);
   const now = useNow();
   const api = hub.api;
   const automatic = service.source.type !== 'manual';
+  const hasChecks = automatic || !!service.healthUrl || !!service.customization?.metrics.length;
+  const workspaceAvailable = !!hub.data.capabilities?.serviceWorkspace;
   const grouped = !!service.additionalSources?.length;
   const { id, attemptedAt, checkedAt } = service;
   const lastFailedAttempt =
@@ -391,6 +475,11 @@ function ServiceDetails({
           {service.description && <p>{service.description}</p>}
         </div>
         <div className="heading-actions">
+          {workspaceAvailable && (
+            <button type="button" className="hub-button primary" disabled={!connected} onClick={() => onNewChat()}>
+              <MessageSquare size={15} /> Новый чат
+            </button>
+          )}
           {service.url && (
             <a
               className="hub-button"
@@ -432,8 +521,15 @@ function ServiceDetails({
         >
           Логи
         </button>
+        {workspaceAvailable && (
+          <button type="button" className="hub-button" aria-pressed={tab === 'workspace'} onClick={() => setTab('workspace')}>
+            Чаты и проекты
+          </button>
+        )}
       </div>
-      {tab === 'logs' && automatic ? (
+      {tab === 'workspace' && workspaceAvailable ? (
+        <ServiceWorkspaceLinks projects={projects} chats={chats} onProject={onProject} onChat={onOpenChat} />
+      ) : tab === 'logs' && automatic ? (
         <ServiceLogViewer
           key={JSON.stringify([service.source, service.additionalSources])}
           service={service}
@@ -462,16 +558,17 @@ function ServiceDetails({
               </div>
               <div>
                 <dt>Проект</dt>
-                <dd>
-                  {project ? (
+                <dd className="service-project-links">
+                  {projects.length ? projects.map((project) => (
                     <button
+                      key={project.id}
                       type="button"
                       className="text-button"
-                      onClick={onProject}
+                      onClick={() => onProject(project.id)}
                     >
-                      {project} <ArrowUpRight size={12} />
+                      {project.name} <ArrowUpRight size={12} />
                     </button>
-                  ) : (
+                  )) : (
                     'Без проекта'
                   )}
                 </dd>
@@ -539,7 +636,7 @@ function ServiceDetails({
           <section className="detail-card service-detail-card">
             <div className="service-related-heading">
               <h2>Состояние</h2>
-              {(automatic || service.healthUrl) && (
+              {hasChecks && (
                 <button
                   type="button"
                   className="hub-button"
@@ -569,7 +666,7 @@ function ServiceDetails({
                   : checkedAt
                     ? 'Последняя успешная проверка · ' +
                       dateFormat.format(new Date(checkedAt))
-                    : automatic || service.healthUrl
+                    : hasChecks
                       ? 'Ожидает проверки'
                       : 'Укажите источник в настройках карточки, чтобы видеть состояние и логи.'}
             </output>
@@ -683,6 +780,14 @@ function ServiceDetails({
             )}
             <ErrorText error={error} />
           </section>
+          {workspaceAvailable && (
+            <ServiceExtraDetails service={service} canCustomize={connected} onCustomize={() => {
+              const available = chats.filter((chat) => !chat.archived && !activeSession(chat));
+              const chat = available.find((entry) => entry.serviceId === service.id) || available[0];
+              if (chat) onOpenChat(chat, service.id);
+              else onNewChat(true);
+            }} />
+          )}
         </div>
       )}
     </>
@@ -696,6 +801,9 @@ export function ServicesPanel({
   onRemove,
   onProject,
   onMachine,
+  onOpenChat,
+  onNewChat,
+  connected,
 }: {
   hub: Hub;
   machines: Server[];
@@ -703,6 +811,9 @@ export function ServicesPanel({
   onRemove: (service: HubService) => void;
   onProject: (id: string) => void;
   onMachine: (id: string) => void;
+  onOpenChat: (session: AgentSession, customizeServiceId?: string) => void;
+  onNewChat: (service: HubService, customize?: boolean) => void;
+  connected: boolean;
 }) {
   const { services, projects } = hub.data;
   const [machineFilter, setMachineFilter] = useState(scope.machineId || '');
@@ -714,13 +825,17 @@ export function ServicesPanel({
     scope.create ? 'new' : null,
   );
   const service = services.find((item) => item.id === selectedId);
+  const machine = machines.find((item) => item.id === service?.machineId);
+  const projectLinks = new Map<string, HubProject[]>(services.map((item) => [item.id,
+    serviceProjects(item, projects, machines.find((machine) => machine.id === item.machineId)?.platform),
+  ]));
   const filtered = services.filter(
     (item) =>
       (!machineFilter || item.machineId === machineFilter) &&
       (!projectFilter ||
         (projectFilter === 'none'
-          ? !item.projectId
-          : item.projectId === projectFilter)) &&
+          ? !projectLinks.get(item.id)?.length
+          : projectLinks.get(item.id)?.some((project) => project.id === projectFilter))) &&
       (!statusFilter || item.status === statusFilter) &&
       (
         item.name +
@@ -741,18 +856,18 @@ export function ServicesPanel({
         <ServiceDetails
           key={service.id}
           service={service}
-          machine={machines.find((machine) => machine.id === service.machineId)}
-          project={
-            projects.find((project) => project.id === service.projectId)?.name
-          }
+          machine={machine}
+          projects={projectLinks.get(service.id) || []}
+          chats={hub.data.sessions.filter((chat) => serviceHasChat(service, chat, projects, machine?.platform))}
           hub={hub}
+          connected={connected}
           onBack={() => setSelectedId('')}
           onEdit={() => setEdit(service)}
           onRemove={() => onRemove(service)}
           onMachine={() => onMachine(service.machineId)}
-          onProject={() => {
-            if (service.projectId) onProject(service.projectId);
-          }}
+          onProject={onProject}
+          onOpenChat={onOpenChat}
+          onNewChat={(customize) => onNewChat(service, customize)}
         />
       ) : (
         <>
@@ -849,12 +964,10 @@ export function ServicesPanel({
                       {machines.find((machine) => machine.id === item.machineId)
                         ?.name || 'Машина'}
                     </span>
-                    {item.projectId && (
+                    {!!projectLinks.get(item.id)?.length && (
                       <span>
                         <Folder size={13} />{' '}
-                        {projects.find(
-                          (project) => project.id === item.projectId,
-                        )?.name || 'Проект'}
+                        {projectLinks.get(item.id)?.[0].name}
                       </span>
                     )}
                   </span>

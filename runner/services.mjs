@@ -5,10 +5,17 @@ import {
   serviceBinding,
   serviceInput,
   serviceHasRuntime,
+  serviceMetricSources,
   serviceRecordKey,
   serviceSources,
   sourceKey,
 } from './service-model.mjs';
+import {
+  customizationRevision,
+  readMetricValue,
+} from './service-customization.mjs';
+import { serviceMetricKey } from '../lib/service-customization.mjs';
+import { sameWorkspaceDirectory } from '../lib/service-workspace.mjs';
 import {
   createServiceDrafts,
   discoveredDirectory,
@@ -18,6 +25,7 @@ import {
   checkServiceHttp,
   inspectServices,
   readServiceLogs,
+  readServiceMetricJson,
   runtimeError,
   withServiceMachine,
 } from './service-runtime.mjs';
@@ -28,7 +36,19 @@ const observationExpiry = 90000;
 const initialStatus = (service) =>
   service.source.type === 'manual' ? 'unconfigured' : 'unknown';
 const watches = (service) =>
-  service.source.type !== 'manual' || !!service.healthUrl;
+  service.source.type !== 'manual' ||
+  !!service.healthUrl ||
+  serviceMetricSources(service).length > 0;
+const observationBinding = (service) =>
+  JSON.stringify([
+    serviceBinding(service),
+    serviceMetricSources(service)
+      .map(({ metric, url }) => [serviceMetricKey(metric), url])
+      .sort(
+        ([leftKey, leftUrl], [rightKey, rightUrl]) =>
+          leftKey.localeCompare(rightKey) || leftUrl.localeCompare(rightUrl),
+      ),
+  ]);
 const connectionKey = (machine) =>
   JSON.stringify([
     machine.transport,
@@ -86,6 +106,8 @@ function serviceMeasurement(service, machine, inventory, connectionError) {
     .filter(Boolean)
     .sort((a, b) => a.localeCompare(b));
   const checks = components.map((entry) => entry.health).filter(Boolean);
+  const counts = components.map((entry) => entry.instances || {});
+  const found = sumMeasured(counts, 'found');
   const first = components[0].status;
   return {
     status: components.every((entry) => entry.status === first)
@@ -101,6 +123,13 @@ function serviceMeasurement(service, machine, inventory, connectionError) {
     cpuCores: sumMeasured(running, 'cpuCores'),
     memoryBytes: sumMeasured(running, 'memoryBytes'),
     restarts: sumMeasured(components, 'restarts'),
+    instances:
+      found === undefined
+        ? undefined
+        : {
+            found,
+            running: sumMeasured(counts, 'running'),
+          },
     components,
   };
 }
@@ -134,17 +163,20 @@ export function createServices({
     complete:
       completeDraft ||
       serviceDraftAgent({ store, accounts, openProcess, connectors }),
-    projectForDirectory: (machineId, directory) =>
-      directory
-        ? store
-            .list('settings')
-            .find(
-              (record) =>
-                record.recordType === 'workspace' &&
-                record.machineId === machineId &&
-                record.path === directory,
-            )?.id || null
-        : null,
+    projectForDirectory: (machineId, directory) => {
+      if (!directory) return null;
+      const platform = machine(machineId).platform;
+      return (
+        store
+          .list('settings')
+          .find(
+            (record) =>
+              record.recordType === 'workspace' &&
+              record.machineId === machineId &&
+              sameWorkspaceDirectory(record.path, directory, platform),
+          )?.id || null
+      );
+    },
   });
   let batches;
 
@@ -157,7 +189,7 @@ export function createServices({
       ...data
     } = service;
     const seen = observations.get(service.id);
-    if (seen?.binding !== serviceBinding(service))
+    if (seen?.binding !== observationBinding(service))
       return { ...data, status: initialStatus(service) };
     const { binding: _binding, ...measure } = seen;
     if (Date.now() - Date.parse(measure.attemptedAt) > observationExpiry)
@@ -171,6 +203,7 @@ export function createServices({
   }
 
   function get(id) {
+    assert(typeof id === 'string' && id, 'Выберите сервис');
     const service = findService(store, id);
     assert(service, 'Сервис не найден', 404);
     return service;
@@ -178,8 +211,8 @@ export function createServices({
 
   function remember(service, measure) {
     const row = findService(store, service.id);
-    const binding = serviceBinding(service);
-    if (!row || binding !== serviceBinding(row)) return;
+    const binding = observationBinding(service);
+    if (!row || binding !== observationBinding(row)) return;
     const seen = observations.get(service.id);
     if (!measure.checkedAt && seen?.binding === binding)
       measure.checkedAt = seen.checkedAt;
@@ -216,8 +249,12 @@ export function createServices({
     const sources = services
       .flatMap(serviceSources)
       .filter((source) => serviceHasRuntime(selected, source));
+    const metricsByService = new Map(
+      services.map((service) => [service.id, serviceMetricSources(service)]),
+    );
     const attemptedAt = new Date().toISOString();
     const http = new Map();
+    const metricDocuments = new Map();
     let inventory, error;
     try {
       await withMachine(
@@ -226,16 +263,32 @@ export function createServices({
           const inspection = inspectServices(execute, selected, sources, {
             collectStats: true,
           });
-          const urls = [
-            ...new Set(
-              services.map((service) => service.healthUrl).filter(Boolean),
+          const healthUrls = new Set(
+            services.map((service) => service.healthUrl).filter(Boolean),
+          );
+          const metricUrls = new Set(
+            [...metricsByService.values()].flatMap((entries) =>
+              entries.map(({ url }) => url).filter(Boolean),
+            ),
+          );
+          const reads = [
+            ...Array.from(
+              healthUrls,
+              (url) => async () =>
+                http.set(url, await checkServiceHttp(execute, selected, url)),
+            ),
+            ...Array.from(
+              metricUrls,
+              (url) => async () =>
+                metricDocuments.set(
+                  url,
+                  await readServiceMetricJson(execute, selected, url),
+                ),
             ),
           ];
-          for (let offset = 0; offset < urls.length; offset += 4)
+          for (let offset = 0; offset < reads.length; offset += 4)
             await Promise.all(
-              urls.slice(offset, offset + 4).map(async (url) => {
-                http.set(url, await checkServiceHttp(execute, selected, url));
-              }),
+              reads.slice(offset, offset + 4).map((read) => read()),
             );
           inventory = await inspection;
         },
@@ -253,6 +306,21 @@ export function createServices({
       const endpoint = service.healthUrl
         ? http.get(service.healthUrl)
         : undefined;
+      const metrics = metricsByService.get(service.id);
+      const values = [];
+      const metricErrors = new Set();
+      for (const { metric, url } of metrics) {
+        const result = metricDocuments.get(url);
+        if (url && result?.document === undefined)
+          metricErrors.add(
+            result?.error || 'JSON-метрики на машине недоступны.',
+          );
+        const value = readMetricValue(
+          url ? result?.document : measure,
+          metric.path,
+        );
+        if (value !== undefined) values.push([serviceMetricKey(metric), value]);
+      }
       remember(service, {
         ...measure,
         attemptedAt,
@@ -265,6 +333,12 @@ export function createServices({
         http: service.healthUrl
           ? endpoint || { status: 'unknown', code: null }
           : undefined,
+        ...(metrics.length
+          ? {
+              customMetricValues: Object.fromEntries(values),
+              customMetricError: [...metricErrors].join(' ') || undefined,
+            }
+          : {}),
       });
     }
   }
@@ -330,8 +404,6 @@ export function createServices({
       409,
     );
     const service = input(body, selected, { previous });
-    const changed =
-      !previous || serviceBinding(previous) !== serviceBinding(service);
     if (serviceSources(service).length)
       assert(
         !listServices(store).some(
@@ -344,11 +416,7 @@ export function createServices({
         409,
       );
     saveRecord(service);
-    if (changed) {
-      observations.delete(service.id);
-      if (watches(service))
-        void refreshMachine(selected.id, { force: true, repeat: true });
-    }
+    refreshAfterChange(previous, service);
     return snapshotOf({
       ...service,
       legacy: previous?.legacy,
@@ -363,6 +431,46 @@ export function createServices({
     });
   }
 
+  function refreshAfterChange(previous, service) {
+    if (
+      previous &&
+      observationBinding(previous) === observationBinding(service)
+    )
+      return;
+    observations.delete(service.id);
+    if (watches(service))
+      void refreshMachine(service.machineId, { force: true, repeat: true });
+  }
+
+  function saveServiceChanges(write) {
+    store.db.exec('BEGIN IMMEDIATE');
+    try {
+      write();
+      store.db.exec('COMMIT');
+    } catch (error) {
+      store.db.exec('ROLLBACK');
+      throw error;
+    }
+  }
+
+  function saveCustomization(previous, configuration, revision, finish) {
+    assert(
+      customizationRevision(previous) === revision,
+      'Карточка изменилась. Попросите агента подготовить новое предложение.',
+      409,
+    );
+    const selected = machine(previous.machineId);
+    const updated = input({ customization: configuration }, selected, {
+      previous,
+      preserveMetricBinding: configuration.metricsMachineId !== selected.id,
+    });
+    saveServiceChanges(() => {
+      saveRecord(updated);
+      finish();
+    });
+    refreshAfterChange(previous, updated);
+  }
+
   function chatDraft(body, session) {
     const selected = machine(session.machineId);
     const service = serviceInput(body, selected);
@@ -375,7 +483,11 @@ export function createServices({
       projects.find(
         (entry) =>
           entry.machineId === service.machineId &&
-          entry.path === service.directory,
+          sameWorkspaceDirectory(
+            entry.path,
+            service.directory,
+            selected.platform,
+          ),
       );
     const key = repoKey(service.repo);
     const sameRepo = key
@@ -429,15 +541,10 @@ export function createServices({
       created.push(service);
       return { id: card.id, serviceId: service.id, existing: false };
     });
-    store.db.exec('BEGIN IMMEDIATE');
-    try {
+    saveServiceChanges(() => {
       for (const service of created) saveRecord(service);
       finish(receipts);
-      store.db.exec('COMMIT');
-    } catch (error) {
-      store.db.exec('ROLLBACK');
-      throw error;
-    }
+    });
     if (created.some(watches))
       void refreshMachine(selected.id, { force: true, repeat: true });
     return receipts;
@@ -547,6 +654,8 @@ export function createServices({
   startup.unref();
   return {
     handle,
+    get,
+    saveCustomization,
     chatDraft,
     saveChatDrafts,
     list: () => listServices(store).map(snapshotOf),
