@@ -10,13 +10,16 @@ import {
 } from 'react';
 import {
   ShieldCheck,
+  UserRound,
   LogOut,
   LoaderCircle,
-  LockKeyhole,
+  ChevronDown,
+  Eye,
+  EyeOff,
   RefreshCw,
 } from 'lucide-react';
 import { panelCsrf, setPanelCsrf } from '@/lib/panel-session';
-import { ErrorText, Field, Submit } from './hub-ui';
+import { CopyButton, ErrorText, Field, Submit } from './hub-ui';
 
 type OwnerSession = {
   authenticated: boolean;
@@ -64,6 +67,7 @@ export function PanelAuth({ children }: { children: ReactNode }) {
     [error, setError] = useState(''),
     [username, setUsername] = useState(''),
     [password, setPassword] = useState(''),
+    [showPassword, setShowPassword] = useState(false),
     [busy, setBusy] = useState(false);
   const generation = useRef(0);
   const invalidate = useCallback(() => {
@@ -126,7 +130,7 @@ export function PanelAuth({ children }: { children: ReactNode }) {
         <main className="owner-auth-page">
           <div className="owner-auth-card">
             <div className="owner-auth-brand">
-              <LockKeyhole size={24} />
+              <span className="workspace-brand-mark" aria-hidden="true" />
               <strong>
                 MayPlane<span>.</span>
               </strong>
@@ -136,7 +140,9 @@ export function PanelAuth({ children }: { children: ReactNode }) {
                 ? 'Настройте вход владельца'
                 : 'Вход в панель'}
             </h1>
-            <p>Ваши машины, проекты и агенты — в личном пространстве.</p>
+            {session?.configured && (
+              <p>Войдите с логином и паролем владельца.</p>
+            )}
             {!session && !error ? (
               <div className="owner-auth-loading">
                 <LoaderCircle size={18} className="spin" /> Проверяем
@@ -157,6 +163,7 @@ export function PanelAuth({ children }: { children: ReactNode }) {
                   try {
                     await authRequest('login', { username, password });
                     setPassword('');
+                    setShowPassword(false);
                     await refresh();
                   } catch (e) {
                     setError((e as Error).message);
@@ -178,25 +185,38 @@ export function PanelAuth({ children }: { children: ReactNode }) {
                     disabled={busy}
                   />
                 </Field>
-                <Field label="Пароль">
-                  <input
-                    name="password"
-                    type="password"
-                    autoComplete="current-password"
-                    value={password}
-                    onChange={(e) => setPassword(e.target.value)}
-                    required
-                    maxLength={1024}
-                    disabled={busy}
-                  />
-                </Field>
+                <div className="hub-field">
+                  <label htmlFor="owner-password">Пароль</label>
+                  <div className="password-input">
+                    <input
+                      id="owner-password"
+                      name="password"
+                      type={showPassword ? 'text' : 'password'}
+                      autoComplete="current-password"
+                      value={password}
+                      onChange={(e) => setPassword(e.target.value)}
+                      required
+                      maxLength={1024}
+                      disabled={busy}
+                    />
+                    <button
+                      type="button"
+                      aria-label={
+                        showPassword ? 'Скрыть пароль' : 'Показать пароль'
+                      }
+                      onClick={() => setShowPassword(!showPassword)}
+                    >
+                      {showPassword ? <EyeOff size={17} /> : <Eye size={17} />}
+                    </button>
+                  </div>
+                </div>
                 <ErrorText error={error} />
                 <Submit busy={busy}>Войти</Submit>
               </form>
             ) : (
               <ErrorText error={error} />
             )}
-            {(!session || session.configured === false) && (
+            {((!session && error) || session?.configured === false) && (
               <button
                 className="hub-button"
                 type="button"
@@ -207,14 +227,16 @@ export function PanelAuth({ children }: { children: ReactNode }) {
                 <RefreshCw size={14} /> Проверить подключение
               </button>
             )}
-            <div className="owner-auth-note">
-              <ShieldCheck size={15} />
-              <span>
+            <details className="access-help">
+              <summary>
+                Как восстановить доступ? <ChevronDown size={16} />
+              </summary>
+              <p>
                 Данные для первого входа выдаются при установке. Восстановить
                 доступ можно командой <code>npm run auth:reset</code> на машине
                 панели.
-              </span>
-            </div>
+              </p>
+            </details>
           </div>
         </main>
       )}
@@ -261,153 +283,171 @@ export function OwnerSettings() {
       clearInterval(timer);
     };
   }, []);
+  const address = auth.session.publicUrl || auth.session.origin || '';
   return (
-    <section className="detail-card owner-settings">
-      <div className="section-title">
-        <h2>Доступ к панели</h2>
-        <ShieldCheck size={18} />
-      </div>
-      <div className="owner-session-summary">
-        <div>
-          <strong>{auth.session.user?.username}</strong>
-          <small>
-            {auth.session.secure
-              ? 'HTTPS · защищённое соединение'
-              : 'Локальное подключение · сеть не открыта'}
-          </small>
-        </div>
-        <button
-          className="hub-button"
-          disabled={busy}
-          onClick={() =>
-            void auth.logout().catch((e: Error) => setError(e.message))
-          }
-        >
-          <LogOut size={14} /> Выйти
-        </button>
-      </div>
-      <Field label="Адрес панели">
-        <input
-          value={auth.session.publicUrl || auth.session.origin || ''}
-          readOnly
-          aria-readonly="true"
-        />
-      </Field>
-      <output className="owner-certificate">
-        <strong>
-          {!certificate
-            ? 'Проверяем сертификат…'
-            : !certificate.enabled
-              ? 'Локальный режим'
-              : certificate.state === 'valid'
-                ? 'Сертификат HTTPS действителен'
-                : certificate.state === 'expiring'
-                  ? 'Срок сертификата скоро истекает'
-                  : 'Не удалось проверить сертификат HTTPS'}
-        </strong>
-        {certificate?.expiresAt && (
-          <span>
-            Действует до{' '}
-            {new Date(certificate.expiresAt).toLocaleString('ru-RU')}
-            {certificate.issuer ? ` · ${certificate.issuer}` : ''}
+    <section className="settings-section owner-settings">
+      <header className="settings-section-heading">
+        <h2>Доступ владельца</h2>
+      </header>
+      <div className="settings-surface">
+        <div className="settings-owner-row">
+          <span className="settings-row-icon">
+            <UserRound size={19} />
           </span>
-        )}
-        <small>
-          {certificate?.managed
-            ? 'Caddy автоматически получает и продлевает сертификат. Панель проверяет его каждую минуту, пока открыты настройки.'
-            : certificate?.enabled
-              ? 'Сертификатом управляет ваш HTTPS-прокси. Проверьте его настройку и доступность.'
-              : certificate
-                ? 'Панель доступна только с этой машины. Сертификат не требуется.'
-                : ''}
-        </small>
-      </output>
-      <form
-        className="hub-form"
-        onSubmit={async (e) => {
-          e.preventDefault();
-          setError('');
-          setNotice('');
-          if (newPassword !== confirmation) {
-            setError('Новые пароли не совпадают.');
-            return;
-          }
-          setBusy(true);
-          try {
-            await auth.change({ username, currentPassword, newPassword });
-            setCurrent('');
-            setNew('');
-            setConfirmation('');
-            setNotice('Данные для входа обновлены. Другие сессии завершены.');
-          } catch (e) {
-            setError((e as Error).message);
-          } finally {
-            setBusy(false);
-          }
-        }}
-      >
-        <Field label="Логин владельца">
-          <input
-            value={username}
-            onChange={(e) => setUsername(e.target.value)}
-            required
-            minLength={3}
-            maxLength={64}
-            autoComplete="username"
+          <div>
+            <h3>{auth.session.user?.username}</h3>
+            <p>
+              {auth.session.secure
+                ? 'Защищённое соединение HTTPS'
+                : 'Соединение по HTTP'}
+            </p>
+          </div>
+          <button
+            type="button"
+            className="hub-button"
             disabled={busy}
-          />
-        </Field>
-        <Field label="Текущий пароль">
-          <input
-            type="password"
-            value={currentPassword}
-            onChange={(e) => setCurrent(e.target.value)}
-            autoComplete="current-password"
-            required
-            disabled={busy}
-          />
-        </Field>
-        <Field
-          label="Новый пароль"
-          hint="Не менее 15 символов. Оставьте пустым, чтобы изменить только логин."
+            onClick={() =>
+              void auth.logout().catch((e: Error) => setError(e.message))
+            }
+          >
+            <LogOut size={14} /> Выйти
+          </button>
+        </div>
+        <div className="settings-address">
+          <strong>Адрес панели</strong>
+          <div>
+            <code>{address}</code>
+            {address && (
+              <CopyButton value={address} label="Скопировать адрес панели" />
+            )}
+          </div>
+        </div>
+        <div className="settings-info-row connection-info">
+          <span className="settings-row-icon">
+            <ShieldCheck size={18} />
+          </span>
+          <output className="settings-certificate">
+            <strong>
+              {!certificate
+                ? 'Проверяем сертификат…'
+                : !certificate.enabled
+                  ? 'Публичный HTTPS-адрес не задан'
+                  : certificate.state === 'valid'
+                    ? 'Сертификат HTTPS действителен'
+                    : certificate.state === 'expiring'
+                      ? 'Срок сертификата скоро истекает'
+                      : 'Не удалось проверить сертификат HTTPS'}
+            </strong>
+            {certificate?.expiresAt && (
+              <span>
+                Действует до{' '}
+                {new Date(certificate.expiresAt).toLocaleString('ru-RU')}
+                {certificate.issuer ? ` · ${certificate.issuer}` : ''}
+              </span>
+            )}
+            <small>
+              {certificate?.managed
+                ? 'Caddy автоматически получает и продлевает сертификат. Панель проверяет его каждую минуту, пока открыты настройки.'
+                : certificate?.enabled
+                  ? 'Сертификатом управляет ваш HTTPS-прокси. Проверьте его настройку и доступность.'
+                  : certificate
+                    ? 'Проверка сертификата включается при настройке публичного HTTPS-адреса панели.'
+                    : ''}
+            </small>
+          </output>
+        </div>
+      </div>
+      <details className="access-help settings-credentials">
+        <summary>
+          Изменить логин или пароль <ChevronDown size={16} />
+        </summary>
+        <form
+          className="hub-form"
+          onSubmit={async (e) => {
+            e.preventDefault();
+            setError('');
+            setNotice('');
+            if (newPassword !== confirmation) {
+              setError('Новые пароли не совпадают.');
+              return;
+            }
+            setBusy(true);
+            try {
+              await auth.change({ username, currentPassword, newPassword });
+              setCurrent('');
+              setNew('');
+              setConfirmation('');
+              setNotice('Данные для входа обновлены. Другие сессии завершены.');
+            } catch (e) {
+              setError((e as Error).message);
+            } finally {
+              setBusy(false);
+            }
+          }}
         >
-          <input
-            type="password"
-            value={newPassword}
-            onChange={(e) => setNew(e.target.value)}
-            minLength={15}
-            maxLength={1024}
-            autoComplete="new-password"
-            disabled={busy}
-          />
-        </Field>
-        <Field label="Повторите новый пароль">
-          <input
-            type="password"
-            value={confirmation}
-            onChange={(e) => setConfirmation(e.target.value)}
-            autoComplete="new-password"
-            disabled={busy}
-            required={!!newPassword}
-          />
-        </Field>
-        <p className="hub-note">
-          Изменение требует текущий пароль и завершает остальные входы, а также
-          открытые SSH-консоли. Чаты и данные сохраняются. Обычная сессия
-          действует до 12 часов.
-        </p>
-        <ErrorText error={error} />
-        {notice && <output className="owner-settings-notice">{notice}</output>}
-        <Submit
-          busy={busy}
-          disabled={
-            !currentPassword ||
-            (!newPassword && username === auth.session.user?.username)
-          }
-        >
-          Сохранить данные для входа
-        </Submit>
-      </form>
+          <Field label="Логин владельца">
+            <input
+              value={username}
+              onChange={(e) => setUsername(e.target.value)}
+              required
+              minLength={3}
+              maxLength={64}
+              autoComplete="username"
+              disabled={busy}
+            />
+          </Field>
+          <Field label="Текущий пароль">
+            <input
+              type="password"
+              value={currentPassword}
+              onChange={(e) => setCurrent(e.target.value)}
+              autoComplete="current-password"
+              required
+              disabled={busy}
+            />
+          </Field>
+          <Field
+            label="Новый пароль"
+            hint="Не менее 15 символов. Оставьте пустым, чтобы изменить только логин."
+          >
+            <input
+              type="password"
+              value={newPassword}
+              onChange={(e) => setNew(e.target.value)}
+              minLength={15}
+              maxLength={1024}
+              autoComplete="new-password"
+              disabled={busy}
+            />
+          </Field>
+          <Field label="Повторите новый пароль">
+            <input
+              type="password"
+              value={confirmation}
+              onChange={(e) => setConfirmation(e.target.value)}
+              autoComplete="new-password"
+              disabled={busy}
+              required={!!newPassword}
+            />
+          </Field>
+          <p className="hub-note">
+            Изменение требует текущий пароль и завершает остальные входы, а
+            также открытые SSH-консоли. Чаты и данные сохраняются. Обычная
+            сессия действует до 12 часов.
+          </p>
+          <Submit
+            busy={busy}
+            disabled={
+              !currentPassword ||
+              (!newPassword && username === auth.session.user?.username)
+            }
+          >
+            Сохранить данные для входа
+          </Submit>
+        </form>
+      </details>
+      <ErrorText error={error} />
+      {notice && <output className="owner-settings-notice">{notice}</output>}
     </section>
   );
 }

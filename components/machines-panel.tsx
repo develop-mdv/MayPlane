@@ -23,6 +23,7 @@ import {
   Unplug,
   ChevronRight,
   LoaderCircle,
+  MoreHorizontal,
   Settings2,
   Trash2,
 } from 'lucide-react';
@@ -36,6 +37,7 @@ import {
   type AgentStatus,
 } from '@/lib/hub';
 import { Field, Modal, Submit, CopyButton, ErrorText } from './hub-ui';
+import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from './ui/dropdown-menu';
 import { ServerConsole } from './server-console';
 import { agentPathSetup } from '@/lib/agent-path.mjs';
 import { formatBytes, resourceSummary } from '@/lib/machine-metrics.mjs';
@@ -1100,15 +1102,6 @@ export function MachinesPanel({
                 <Boxes size={15} />
                 Сервисы <span>{hub.data.services.filter((s) => s.machineId === machine.id).length}</span>
               </button>
-              <button
-                type="button"
-                className="hub-button danger"
-                onClick={() => onRemove(machine)}
-                aria-label={`Удалить машину ${machine.name}`}
-              >
-                <Trash2 size={15} />
-                Удалить
-              </button>
               {machine.consoleUrl && (
                 <a
                   className="hub-button"
@@ -1123,10 +1116,6 @@ export function MachinesPanel({
               )}
               {!machine.transport || machine.transport === 'ssh' ? (
                 <>
-                  <button className="hub-button" onClick={() => onAdd(machine)}>
-                    <Settings2 size={16} />
-                    Настройки
-                  </button>
                   <button
                     className="hub-button primary"
                     disabled={!available(machine)}
@@ -1147,6 +1136,15 @@ export function MachinesPanel({
                     : 'Исходящее WSS'}
                 </span>
               )}
+              <DropdownMenu>
+                <DropdownMenuTrigger className="icon-button" aria-label="Действия с машиной"><MoreHorizontal size={18} /></DropdownMenuTrigger>
+                <DropdownMenuContent align="end" className="workspace-menu">
+                  {(!machine.transport || machine.transport === 'ssh') && (
+                    <DropdownMenuItem onClick={() => onAdd(machine)}><Settings2 />Настройки подключения</DropdownMenuItem>
+                  )}
+                  <DropdownMenuItem variant="destructive" onClick={() => onRemove(machine)}><Trash2 />Удалить машину</DropdownMenuItem>
+                </DropdownMenuContent>
+              </DropdownMenu>
             </div>
           </div>
           <Suspense
@@ -1370,21 +1368,19 @@ export function MachinesPanel({
         <>
           <div className="page-heading">
             <div>
-              <span className="eyebrow">ИНФРАСТРУКТУРА</span>
               <h1>
                 Серверы и компьютеры
                 <span className="heading-count">{ws.data.servers.length}</span>
               </h1>
-              <p>Вся инфраструктура под рукой, где бы она ни находилась.</p>
             </div>
-            <div className="heading-actions">
+            {ws.data.servers.length > 0 && <div className="heading-actions">
               <button
                 className="hub-button"
                 onClick={onPair}
                 disabled={!ws.connection}
               >
                 <Monitor size={16} />
-                Подключить машину
+                Подключить компьютер
               </button>
               <button
                 className="hub-button primary"
@@ -1394,9 +1390,9 @@ export function MachinesPanel({
                 <Plus size={17} />
                 Добавить сервер
               </button>
-            </div>
+            </div>}
           </div>
-          <div className="overview-strip">
+          {ws.data.servers.length > 0 && <div className="overview-strip">
             <div>
               <i className="live-dot" />
               <strong>{ws.data.servers.filter(available).length}</strong>
@@ -1413,7 +1409,7 @@ export function MachinesPanel({
               <ShieldCheck size={15} />
               <span>Зашифрованные подключения</span>
             </div>
-          </div>
+          </div>}
           {ws.data.servers.length ? (
             <div className="machine-grid">
               {ws.data.servers.map((m) => (
@@ -1487,11 +1483,6 @@ export function MachinesPanel({
                   </footer>
                 </button>
               ))}
-              <button className="add-machine-card" onClick={() => onAdd()}>
-                <Plus size={24} />
-                <strong>Ещё одна машина</strong>
-                <span>VPS, сервер или домашний ПК</span>
-              </button>
             </div>
           ) : (
             <div className="empty-state">
@@ -1517,20 +1508,10 @@ export function MachinesPanel({
                 onClick={onPair}
                 disabled={!ws.connection}
               >
-                Подключить ПК или хост панели
+                Подключить компьютер
               </button>
             </div>
           )}
-          <div className="connection-explainer">
-            <ShieldCheck size={21} />
-            <div>
-              <strong>Ваши машины. Ваши аккаунты. Ваш контроль.</strong>
-              <p>
-                SSH для серверов, исходящий коннектор для личного ПК. Внешние
-                порты агентов открывать не нужно.
-              </p>
-            </div>
-          </div>
         </>
       )}
       <ServerConsole

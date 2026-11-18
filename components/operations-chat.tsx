@@ -3,7 +3,7 @@ import { useEffect, useId, useRef, useState } from 'react';
 import { MessageSquare, Send, Square, Terminal } from 'lucide-react';
 import { Button } from './ui/button';
 import { Textarea } from './ui/textarea';
-import { NativeSelect, NativeSelectOption } from './ui/native-select';
+import { WorkspaceSelect } from './workspace-select';
 import {
   Dialog,
   DialogContent,
@@ -219,24 +219,18 @@ export function OperationsChat({
         <div className="chat-composer-actions">
           <label htmlFor={selectId}>
             <span>Модель</span>
-            <NativeSelect
+            <WorkspaceSelect
               id={selectId}
               value={selectedModelId}
-              onChange={(event) => setModelId(event.target.value)}
+              onValueChange={setModelId}
               disabled={sending || !!active || !models.length}
               aria-label="Модель для сообщения"
-            >
-              {!models.length && (
-                <NativeSelectOption value="">
-                  Нет доступных моделей
-                </NativeSelectOption>
-              )}
-              {models.map((model) => (
-                <NativeSelectOption key={model.id} value={model.id}>
-                  {model.name} · {model.model}
-                </NativeSelectOption>
-              ))}
-            </NativeSelect>
+              placeholder="Нет доступных моделей"
+              options={models.map((model) => ({
+                value: model.id,
+                label: `${model.name} · ${model.model}`,
+              }))}
+            />
           </label>
           <Button
             className="primary-button"

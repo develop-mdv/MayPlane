@@ -2610,7 +2610,7 @@ h2 {
   gap: 5px;
   min-width: 0;
 }
-.chat-composer-actions [data-slot='native-select-wrapper'] {
+.chat-composer-actions .workspace-select-trigger {
   max-width: 100%;
   width: min(420px, 100%);
 }
@@ -2619,7 +2619,7 @@ h2 {
     align-items: stretch;
     flex-direction: column;
   }
-  .chat-composer-actions [data-slot='native-select-wrapper'],
+  .chat-composer-actions .workspace-select-trigger,
   .chat-composer-actions button {
     width: 100%;
   }

@@ -1,4 +1,5 @@
 'use client';
+import { WorkspaceSelect } from './workspace-select';
 import { useEffect, useRef, useState } from 'react';
 import {
   ArrowLeft,
@@ -592,20 +593,15 @@ function AgentPane({
         <div className="files-turn-picker">
           <label>
             Запрос{' '}
-            <select
+            <WorkspaceSelect
+              aria-label="Запрос"
               value={turn.id}
-              onChange={(e) => setRequestedTurn(e.target.value)}
-            >
-              {turns.data?.turns.map((item) => (
-                <option key={item.id} value={item.id}>
-                  {new Date(item.at).toLocaleString('ru', {
-                    dateStyle: 'short',
-                    timeStyle: 'short',
-                  })}{' '}
-                  · {item.title || 'Правки агента'}
-                </option>
-              ))}
-            </select>
+              onValueChange={setRequestedTurn}
+              options={(turns.data?.turns || []).map((item) => ({
+                value: item.id,
+                label: `${new Date(item.at).toLocaleString('ru', { dateStyle: 'short', timeStyle: 'short' })} · ${item.title || 'Запрос агента'}`,
+              }))}
+            />
           </label>
           <code title={turn.cwd}>{turn.cwd}</code>
         </div>

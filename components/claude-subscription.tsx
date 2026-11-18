@@ -1,4 +1,5 @@
 'use client';
+import { WorkspaceSelect } from './workspace-select';
 import { useCallback, useEffect, useState } from 'react';
 import {
   Check,
@@ -159,13 +160,13 @@ export function ClaudeSubscription({
             : 'Сначала добавьте машину в разделе «Серверы».'
         }
       >
-        <select
+        <WorkspaceSelect
           aria-label="Машина для подписки Claude"
           required
           value={machineId}
           disabled={busy || !!taskId}
-          onChange={(e) => {
-            const id = e.target.value;
+          onValueChange={(choice) => {
+            const id = choice;
             setMachineId(id);
             setStatus(null);
             setTask(null);
@@ -183,19 +184,18 @@ export function ClaudeSubscription({
                 (next.transport !== 'connector' || next.status === 'online'),
             );
           }}
-        >
-          <option value="" disabled>
-            Выберите машину для входа
-          </option>
-          {machines.map((m) => (
-            <option key={m.id} value={m.id}>
-              {m.name}
-              {m.transport === 'connector' && m.status !== 'online'
-                ? ' · не в сети'
-                : ''}
-            </option>
-          ))}
-        </select>
+          options={[
+            { value: '', label: 'Выберите машину для входа', disabled: true },
+            ...machines.map((m) => ({
+              value: m.id,
+              label:
+                m.name +
+                (m.transport === 'connector' && m.status !== 'online'
+                  ? ' · Не в сети'
+                  : ''),
+            })),
+          ]}
+        />
       </Field>
       <p className="hub-note">
         Подписка Claude подключается без API-ключа. Сессия остаётся на выбранной

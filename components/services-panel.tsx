@@ -1,6 +1,7 @@
 'use client';
+import { WorkspaceSelect } from './workspace-select';
 
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   ArrowLeft,
   ArrowUpRight,
@@ -9,10 +10,12 @@ import {
   Folder,
   MessageSquare,
   Monitor,
+  MoreHorizontal,
   Pencil,
   Plus,
   RefreshCw,
   Settings2,
+  SlidersHorizontal,
   Trash2,
 } from 'lucide-react';
 import type { Server } from '@/lib/domain';
@@ -33,6 +36,7 @@ import { serviceHasChat, serviceProjects } from '@/lib/service-workspace.mjs';
 import { formatBytes } from '@/lib/machine-metrics.mjs';
 import { useNow } from '@/lib/use-now';
 import { CopyButton, ErrorText, Field } from './hub-ui';
+import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from './ui/dropdown-menu';
 import { ServiceDashboard } from './service-customization';
 import {
   ServiceForm,
@@ -209,21 +213,20 @@ function ServiceLogViewer({ service, hub }: { service: HubService; hub: Hub }) {
       <div className="service-log-header">
         {sources.length > 1 && (
           <Field label="Компонент">
-            <select
-              value={sourceIndex}
-              onChange={(event) => {
+            <WorkspaceSelect
+              aria-label="Компонент"
+              value={String(sourceIndex)}
+              onValueChange={(choice) => {
                 setBusy(true);
                 setError('');
                 setResult(null);
-                setSourceIndex(Number(event.target.value));
+                setSourceIndex(Number(choice));
               }}
-            >
-              {sources.map((source, index) => (
-                <option key={JSON.stringify(source)} value={index}>
-                  {serviceSourceLabel(source)}
-                </option>
-              ))}
-            </select>
+              options={sources.map((source, index) => ({
+                value: String(index),
+                label: serviceSourceLabel(source),
+              }))}
+            />
           </Field>
         )}
         <Field label="Поиск по последним 200 строкам">
@@ -490,20 +493,18 @@ function ServiceDetails({
               Открыть приложение <ArrowUpRight size={14} />
             </a>
           )}
-          <button type="button" className="hub-button" onClick={onEdit}>
-            <Pencil size={14} /> Редактировать
-          </button>
-          <button
-            type="button"
-            className="hub-button danger"
-            onClick={onRemove}
-            aria-label={'Убрать из списка ' + service.name}
-          >
-            <Trash2 size={15} />
-          </button>
+          <DropdownMenu>
+            <DropdownMenuTrigger className="hub-button" aria-label="Действия с сервисом">
+              <MoreHorizontal size={16} /> Действия
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="end" className="workspace-menu">
+              <DropdownMenuItem onClick={onEdit}><Pencil />Редактировать</DropdownMenuItem>
+              <DropdownMenuItem variant="destructive" onClick={onRemove}><Trash2 />Убрать из списка</DropdownMenuItem>
+            </DropdownMenuContent>
+          </DropdownMenu>
         </div>
       </div>
-      <div className="service-tabs" aria-label="Раздел карточки">
+      <fieldset className="service-tabs" aria-label="Раздел карточки">
         <button
           type="button"
           className="hub-button"
@@ -526,7 +527,7 @@ function ServiceDetails({
             Чаты и проекты
           </button>
         )}
-      </div>
+      </fieldset>
       {tab === 'workspace' && workspaceAvailable ? (
         <ServiceWorkspaceLinks projects={projects} chats={chats} onProject={onProject} onChat={onOpenChat} />
       ) : tab === 'logs' && automatic ? (
@@ -800,6 +801,7 @@ export function ServicesPanel({
   scope,
   onRemove,
   onProject,
+  onMachines,
   onMachine,
   onOpenChat,
   onNewChat,
@@ -810,32 +812,47 @@ export function ServicesPanel({
   scope: ServiceView;
   onRemove: (service: HubService) => void;
   onProject: (id: string) => void;
+  onMachines: () => void;
   onMachine: (id: string) => void;
   onOpenChat: (session: AgentSession, customizeServiceId?: string) => void;
   onNewChat: (service: HubService, customize?: boolean) => void;
   connected: boolean;
 }) {
   const { services, projects } = hub.data;
+  const pageRef = useRef<HTMLDivElement>(null);
+  const [filtersOpen, setFiltersOpen] = useState(false);
   const [machineFilter, setMachineFilter] = useState(scope.machineId || '');
   const [projectFilter, setProjectFilter] = useState(scope.projectId || '');
   const [statusFilter, setStatusFilter] = useState('');
   const [query, setQuery] = useState('');
   const [selectedId, setSelectedId] = useState(scope.serviceId || '');
+  useEffect(() => {
+    pageRef.current?.scrollTo({ top: 0 });
+  }, [selectedId]);
   const [edit, setEdit] = useState<HubService | 'new' | null>(
     scope.create ? 'new' : null,
   );
   const service = services.find((item) => item.id === selectedId);
   const machine = machines.find((item) => item.id === service?.machineId);
-  const projectLinks = new Map<string, HubProject[]>(services.map((item) => [item.id,
-    serviceProjects(item, projects, machines.find((machine) => machine.id === item.machineId)?.platform),
-  ]));
+  const projectLinks = new Map<string, HubProject[]>(
+    services.map((item) => [
+      item.id,
+      serviceProjects(
+        item,
+        projects,
+        machines.find((machine) => machine.id === item.machineId)?.platform,
+      ),
+    ]),
+  );
   const filtered = services.filter(
     (item) =>
       (!machineFilter || item.machineId === machineFilter) &&
       (!projectFilter ||
         (projectFilter === 'none'
           ? !projectLinks.get(item.id)?.length
-          : projectLinks.get(item.id)?.some((project) => project.id === projectFilter))) &&
+          : projectLinks
+              .get(item.id)
+              ?.some((project) => project.id === projectFilter))) &&
       (!statusFilter || item.status === statusFilter) &&
       (
         item.name +
@@ -849,16 +866,37 @@ export function ServicesPanel({
         .toLowerCase()
         .includes(query.trim().toLowerCase()),
   );
+  const filterCount = [machineFilter, projectFilter, statusFilter].filter(
+    Boolean,
+  ).length;
+  function clearFilters() {
+    setQuery('');
+    setMachineFilter('');
+    setProjectFilter('');
+    setStatusFilter('');
+  }
   const closeForm = useCallback(() => setEdit(null), []);
+  const addServiceButton = (
+    <button
+      type="button"
+      className="hub-button primary"
+      disabled={!connected || !machines.length}
+      onClick={() => setEdit('new')}
+    >
+      <Plus size={17} /> Добавить сервис
+    </button>
+  );
   return (
-    <div className="hub-page services-page">
+    <div className="hub-page services-page" ref={pageRef}>
       {service ? (
         <ServiceDetails
           key={service.id}
           service={service}
           machine={machine}
           projects={projectLinks.get(service.id) || []}
-          chats={hub.data.sessions.filter((chat) => serviceHasChat(service, chat, projects, machine?.platform))}
+          chats={hub.data.sessions.filter((chat) =>
+            serviceHasChat(service, chat, projects, machine?.platform),
+          )}
           hub={hub}
           connected={connected}
           onBack={() => setSelectedId('')}
@@ -876,67 +914,80 @@ export function ServicesPanel({
               <h1>
                 Сервисы <span className="heading-count">{filtered.length}</span>
               </h1>
-              <p>Приложения, боты и службы на ваших машинах.</p>
             </div>
-            <button
-              type="button"
-              className="hub-button primary"
-              disabled={!machines.length}
-              onClick={() => setEdit('new')}
-            >
-              <Plus size={17} /> Добавить сервис
-            </button>
+            {services.length > 0 && addServiceButton}
           </div>
           {!!services.length && (
-            <div className="service-filters">
+            <div className="service-filters" data-expanded={filtersOpen}>
               <Field label="Поиск">
                 <input
                   type="search"
                   value={query}
-                  placeholder="Название или источник"
+                  placeholder="Найти сервис"
                   onChange={(event) => setQuery(event.target.value)}
                 />
               </Field>
-              <Field label="Проект">
-                <select
-                  value={projectFilter}
-                  onChange={(event) => setProjectFilter(event.target.value)}
+              <button
+                type="button"
+                className="hub-button service-filter-toggle"
+                aria-expanded={filtersOpen}
+                aria-controls="service-filter-options"
+                onClick={() => setFiltersOpen(!filtersOpen)}
+              >
+                <SlidersHorizontal size={16} /> Фильтры
+                {filterCount > 0 && ` · ${filterCount}`}
+              </button>
+              <div
+                className="service-filter-options"
+                id="service-filter-options"
+              >
+                <Field label="Проект">
+                  <WorkspaceSelect
+                    aria-label="Проект"
+                    value={projectFilter}
+                    onValueChange={setProjectFilter}
+                    options={[
+                      { value: '', label: 'Все проекты' },
+                      { value: 'none', label: 'Без проекта' },
+                      ...projects.map((p) => ({ value: p.id, label: p.name })),
+                    ]}
+                  />
+                </Field>
+                <Field label="Машина">
+                  <WorkspaceSelect
+                    aria-label="Машина"
+                    value={machineFilter}
+                    onValueChange={setMachineFilter}
+                    options={[
+                      { value: '', label: 'Все машины' },
+                      ...machines.map((m) => ({ value: m.id, label: m.name })),
+                    ]}
+                  />
+                </Field>
+                <Field label="Состояние">
+                  <WorkspaceSelect
+                    aria-label="Состояние"
+                    value={statusFilter}
+                    onValueChange={setStatusFilter}
+                    options={[
+                      { value: '', label: 'Любое' },
+                      ...Object.entries(statuses).map(([value, label]) => ({
+                        value,
+                        label,
+                      })),
+                    ]}
+                  />
+                </Field>
+              </div>
+              {(query || filterCount > 0) && (
+                <button
+                  type="button"
+                  className="text-button reset-filters"
+                  onClick={clearFilters}
                 >
-                  <option value="">Все проекты</option>
-                  <option value="none">Без проекта</option>
-                  {projects.map((project) => (
-                    <option key={project.id} value={project.id}>
-                      {project.name}
-                    </option>
-                  ))}
-                </select>
-              </Field>
-              <Field label="Машина">
-                <select
-                  value={machineFilter}
-                  onChange={(event) => setMachineFilter(event.target.value)}
-                >
-                  <option value="">Все машины</option>
-                  {machines.map((machine) => (
-                    <option key={machine.id} value={machine.id}>
-                      {machine.name}
-                    </option>
-                  ))}
-                </select>
-              </Field>
-              <Field label="Состояние">
-                <select
-                  value={statusFilter}
-                  onChange={(event) => setStatusFilter(event.target.value)}
-                >
-                  <option value="">Любое</option>
-                  {Object.entries(statuses).map(([value, label]) => (
-                    <option key={value} value={value}>
-                      {label}
-                    </option>
-                  ))}
-                </select>
-              </Field>
+                  Сбросить фильтры
+                </button>
+              )}
             </div>
           )}
           {filtered.length ? (
@@ -988,9 +1039,20 @@ export function ServicesPanel({
                 {!machines.length
                   ? 'Подключите машину в разделе «Серверы».'
                   : services.length
-                    ? 'Измените фильтры или добавьте карточку.'
+                    ? 'Попробуйте другое название или сбросьте фильтры.'
                     : 'Добавьте карточку вручную или найдите приложение на сервере.'}
               </p>
+              {!machines.length ? (
+                <button
+                  className="hub-button primary"
+                  type="button"
+                  onClick={onMachines}
+                >
+                  К серверам <ChevronRight size={15} />
+                </button>
+              ) : (
+                services.length === 0 && addServiceButton
+              )}
             </div>
           )}
         </>

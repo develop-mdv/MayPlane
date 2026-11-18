@@ -1,21 +1,25 @@
 'use client';
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { WorkspaceSelect } from './workspace-select';
+import {
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+  type KeyboardEvent as ReactKeyboardEvent,
+} from 'react';
 import {
   Activity,
   ArrowLeft,
   ArrowUpRight,
   Boxes,
   ChevronRight,
-  Command,
   FileDiff,
   FolderGit2,
   FolderInput,
   FolderOpen,
-  LayoutGrid,
   Menu,
   MessageSquare,
   Monitor,
-  PanelLeftClose,
   Pencil,
   Plus,
   Search,
@@ -23,9 +27,12 @@ import {
   Settings2,
   ShieldCheck,
   SquarePen,
-  Trash2,
+  LoaderCircle,
   X,
 } from 'lucide-react';
+import { Dialog as Drawer } from '@base-ui/react/dialog';
+import { useIsMobile } from '@/hooks/use-mobile';
+import { usePanelAuth } from './panel-auth';
 import { useWorkspace } from '@/lib/use-workspace';
 import type { Server as Machine } from '@/lib/domain';
 import {
@@ -40,10 +47,22 @@ import {
 } from '@/lib/hub';
 import { serviceProjects } from '@/lib/service-workspace.mjs';
 import { AgentChat, NewSession } from './agent-chat';
-import { NewProject, SettingsPanel } from './workspace-forms';
+import {
+  NewProject,
+  SettingsPanel,
+  type SettingsSection,
+} from './workspace-forms';
 import { MachinesPanel, PairComputer, ServerForm } from './machines-panel';
-import { ProjectNavigation, ChatActions } from './project-navigation';
-import { ProjectServices, ServicesPanel, type ServiceView } from './services-panel';
+import {
+  ProjectNavigation,
+  ProjectActions,
+  ChatActions,
+} from './project-navigation';
+import {
+  ProjectServices,
+  ServicesPanel,
+  type ServiceView,
+} from './services-panel';
 import { MachineChats, type MachineChatSource } from './machine-chats';
 import { CopyButton, ErrorText, Field, Modal, Submit, Toast } from './hub-ui';
 import { RemoveObject } from './remove-object';
@@ -52,6 +71,17 @@ import type { WorkspaceMode } from '@/lib/workspace-files';
 
 type View = 'chat' | 'projects' | 'services' | 'servers' | 'settings';
 type ChatTab = 'panel' | 'machine';
+const sections = [
+  { id: 'chat', label: 'Чаты', icon: MessageSquare },
+  { id: 'projects', label: 'Проекты', icon: FolderGit2 },
+  { id: 'services', label: 'Сервисы', icon: Boxes },
+  { id: 'servers', label: 'Серверы', icon: Server },
+] as const;
+const chatPlural = new Intl.PluralRules('ru');
+function chatCount(count: number) {
+  const form = chatPlural.select(count);
+  return `${count} ${form === 'one' ? 'чат' : form === 'few' ? 'чата' : 'чатов'}`;
+}
 export default function WorkspaceMain() {
   const ws = useWorkspace(),
     hub = useHub(ws);
@@ -59,11 +89,29 @@ export default function WorkspaceMain() {
     [selectedSession, setSelectedSession] = useState<string | null>(null),
     [selectedMachine, setSelectedMachine] = useState<string | null>(null),
     [scope, setScope] = useState('all');
+  const mobile = useIsMobile();
+  const shellRef = useRef<HTMLDivElement>(null);
+  const menuRef = useRef<HTMLButtonElement>(null);
+  const { session: owner } = usePanelAuth();
+  const [settingsSection, setSettingsSection] =
+    useState<SettingsSection>('accounts');
+  const listOrigin = useRef({
+    scope: 'all',
+    archive: false,
+    tab: 'panel' as ChatTab,
+  });
   const [chatTab, setChatTab] = useState<ChatTab>('panel');
-  const [machineChatSource, setMachineChatSource] =
-    useState<MachineChatSource>({ provider: 'codex' });
-  const [serviceView, setServiceView] = useState<ServiceView>({});
-  const [sessionService, setSessionService] = useState<{ service: HubService; customize: boolean } | null>(null);
+  const [machineChatSource, setMachineChatSource] = useState<MachineChatSource>(
+    { provider: 'codex' },
+  );
+  const [serviceRoute, setServiceRoute] = useState({
+    scope: {} as ServiceView,
+    visit: 0,
+  });
+  const [sessionService, setSessionService] = useState<{
+    service: HubService;
+    customize: boolean;
+  } | null>(null);
   const [sessionMachine, setSessionMachine] = useState<Machine | undefined>();
   const [chatCustomizationId, setChatCustomizationId] = useState<string>();
   const [newProject, setNewProject] = useState(false),
@@ -89,8 +137,14 @@ export default function WorkspaceMain() {
     [removal, setRemoval] = useState<RemovalTarget | null>(null),
     [modalBusy, setModalBusy] = useState(false),
     [modalError, setModalError] = useState('');
-  const [browser, setBrowser] = useState<{ id: string; session: boolean; mode: WorkspaceMode; turn?: string } | null>(null);
+  const [browser, setBrowser] = useState<{
+    id: string;
+    session: boolean;
+    mode: WorkspaceMode;
+    turn?: string;
+  } | null>(null);
   const searchInput = useRef<HTMLInputElement>(null);
+  const searchResults = useRef<HTMLDivElement>(null);
   const session = hub.data.sessions.find((s) => s.id === selectedSession);
   const project = hub.data.projects.find(
     (p) => p.id === (session ? session.projectId : scope),
@@ -98,10 +152,22 @@ export default function WorkspaceMain() {
   const machine = ws.data.servers.find(
     (m) => m.id === (session?.machineId || project?.machineId),
   );
-  const browserChat = browser?.session ? hub.data.sessions.find((s) => s.id === browser.id) : undefined;
-  const browserProject = browser ? hub.data.projects.find((p) => p.id === (browser.session ? browserChat?.projectId : browser.id)) : undefined;
+  const browserChat = browser?.session
+    ? hub.data.sessions.find((s) => s.id === browser.id)
+    : undefined;
+  const browserProject = browser
+    ? hub.data.projects.find(
+        (p) => p.id === (browser.session ? browserChat?.projectId : browser.id),
+      )
+    : undefined;
   const browserMachineId = browserChat?.machineId || browserProject?.machineId;
   const connected = !!ws.connection && !ws.error;
+  const inConversation = view === 'chat' && !!session;
+  const sectionName =
+    sections.find((item) => item.id === view)?.label || 'Настройки';
+  const ownerName = owner.user?.username || 'Владелец';
+  const listLoading =
+    ws.initializing || (connected && !hub.ready && !hub.error);
   const closeToast = useCallback(() => setToast(''), []);
   const allChats = scope === 'all' && !archive;
   const showMachineChats = allChats && chatTab === 'machine';
@@ -112,28 +178,70 @@ export default function WorkspaceMain() {
         (scope === 'loose' ? !s.projectId : s.projectId === scope)),
   );
   const running = hub.data.sessions.filter(activeSession).length;
+  const showCreateChat =
+    view === 'chat' &&
+    !session &&
+    !archive &&
+    (visible.length > 0 || showMachineChats);
   useEffect(() => {
     const listener = (e: KeyboardEvent) => {
-      if ((e.ctrlKey || e.metaKey) && e.key === 'k') {
+      if (
+        (e.ctrlKey || e.metaKey) &&
+        (e.code === 'KeyK' || e.key.toLowerCase() === 'k')
+      ) {
+        if (document.querySelector('[role="dialog"]') && !search) return;
         e.preventDefault();
-        setSearch((v) => !v);
-      }
-      if (e.key === 'Escape') {
         setSidebar(false);
-        setSearch(false);
+        setQuery('');
+        setSearch((value) => !value);
       }
     };
     window.addEventListener('keydown', listener);
     return () => window.removeEventListener('keydown', listener);
-  }, []);
+  }, [search]);
   useEffect(() => {
     if (search) searchInput.current?.focus();
   }, [search]);
   function navigate(next: View, services: ServiceView = {}) {
     setView(next);
-    if (next === 'services') setServiceView(services);
+    setInfo(false);
+    if (next === 'services')
+      setServiceRoute(({ visit }) => ({ scope: services, visit: visit + 1 }));
     setSidebar(false);
     setError('');
+  }
+  function focusSearchResult(event: ReactKeyboardEvent<HTMLButtonElement>) {
+    if (event.key !== 'ArrowDown' && event.key !== 'ArrowUp') return;
+    event.preventDefault();
+    const button = event.currentTarget;
+    const next =
+      event.key === 'ArrowDown'
+        ? button.nextElementSibling
+        : button.previousElementSibling;
+    if (next instanceof HTMLButtonElement) next.focus();
+    else if (event.key === 'ArrowUp') searchInput.current?.focus();
+  }
+  function openSearch() {
+    setSidebar(false);
+    setQuery('');
+    setSearch(true);
+  }
+  function openAccounts() {
+    setSettingsSection('accounts');
+    navigate('settings');
+  }
+  function openSection(next: View) {
+    if (next === 'chat') return openChatList();
+    if (next === 'servers') setSelectedMachine(null);
+    navigate(next);
+  }
+  function backToChats() {
+    const origin = listOrigin.current;
+    setScope(origin.scope);
+    setArchive(origin.archive);
+    setChatTab(origin.tab);
+    setSelectedSession(null);
+    navigate('chat');
   }
   function openChatList(tab: ChatTab = 'panel') {
     setScope('all');
@@ -147,6 +255,12 @@ export default function WorkspaceMain() {
     customizeServiceId?: string,
     tab: ChatTab = 'panel',
   ) {
+    listOrigin.current =
+      tab === 'machine'
+        ? { scope: 'all', archive: false, tab }
+        : view === 'chat' && !session
+          ? { scope, archive, tab: chatTab }
+          : { scope: s.projectId || 'all', archive: s.archived, tab: 'panel' };
     setSelectedSession(s.id);
     setChatCustomizationId(customizeServiceId);
     setChatTab(tab);
@@ -156,16 +270,20 @@ export default function WorkspaceMain() {
     setQuery('');
     navigate('chat');
   }
-  function selectProject(id: string | null) {
+  function selectProject(id: string | null, archived = false) {
+    setArchive(archived);
     setScope(id || 'loose');
     setSelectedSession(null);
     setChatTab('panel');
     navigate('chat');
   }
   function startSession(id?: string | null) {
+    setSidebar(false);
     setSessionService(null);
     setSessionMachine(undefined);
-    setSessionProject(id === undefined ? project?.id || null : id);
+    setSessionProject(
+      id === undefined ? (view === 'chat' ? project?.id || null : null) : id,
+    );
     setNewSession(true);
   }
   function startServiceChat(service: HubService, customize = false) {
@@ -181,21 +299,31 @@ export default function WorkspaceMain() {
     setNewSession(true);
   }
   function servicesInProject(project: HubProject) {
-    return hub.data.services.filter((service) => serviceProjects(
-      service, [project], ws.data.servers.find((item) => item.id === service.machineId)?.platform,
-    ).length > 0);
+    return hub.data.services.filter(
+      (service) =>
+        serviceProjects(
+          service,
+          [project],
+          ws.data.servers.find((item) => item.id === service.machineId)
+            ?.platform,
+        ).length > 0,
+    );
   }
   function renameChat(s: AgentSession) {
+    setSidebar(false);
     setEdit({ kind: 'chat', id: s.id, title: s.title });
     setEditTitle(s.title);
     setModalError('');
   }
   function renameProject(p: HubProject) {
+    setSidebar(false);
     setEdit({ kind: 'project', id: p.id, title: p.name });
     setEditTitle(p.name);
     setModalError('');
   }
   function moveChat(s: AgentSession) {
+    setSidebar(false);
+    setInfo(false);
     setMove(s);
     setMoveProject(s.projectId || '');
     setModalError('');
@@ -210,188 +338,253 @@ export default function WorkspaceMain() {
     }
   }
   function removeFolder(p: HubProject) {
+    setSidebar(false);
     setRemoval({ kind: 'project', id: p.id, name: p.name });
   }
   function deleteChat(s: AgentSession) {
+    setSidebar(false);
     setRemoval({ kind: 'chat', id: s.id, name: s.title });
   }
   const contextPath = session?.cwd || project?.path;
   const scopeTitle =
-    project?.name ||
-    (scope === 'loose'
-      ? 'Чаты без проекта'
-      : archive
-        ? 'Архив чатов'
-        : 'Чаты');
+    (archive && project ? `Архив · ${project.name}` : project?.name) ||
+    (scope === 'loose' ? 'Чаты без проекта' : archive ? 'Архив чатов' : 'Чаты');
+  const searchTerm = query.trim().toLocaleLowerCase('ru');
   const searchProjects = hub.data.projects.filter((p) =>
-    p.name.toLowerCase().includes(query.toLowerCase()),
+    p.name.toLocaleLowerCase('ru').includes(searchTerm),
   );
   const searchChats = hub.data.sessions.filter((s) =>
-    s.title.toLowerCase().includes(query.toLowerCase()),
+    s.title.toLocaleLowerCase('ru').includes(searchTerm),
   );
   const searchMachines = ws.data.servers.filter((m) =>
-    m.name.toLowerCase().includes(query.toLowerCase()),
+    m.name.toLocaleLowerCase('ru').includes(searchTerm),
   );
   const searchServices = hub.data.services.filter((s) =>
-    s.name.toLowerCase().includes(query.toLowerCase()),
+    s.name.toLocaleLowerCase('ru').includes(searchTerm),
   );
-  return (
-    <div className="workspace-app">
-      <aside className={`workspace-sidebar ${sidebar ? 'mobile-open' : ''}`}>
-        <div className="brand-row">
+  const inspectorBody =
+    info && session ? (
+      <>
+        <span className="inspector-project-icon">
+          <FolderGit2 size={27} />
+        </span>
+        <h3>{project?.name || 'Без проекта'}</h3>
+        <div className="inspector-field">
+          <span>Машина</span>
           <button
-            className="brand"
-            aria-label="MayPlane — главная"
-            onClick={() => openChatList()}
+            className="text-button"
+            onClick={() => {
+              setSelectedMachine(session.machineId);
+              navigate('servers');
+            }}
           >
-            <span className="brand-icon">
-              <Command size={19} />
-            </span>
-            <span>
-              MayPlane<span className="brand-period">.</span>
-            </span>
-          </button>
-          <button
-            className="icon-button sidebar-close"
-            aria-label="Закрыть меню"
-            onClick={() => setSidebar(false)}
-          >
-            <PanelLeftClose size={17} />
+            <Monitor size={14} />
+            {machine?.name}
+            <ArrowUpRight size={13} />
           </button>
         </div>
+        <div className="inspector-field">
+          <span>Рабочая папка</span>
+          <div className="copy-code">
+            <code>{contextPath}</code>
+            {contextPath && <CopyButton value={contextPath} />}
+          </div>
+        </div>
+        <div className="inspector-field">
+          <span>Агент</span>
+          <strong>{providerNames[session.provider]}</strong>
+        </div>
+        <div className="inspector-field">
+          <span>Доступ</span>
+          <p>
+            <ShieldCheck size={14} />
+            {session.mode === 'read-only'
+              ? 'Только чтение'
+              : 'Дополнительные права по запросу'}
+          </p>
+        </div>
         <button
-          className="new-chat-button"
-          disabled={!connected}
-          onClick={() => startSession()}
+          className="hub-button"
+          disabled={activeSession(session)}
+          onClick={() => moveChat(session)}
         >
-          <SquarePen size={17} />
-          Новый чат<span>+</span>
+          <FolderInput size={14} />
+          Изменить проект
         </button>
-        <button className="sidebar-search" onClick={() => setSearch(true)}>
-          <Search size={15} />
-          <span>Поиск по пространству</span>
-          <kbd>⌃ K</kbd>
+        <p className="inspector-note">
+          Проект определяет рабочую папку. Для переноса на другую машину
+          создайте новый чат.
+        </p>
+      </>
+    ) : null;
+  const sidebarContents = (
+    <>
+      <div className="brand-row">
+        <button
+          className="brand"
+          aria-label="MayPlane — главная"
+          onClick={() => openChatList()}
+        >
+          <span className="workspace-brand-mark" aria-hidden="true" />
+          <span>
+            MayPlane<span className="brand-period">.</span>
+          </span>
         </button>
+        <button
+          className="icon-button sidebar-close"
+          aria-label="Закрыть меню"
+          onClick={() => setSidebar(false)}
+        >
+          <X size={18} />
+        </button>
+      </div>
+      <button
+        className={`new-chat-button${showCreateChat ? ' is-primary' : ''}`}
+        disabled={!connected}
+        onClick={() => startSession()}
+      >
+        <SquarePen size={17} />
+        Новый чат
+      </button>
+      {!mobile && (
         <nav className="main-nav" aria-label="Главная навигация">
-          {(
-            [
-              { id: 'chat', label: 'Чаты', icon: MessageSquare },
-              { id: 'projects', label: 'Проекты', icon: FolderGit2 },
-              { id: 'services', label: 'Сервисы', icon: Boxes },
-              { id: 'servers', label: 'Серверы', icon: Server },
-            ] as const
-          ).map((n) => (
+          {sections.map(({ id, label, icon: Icon }) => (
             <button
-              key={n.id}
-              className={view === n.id ? 'active' : ''}
-              onClick={() => (n.id === 'chat' ? openChatList() : navigate(n.id))}
+              key={id}
+              className={view === id ? 'active' : ''}
+              aria-current={view === id ? 'page' : undefined}
+              onClick={() => openSection(id)}
             >
-              <n.icon size={17} />
-              <span>{n.label}</span>
-              {n.id === 'servers' && <small>{ws.data.servers.length}</small>}
-              {n.id === 'chat' && running > 0 && (
-                <span className="running-count">{running}</span>
+              <Icon size={18} />
+              <span>{label}</span>
+              {id === 'servers' && <small>{ws.data.servers.length}</small>}
+              {id === 'chat' && running > 0 && (
+                <span className="running-count" title="Активные чаты">
+                  {running}
+                </span>
               )}
             </button>
           ))}
         </nav>
-        <ProjectNavigation
-          projects={hub.data.projects}
-          sessions={hub.data.sessions}
-          machines={ws.data.servers}
-          selectedSession={selectedSession}
-          scope={scope}
-          archive={archive}
-          disabled={!connected}
-          onToggleArchive={() => {
-            setArchive((v) => !v);
-            setSelectedSession(null);
-            navigate('chat');
-          }}
-          onNewProject={() => setNewProject(true)}
-          onNewChat={startSession}
-          onSelectProject={selectProject}
-          onOpenSession={openSession}
-          onRename={renameChat}
-          onMove={moveChat}
-          onArchive={(s) => void archiveChat(s)}
-          onRenameProject={renameProject}
-          onRemoveProject={removeFolder}
-          onDeleteChat={deleteChat}
-        />
-        <div className="sidebar-bottom">
-          <div className="runner-state">
-            <i className={connected ? 'live-dot' : 'offline-dot'} />
-            <span>
-              {ws.initializing
-                ? 'Подключаемся…'
-                : connected
-                  ? 'Рабочее пространство на связи'
-                  : 'Нет подключения'}
-            </span>
-            {connected && <ShieldCheck size={13} />}
-          </div>
-          <button
-            className={view === 'settings' ? 'active' : ''}
-            onClick={() => navigate('settings')}
-          >
-            <Settings2 size={17} />
-            <span>Настройки</span>
-            <span className="version-label">v0.2</span>
-          </button>
-          <div className="owner-row">
-            <span className="owner-avatar">D</span>
-            <div>
-              <strong>Личное пространство</strong>
-              <span>Ваши машины, проекты и чаты</span>
-            </div>
-            <ShieldCheck size={15} />
-          </div>
-        </div>
-      </aside>
-      {sidebar && (
+      )}
+      <ProjectNavigation
+        projects={hub.data.projects}
+        sessions={hub.data.sessions}
+        machines={ws.data.servers}
+        selectedSession={view === 'chat' ? selectedSession : null}
+        scope={view === 'chat' ? scope : ''}
+        archive={archive}
+        disabled={!connected}
+        onToggleArchive={() => {
+          setScope('all');
+          setArchive((v) => !v);
+          setSelectedSession(null);
+          navigate('chat');
+        }}
+        onNewProject={() => {
+          setSidebar(false);
+          setNewProject(true);
+        }}
+        onNewChat={startSession}
+        onSelectProject={(id) => selectProject(id, archive)}
+        onOpenSession={openSession}
+        onRename={renameChat}
+        onMove={moveChat}
+        onArchive={(s) => void archiveChat(s)}
+        onRenameProject={renameProject}
+        onRemoveProject={removeFolder}
+        onDeleteChat={deleteChat}
+      />
+      <div className="sidebar-bottom">
         <button
-          className="sidebar-scrim"
-          aria-label="Закрыть меню"
-          onClick={() => setSidebar(false)}
-        />
+          className={`workspace-owner ${view === 'settings' ? 'active' : ''}`}
+          aria-label="Настройки"
+          aria-current={view === 'settings' ? 'page' : undefined}
+          onClick={() => navigate('settings')}
+        >
+          <span className="owner-avatar" aria-hidden="true">
+            {ownerName.slice(0, 1).toLocaleUpperCase('ru')}
+          </span>
+          <span className="owner-summary">
+            <strong>{ownerName}</strong>
+            <small>
+              <i className={connected ? 'live-dot' : 'offline-dot'} />
+              {ws.initializing
+                ? 'Подключение…'
+                : connected
+                  ? 'Панель на связи'
+                  : 'Нет подключения'}
+            </small>
+          </span>
+          <Settings2 size={17} />
+        </button>
+      </div>
+    </>
+  );
+  return (
+    <div className="workspace-app" ref={shellRef}>
+      {mobile ? (
+        <Drawer.Root open={sidebar} onOpenChange={setSidebar}>
+          <Drawer.Portal container={shellRef}>
+            <Drawer.Backdrop className="sidebar-scrim" />
+            <Drawer.Popup
+              className="workspace-sidebar mobile-open"
+              finalFocus={menuRef}
+            >
+              <Drawer.Title className="sr-only">
+                Меню рабочего пространства
+              </Drawer.Title>
+              {sidebarContents}
+            </Drawer.Popup>
+          </Drawer.Portal>
+        </Drawer.Root>
+      ) : (
+        <aside className="workspace-sidebar">{sidebarContents}</aside>
       )}
       <main className="workspace-main">
         <header className="workspace-header">
           <div className="header-breadcrumb">
-            <button
-              className="icon-button mobile-menu"
-              aria-label="Открыть меню"
-              onClick={() => setSidebar(true)}
-            >
-              <Menu size={19} />
-            </button>
-            {view === 'chat' && session && chatTab === 'machine' && (
+            {inConversation ? (
               <button
                 type="button"
-                className="icon-button machine-chats-back"
-                aria-label="Вернуться к чатам на машинах"
-                title="Чаты на машинах"
-                onClick={() => openChatList('machine')}
+                className="icon-button chat-back"
+                aria-label="Вернуться к списку чатов"
+                title="К списку чатов"
+                onClick={backToChats}
               >
-                <ArrowLeft size={17} />
+                <ArrowLeft size={18} />
+              </button>
+            ) : (
+              <button
+                ref={menuRef}
+                className="icon-button mobile-menu"
+                aria-label="Открыть меню"
+                aria-expanded={sidebar}
+                aria-haspopup="dialog"
+                onClick={() => setSidebar(true)}
+              >
+                <Menu size={20} />
               </button>
             )}
-            <span className="breadcrumb-home">Рабочее пространство</span>
-            <ChevronRight size={13} />
-            <strong>
-              {view === 'chat'
-                ? session
-                  ? project?.name || 'Без проекта'
-                  : scopeTitle
-                : view === 'projects'
-                  ? 'Проекты'
-                  : view === 'services'
-                    ? 'Сервисы'
-                    : view === 'servers'
-                      ? 'Серверы'
-                      : 'Настройки'}
-            </strong>
+            <span className="breadcrumb-home">
+              {inConversation
+                ? project?.name || 'Чаты'
+                : 'Рабочее пространство'}
+            </span>
+            <ChevronRight size={13} aria-hidden="true" />
+            {inConversation ? (
+              <h1 className="conversation-title" title={session.title}>
+                {session.title}
+              </h1>
+            ) : (
+              <strong className="section-crumb">
+                {mobile
+                  ? 'MayPlane'
+                  : view === 'chat'
+                    ? scopeTitle
+                    : sectionName}
+              </strong>
+            )}
             {view === 'chat' && machine && (
               <span className="header-machine">
                 <Monitor size={13} />
@@ -406,42 +599,70 @@ export default function WorkspaceMain() {
                   <i />
                   {sessionLabels[session.status]}
                 </span>
-                <button type="button" className="icon-button workspace-header-files" aria-label="Файлы чата" title="Файлы чата"
-                  disabled={!connected} onClick={() => setBrowser({ id: session.id, session: true, mode: 'files' })}>
-                  <FolderOpen size={17} /><span>Файлы</span>
-                </button>
-                <button type="button" className="icon-button workspace-header-files" aria-label="Изменения в чате" title="Изменения в чате"
-                  disabled={!connected} onClick={() => setBrowser({ id: session.id, session: true, mode: 'agent' })}>
-                  <FileDiff size={17} /><span>Изменения</span>
-                </button>
                 <button
-                  className="icon-button"
-                  aria-label="Переместить чат в проект"
-                  disabled={activeSession(session)}
-                  onClick={() => moveChat(session)}
+                  type="button"
+                  className="icon-button workspace-header-files"
+                  aria-label="Файлы чата"
+                  title="Файлы чата"
+                  disabled={!connected}
+                  onClick={() =>
+                    setBrowser({ id: session.id, session: true, mode: 'files' })
+                  }
                 >
-                  <FolderInput size={16} />
+                  <FolderOpen size={17} />
+                  <span>Файлы</span>
                 </button>
+                {!mobile && (
+                  <button
+                    type="button"
+                    className="icon-button workspace-header-files"
+                    aria-label="Изменения в чате"
+                    title="Изменения в чате"
+                    disabled={!connected}
+                    onClick={() =>
+                      setBrowser({
+                        id: session.id,
+                        session: true,
+                        mode: 'agent',
+                      })
+                    }
+                  >
+                    <FileDiff size={17} />
+                    <span>Изменения</span>
+                  </button>
+                )}
                 <ChatActions
                   session={session}
+                  onInfo={() => setInfo(true)}
+                  onChanges={
+                    mobile && connected
+                      ? () =>
+                          setBrowser({
+                            id: session.id,
+                            session: true,
+                            mode: 'agent',
+                          })
+                      : undefined
+                  }
                   onRename={() => renameChat(session)}
                   onMove={() => moveChat(session)}
                   onArchive={() => void archiveChat(session)}
                   onDelete={() => deleteChat(session)}
                 />
-                <button
-                  className={`icon-button ${info ? 'is-active' : ''}`}
-                  aria-label="Информация о чате"
-                  onClick={() => setInfo((v) => !v)}
-                >
-                  <LayoutGrid size={17} />
-                </button>
               </>
             ) : (
-              <span className="private-label">
-                <ShieldCheck size={14} />
-                Личное пространство
-              </span>
+              <button
+                type="button"
+                className="workspace-search"
+                aria-label="Поиск по пространству"
+                aria-keyshortcuts="Control+K Meta+K"
+                title="Поиск по пространству (Ctrl или ⌘ + K)"
+                onClick={openSearch}
+              >
+                <Search size={16} />
+                <span>Поиск по пространству</span>
+                <kbd>Ctrl / ⌘ K</kbd>
+              </button>
             )}
           </div>
         </header>
@@ -449,8 +670,19 @@ export default function WorkspaceMain() {
           <div className="connection-banner" role="alert">
             <Activity size={16} />
             <span>{ws.error || hub.error}</span>
-            <button onClick={() => navigate('settings')}>
-              Настроить подключение <ArrowUpRight size={13} />
+            <button
+              onClick={() => {
+                if (ws.error)
+                  void ws
+                    .connect('', '')
+                    .catch((reason: Error) => setError(reason.message));
+                else
+                  void hub
+                    .refresh()
+                    .catch((reason: Error) => setError(reason.message));
+              }}
+            >
+              Повторить <ArrowUpRight size={13} />
             </button>
           </div>
         )}
@@ -465,9 +697,14 @@ export default function WorkspaceMain() {
         <div
           className={`workspace-content ${info && view === 'chat' && session ? 'with-info' : ''}`}
         >
-          {view === 'servers' ? (
+          {listLoading && view !== 'settings' ? (
+            <output className="workspace-loading">
+              <LoaderCircle className="spin" size={19} /> Загружаем рабочее
+              пространство…
+            </output>
+          ) : view === 'servers' ? (
             <MachinesPanel
-              onAccounts={() => setView('settings')}
+              onAccounts={openAccounts}
               ws={ws}
               hub={hub}
               selectedId={selectedMachine}
@@ -481,14 +718,20 @@ export default function WorkspaceMain() {
               }
             />
           ) : view === 'settings' ? (
-            <SettingsPanel ws={ws} hub={hub} />
+            <SettingsPanel
+              ws={ws}
+              hub={hub}
+              section={settingsSection}
+              onSection={setSettingsSection}
+            />
           ) : view === 'services' ? (
             <ServicesPanel
-              key={JSON.stringify(serviceView)}
+              key={serviceRoute.visit}
               hub={hub}
               machines={ws.data.servers}
-              scope={serviceView}
+              scope={serviceRoute.scope}
               onProject={selectProject}
+              onMachines={() => openSection('servers')}
               onOpenChat={openSession}
               onNewChat={startServiceChat}
               connected={connected}
@@ -504,26 +747,23 @@ export default function WorkspaceMain() {
             <div className="hub-page projects-page">
               <div className="page-heading">
                 <div>
-                  <span className="eyebrow">РАБОЧИЕ ПАПКИ АГЕНТОВ</span>
                   <h1>
                     Проекты
                     <span className="heading-count">
                       {hub.data.projects.length}
                     </span>
                   </h1>
-                  <p>
-                    Одна папка на машине — общий контекст для чатов Codex и
-                    OpenCode.
-                  </p>
                 </div>
-                <button
-                  className="hub-button primary"
-                  disabled={!connected}
-                  onClick={() => setNewProject(true)}
-                >
-                  <Plus size={16} />
-                  Добавить проект
-                </button>
+                {hub.data.projects.length > 0 && (
+                  <button
+                    className="hub-button primary"
+                    disabled={!connected}
+                    onClick={() => setNewProject(true)}
+                  >
+                    <Plus size={16} />
+                    Добавить проект
+                  </button>
+                )}
               </div>
               {hub.data.projects.length ? (
                 <div className="projects-grid">
@@ -533,6 +773,7 @@ export default function WorkspaceMain() {
                         <span className="project-icon">
                           <FolderGit2 size={22} />
                         </span>
+                        <h2>{p.name}</h2>
                         <span className="connection-pill">
                           <Monitor size={12} />
                           {
@@ -541,28 +782,40 @@ export default function WorkspaceMain() {
                           }
                         </span>
                       </div>
-                      <h2>{p.name}</h2>
                       <div className="project-path">
                         <code>{p.path}</code>
                         <CopyButton value={p.path} />
                       </div>
-                      <p className="project-dialogs">
-                        <MessageSquare size={14} />
-                        {
-                          hub.data.sessions.filter(
-                            (s) => s.projectId === p.id && !s.archived,
-                          ).length
-                        }{' '}
-                        чатов
-                      </p>
-                      <button
-                        type="button"
-                        className="text-button project-service-link"
-                        onClick={() => navigate('services', { projectId: p.id })}
-                      >
-                        <Boxes size={14} /> Сервисы
-                        <span>{servicesInProject(p).length}</span>
-                      </button>
+                      <div className="project-links">
+                        <span className="project-dialogs">
+                          <MessageSquare size={14} />
+                          {chatCount(
+                            hub.data.sessions.filter(
+                              (s) => s.projectId === p.id && !s.archived,
+                            ).length,
+                          )}
+                        </span>
+                        <button
+                          type="button"
+                          className="text-button project-service-link"
+                          onClick={() =>
+                            navigate('services', { projectId: p.id })
+                          }
+                        >
+                          <Boxes size={14} /> Сервисы
+                          <span>{servicesInProject(p).length}</span>
+                        </button>
+                        {/^https:\/\//i.test(p.repo) && (
+                          <a
+                            className="text-button project-repo"
+                            href={p.repo}
+                            target="_blank"
+                            rel="noreferrer"
+                          >
+                            Репозиторий <ArrowUpRight size={14} />
+                          </a>
+                        )}
+                      </div>
                       <footer>
                         <button
                           className="hub-button"
@@ -571,26 +824,27 @@ export default function WorkspaceMain() {
                           Открыть чаты
                           <ChevronRight size={14} />
                         </button>
-                        <button type="button" className="icon-button" title="Файлы и Git" aria-label={`Файлы проекта ${p.name}`}
-                          disabled={!connected} onClick={() => setBrowser({ id: p.id, session: false, mode: 'files' })}>
+                        <button
+                          type="button"
+                          className="icon-button"
+                          title="Файлы и Git"
+                          aria-label={`Файлы проекта ${p.name}`}
+                          disabled={!connected}
+                          onClick={() =>
+                            setBrowser({
+                              id: p.id,
+                              session: false,
+                              mode: 'files',
+                            })
+                          }
+                        >
                           <FolderOpen size={16} />
                         </button>
-                        <button
-                          className="icon-button"
-                          title="Переименовать проект"
-                          aria-label={`Переименовать проект ${p.name}`}
-                          onClick={() => renameProject(p)}
-                        >
-                          <Pencil size={15} />
-                        </button>
-                        <button
-                          className="icon-button"
-                          title="Удалить проект"
-                          aria-label={`Удалить проект ${p.name}`}
-                          onClick={() => removeFolder(p)}
-                        >
-                          <Trash2 size={15} />
-                        </button>
+                        <ProjectActions
+                          project={p}
+                          onRename={() => renameProject(p)}
+                          onRemove={() => removeFolder(p)}
+                        />
                       </footer>
                     </article>
                   ))}
@@ -601,9 +855,7 @@ export default function WorkspaceMain() {
                     <FolderGit2 size={30} />
                   </div>
                   <h2>Добавьте рабочую папку</h2>
-                  <p>
-                    У проекта будут свои чаты с любыми агентами.
-                  </p>
+                  <p>У проекта будут свои чаты с любыми агентами.</p>
                   <button
                     className="hub-button primary"
                     disabled={!connected}
@@ -633,18 +885,22 @@ export default function WorkspaceMain() {
               hub={hub}
               onNewProject={() => setNewProject(true)}
               onNewSession={() => startSession()}
-              onAccounts={() => setView('settings')}
+              onAccounts={openAccounts}
               onOpenService={(serviceId) => navigate('services', { serviceId })}
-              onOpenChanges={(turn) => setBrowser({ id: session.id, session: true, mode: 'agent', turn })}
+              onOpenChanges={(turn) =>
+                setBrowser({
+                  id: session.id,
+                  session: true,
+                  mode: 'agent',
+                  turn,
+                })
+              }
               disabled={!connected}
             />
           ) : (
-            <div className="hub-page chat-home">
+            <div className="hub-page chat-home" key={scope + String(archive)}>
               <div className="page-heading">
                 <div>
-                  <span className="eyebrow">
-                    {project ? 'РАБОЧАЯ ПАПКА' : 'РАБОЧЕЕ ПРОСТРАНСТВО'}
-                  </span>
                   <h1>
                     {scopeTitle}
                     {!showMachineChats && (
@@ -657,18 +913,24 @@ export default function WorkspaceMain() {
                       {machine?.name} · <code>{project.path}</code>
                       <CopyButton value={project.path} />
                     </p>
-                  ) : !showMachineChats && (
-                    <p>
-                      {archive
-                        ? 'История сохранена. Восстановите чат, чтобы продолжить.'
-                        : 'Начните новый чат или продолжите работу.'}
-                    </p>
-                  )}
+                  ) : archive && visible.length > 0 ? (
+                    <p>Восстановите чат, чтобы продолжить диалог.</p>
+                  ) : null}
                 </div>
                 <div className="heading-actions">
                   {project && (
-                    <button type="button" className="hub-button" disabled={!connected}
-                      onClick={() => setBrowser({ id: project.id, session: false, mode: 'files' })}>
+                    <button
+                      type="button"
+                      className="hub-button"
+                      disabled={!connected}
+                      onClick={() =>
+                        setBrowser({
+                          id: project.id,
+                          session: false,
+                          mode: 'files',
+                        })
+                      }
+                    >
                       <FolderOpen size={16} /> Файлы и Git
                     </button>
                   )}
@@ -681,14 +943,15 @@ export default function WorkspaceMain() {
                       Переименовать
                     </button>
                   )}
-                  <button
-                    className="hub-button primary"
-                    disabled={!connected}
-                    onClick={() => startSession()}
-                  >
-                    <Plus size={16} />
-                    Новый чат
-                  </button>
+                  {mobile && showCreateChat && (
+                    <button
+                      className="hub-button primary"
+                      disabled={!connected}
+                      onClick={() => startSession()}
+                    >
+                      <Plus size={16} /> Новый чат
+                    </button>
+                  )}
                 </div>
               </div>
               {project && (
@@ -696,8 +959,15 @@ export default function WorkspaceMain() {
                   services={servicesInProject(project)}
                   machines={ws.data.servers}
                   disabled={!connected}
-                  onOpen={(serviceId) => navigate('services', { projectId: project.id, serviceId })}
-                  onAdd={() => navigate('services', { projectId: project.id, create: true })}
+                  onOpen={(serviceId) =>
+                    navigate('services', { projectId: project.id, serviceId })
+                  }
+                  onAdd={() =>
+                    navigate('services', {
+                      projectId: project.id,
+                      create: true,
+                    })
+                  }
                   onAll={() => navigate('services', { projectId: project.id })}
                 />
               )}
@@ -735,8 +1005,13 @@ export default function WorkspaceMain() {
                   {visible.map((s) => (
                     <article key={s.id} className="chat-list-row">
                       <button onClick={() => openSession(s)}>
-                        <i className={`session-dot ${s.status}`} />
-                        <span>
+                        <span
+                          className={`chat-row-icon ${s.status}`}
+                          aria-hidden="true"
+                        >
+                          <MessageSquare size={18} />
+                        </span>
+                        <span className="chat-row-copy">
                           <strong>{s.title}</strong>
                           <small>
                             {providerNames[s.provider]} ·{' '}
@@ -749,7 +1024,15 @@ export default function WorkspaceMain() {
                             }
                           </small>
                         </span>
-                        <time>
+                        {s.status !== 'idle' && (
+                          <span className={`row-status ${s.status}`}>
+                            {sessionLabels[s.status]}
+                          </span>
+                        )}
+                        <time
+                          dateTime={s.updatedAt}
+                          title={new Date(s.updatedAt).toLocaleString('ru')}
+                        >
                           {new Date(s.updatedAt).toLocaleDateString('ru', {
                             day: 'numeric',
                             month: 'short',
@@ -772,26 +1055,32 @@ export default function WorkspaceMain() {
                     <MessageSquare size={30} />
                   </div>
                   <h2>
-                    {project
-                      ? 'Первый чат в проекте'
-                      : archive
-                        ? 'В архиве пусто'
-                        : 'С чего начнём?'}
+                    {archive
+                      ? 'В архиве пусто'
+                      : project
+                        ? 'Первый чат в проекте'
+                        : 'Начните первый чат'}
                   </h2>
                   <p>
-                    {project
-                      ? 'Агент будет работать в папке этого проекта.'
-                      : 'Для обычного чата проект создавать не обязательно.'}
+                    {archive
+                      ? 'Здесь появятся чаты, которые вы отправите в архив.'
+                      : project
+                        ? 'Агент будет работать в папке этого проекта.'
+                        : 'Для обычного чата проект создавать не обязательно.'}
                   </p>
                   <button
                     className="hub-button primary"
                     disabled={!connected}
-                    onClick={() => startSession()}
+                    onClick={() => (archive ? openChatList() : startSession())}
                   >
-                    <SquarePen size={16} />
-                    Начать чат
+                    {archive ? (
+                      <ArrowLeft size={16} />
+                    ) : (
+                      <SquarePen size={16} />
+                    )}
+                    {archive ? 'К списку чатов' : 'Начать чат'}
                   </button>
-                  {!project && (
+                  {!project && !archive && (
                     <button
                       className="text-button"
                       disabled={!connected}
@@ -804,78 +1093,65 @@ export default function WorkspaceMain() {
               )}
             </div>
           )}
-          {info && view === 'chat' && session && (
-            <aside className="project-inspector">
-              <div className="inspector-heading">
-                <h2>Контекст чата</h2>
-                <button
-                  className="icon-button"
-                  aria-label="Закрыть информацию"
-                  onClick={() => setInfo(false)}
-                >
-                  <X size={16} />
-                </button>
-              </div>
-              <span className="inspector-project-icon">
-                <FolderGit2 size={27} />
-              </span>
-              <h3>{project?.name || 'Без проекта'}</h3>
-              <div className="inspector-field">
-                <span>Машина</span>
-                <button
-                  className="text-button"
-                  onClick={() => {
-                    setSelectedMachine(session.machineId);
-                    navigate('servers');
-                  }}
-                >
-                  <Monitor size={14} />
-                  {machine?.name}
-                  <ArrowUpRight size={13} />
-                </button>
-              </div>
-              <div className="inspector-field">
-                <span>Рабочая папка</span>
-                <div className="copy-code">
-                  <code>{contextPath}</code>
-                  {contextPath && <CopyButton value={contextPath} />}
+          {info &&
+            inConversation &&
+            (mobile ? (
+              <Modal title="Контекст чата" onClose={() => setInfo(false)}>
+                <div className="project-inspector inspector-dialog">
+                  {inspectorBody}
                 </div>
-              </div>
-              <div className="inspector-field">
-                <span>Агент</span>
-                <strong>{providerNames[session.provider]}</strong>
-              </div>
-              <div className="inspector-field">
-                <span>Доступ</span>
-                <p>
-                  <ShieldCheck size={14} />
-                  {session.mode === 'read-only'
-                    ? 'Только чтение'
-                    : 'Дополнительные права по запросу'}
-                </p>
-              </div>
-              <button
-                className="hub-button"
-                disabled={activeSession(session)}
-                onClick={() => moveChat(session)}
-              >
-                <FolderInput size={14} />
-                Изменить проект
-              </button>
-              <p className="inspector-note">
-                Проект определяет рабочую папку. Для переноса на другую машину
-                создайте новый чат.
-              </p>
-            </aside>
-          )}
+              </Modal>
+            ) : (
+              <aside className="project-inspector">
+                <div className="inspector-heading">
+                  <h2>Контекст чата</h2>
+                  <button
+                    className="icon-button"
+                    aria-label="Закрыть информацию"
+                    onClick={() => setInfo(false)}
+                  >
+                    <X size={16} />
+                  </button>
+                </div>
+                {inspectorBody}
+              </aside>
+            ))}
         </div>
+        {!inConversation && (
+          <nav className="mobile-sections" aria-label="Разделы пространства">
+            {[
+              ...sections,
+              { id: 'settings', label: 'Настройки', icon: Settings2 } as const,
+            ].map(({ id, label, icon: Icon }) => (
+              <button
+                type="button"
+                key={id}
+                aria-current={view === id ? 'page' : undefined}
+                onClick={() => openSection(id)}
+              >
+                <Icon size={19} />
+                <span>{label}</span>
+              </button>
+            ))}
+          </nav>
+        )}
       </main>
       {browser && (browser.session ? browserChat : browserProject) && (
-        <WorkspaceBrowser key={`${browser.id}:${browserChat?.cwd || browserProject?.path || ''}`} api={hub.api}
-          id={browser.id} session={browser.session} title={browserChat?.title || browserProject?.name || 'Рабочая папка'}
-          path={browserChat?.cwd || browserProject?.path} active={activeSession(browserChat)}
-          machineName={ws.data.servers.find((m) => m.id === browserMachineId)?.name}
-          initialMode={browser.mode} initialTurn={browser.turn} onClose={() => setBrowser(null)} />
+        <WorkspaceBrowser
+          key={`${browser.id}:${browserChat?.cwd || browserProject?.path || ''}`}
+          api={hub.api}
+          id={browser.id}
+          session={browser.session}
+          title={browserChat?.title || browserProject?.name || 'Рабочая папка'}
+          path={browserChat?.cwd || browserProject?.path}
+          active={activeSession(browserChat)}
+          machineName={
+            ws.data.servers.find((m) => m.id === browserMachineId)?.name
+          }
+          initialMode={browser.mode}
+          initialTurn={browser.turn}
+          onClose={() => setBrowser(null)}
+        />
       )}
       {newProject && (
         <NewProject
@@ -904,11 +1180,14 @@ export default function WorkspaceMain() {
           onClose={() => setNewSession(false)}
           onAccounts={() => {
             setNewSession(false);
-            setView('settings');
+            openAccounts();
           }}
           onCreated={(s) => {
             setNewSession(false);
-            openSession(s, sessionService?.customize ? sessionService.service.id : undefined);
+            openSession(
+              s,
+              sessionService?.customize ? sessionService.service.id : undefined,
+            );
           }}
         />
       )}
@@ -1011,20 +1290,20 @@ export default function WorkspaceMain() {
             }}
           >
             <Field label="Проект">
-              <select
+              <WorkspaceSelect
                 aria-label="Проект"
                 value={moveProject}
-                onChange={(e) => setMoveProject(e.target.value)}
-              >
-                <option value="">Без проекта</option>
-                {hub.data.projects
-                  .filter((p) => p.machineId === move.machineId)
-                  .map((p) => (
-                    <option key={p.id} value={p.id}>
-                      {p.name} · {p.path}
-                    </option>
-                  ))}
-              </select>
+                onValueChange={setMoveProject}
+                options={[
+                  { value: '', label: 'Без проекта' },
+                  ...hub.data.projects
+                    .filter((p) => p.machineId === move.machineId)
+                    .map((p) => ({
+                      value: p.id,
+                      label: `${p.name} · ${p.path}`,
+                    })),
+                ]}
+              />
             </Field>
             <p className="hub-note">
               {moveProject
@@ -1072,13 +1351,27 @@ export default function WorkspaceMain() {
               ref={searchInput}
               value={query}
               onChange={(e) => setQuery(e.target.value)}
-              placeholder="Поиск по рабочему пространству…"
+              onKeyDown={(event) => {
+                if (event.nativeEvent.isComposing) return;
+                const first = searchResults.current?.querySelector('button');
+                if (!first) return;
+                if (event.key === 'ArrowDown') {
+                  event.preventDefault();
+                  first.focus();
+                }
+                if (event.key === 'Enter') {
+                  event.preventDefault();
+                  first.click();
+                }
+              }}
+              placeholder="Название или часть названия…"
               aria-label="Поиск"
             />
           </div>
-          <div className="search-results">
+          <div className="search-results" ref={searchResults}>
             {searchProjects.map((p) => (
               <button
+                onKeyDown={focusSearchResult}
                 key={p.id}
                 onClick={() => {
                   setSearch(false);
@@ -1091,7 +1384,11 @@ export default function WorkspaceMain() {
               </button>
             ))}
             {searchChats.map((s) => (
-              <button key={s.id} onClick={() => openSession(s)}>
+              <button
+                key={s.id}
+                onKeyDown={focusSearchResult}
+                onClick={() => openSession(s)}
+              >
                 <MessageSquare size={17} />
                 <span>{s.title}</span>
                 <small>
@@ -1101,6 +1398,7 @@ export default function WorkspaceMain() {
             ))}
             {searchMachines.map((m) => (
               <button
+                onKeyDown={focusSearchResult}
                 key={m.id}
                 onClick={() => {
                   setSelectedMachine(m.id);
@@ -1114,11 +1412,15 @@ export default function WorkspaceMain() {
               </button>
             ))}
             {searchServices.map((s) => (
-              <button key={s.id} onClick={() => {
-                setSearch(false);
-                setQuery('');
-                navigate('services', { serviceId: s.id });
-              }}>
+              <button
+                key={s.id}
+                onKeyDown={focusSearchResult}
+                onClick={() => {
+                  setSearch(false);
+                  setQuery('');
+                  navigate('services', { serviceId: s.id });
+                }}
+              >
                 <Boxes size={17} />
                 <span>{s.name}</span>
                 <small>Сервис</small>

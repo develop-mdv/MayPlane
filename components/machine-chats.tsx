@@ -1,6 +1,7 @@
 'use client';
+import { WorkspaceSelect } from './workspace-select';
 
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useId, useRef, useState } from 'react';
 import {
   ChevronRight,
   LoaderCircle,
@@ -90,6 +91,8 @@ function MachineChatList({
   const requests = useRef({ revision: 0 });
   const canLoad = !disabled && machine.status !== 'offline';
   const busy = loading || opening !== null;
+  const machineInputId = useId();
+  const agentInputId = useId();
   const machineId = machine.id;
   const load = useCallback(
     async (cursor: string | null = null) => {
@@ -165,39 +168,39 @@ function MachineChatList({
   return (
     <section className="machine-chats" aria-label="Чаты на машине">
       <div className="machine-chats-toolbar">
-        <label className="machine-chat-field">
+        <label htmlFor={machineInputId} className="machine-chat-field">
           <span>Машина</span>
-          <select
+          <WorkspaceSelect
+            id={machineInputId}
+            aria-label="Машина"
             value={machineId}
-            onChange={(event) =>
-              onSourceChange({ machineId: event.target.value, provider })
+            onValueChange={(choice) =>
+              onSourceChange({ machineId: choice, provider })
             }
-          >
-            {machines.map((item) => (
-              <option key={item.id} value={item.id}>
-                {item.name}
-                {item.status === 'offline' ? ' · не в сети' : ''}
-              </option>
-            ))}
-          </select>
+            options={machines.map((item) => ({
+              value: item.id,
+              label:
+                item.name + (item.status === 'offline' ? ' · Не в сети' : ''),
+            }))}
+          />
         </label>
-        <label className="machine-chat-field">
+        <label htmlFor={agentInputId} className="machine-chat-field">
           <span>Агент</span>
-          <select
+          <WorkspaceSelect
+            id={agentInputId}
+            aria-label="Агент"
             value={provider}
-            onChange={(event) =>
+            onValueChange={(choice) =>
               onSourceChange({
                 machineId,
-                provider: event.target.value as AgentProvider,
+                provider: choice as AgentProvider,
               })
             }
-          >
-            {agentProviders.map((agent) => (
-              <option key={agent} value={agent}>
-                {providerNames[agent]}
-              </option>
-            ))}
-          </select>
+            options={agentProviders.map((agent) => ({
+              value: agent,
+              label: providerNames[agent],
+            }))}
+          />
         </label>
         {!!page?.sessions.length && (
           <label className="machine-chat-search">

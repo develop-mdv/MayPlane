@@ -1,7 +1,17 @@
 'use client';
+import { WorkspaceSelect } from './workspace-select';
 import { OwnerSettings } from './panel-auth';
 import { useState } from 'react';
-import { ArrowUpRight, Check, Plus, ShieldCheck } from 'lucide-react';
+import {
+  ArrowUpRight,
+  Fingerprint,
+  KeyRound,
+  LockKeyhole,
+  Plus,
+  ShieldCheck,
+  UsersRound,
+} from 'lucide-react';
+import { Tabs, TabsContent, TabsList, TabsTrigger } from './ui/tabs';
 import type { Server as Machine } from '@/lib/domain';
 import type { Hub, HubProject } from '@/lib/hub';
 import type { Workspace } from '@/lib/use-workspace';
@@ -67,26 +77,22 @@ export function NewProject({
           />
         </Field>
         <Field label="Машина">
-          <select
+          <WorkspaceSelect
+            aria-label="Машина"
             required
             value={machineId}
-            onChange={(e) => {
-              setMachineId(e.target.value);
+            onValueChange={(choice) => {
+              setMachineId(choice);
               setPath('');
             }}
-          >
-            <option value="" disabled>
-              Выберите машину
-            </option>
-            {machines.map((m) => (
-              <option key={m.id} value={m.id}>
-                {m.name} ·{' '}
-                {m.transport === 'local'
-                  ? 'Хост панели'
-                  : m.region || m.host}
-              </option>
-            ))}
-          </select>
+            options={[
+              { value: '', label: 'Выберите машину', disabled: true },
+              ...machines.map((m) => ({
+                value: m.id,
+                label: `${m.name} · ${m.transport === 'local' ? 'Хост панели' : m.region || m.host}`,
+              })),
+            ]}
+          />
         </Field>
         {!machines.length && (
           <button type="button" className="hub-button" onClick={onAddMachine}>
@@ -94,9 +100,17 @@ export function NewProject({
             Сначала подключить машину
           </button>
         )}
-        <PathField api={hub.api} machineId={machine?.id} machineName={machine?.name} platform={machine?.platform}
-          label="Рабочая папка" hint="Выберите существующую папку на машине или введите её полный путь."
-          value={path} onChange={setPath} required />
+        <PathField
+          api={hub.api}
+          machineId={machine?.id}
+          machineName={machine?.name}
+          platform={machine?.platform}
+          label="Рабочая папка"
+          hint="Выберите существующую папку на машине или введите её полный путь."
+          value={path}
+          onChange={setPath}
+          required
+        />
         <Field
           label="Git-репозиторий · необязательно"
           hint="Ссылка для быстрого перехода. Git использует доступы, настроенные на машине проекта."
@@ -119,77 +133,118 @@ export function NewProject({
     </Modal>
   );
 }
-export function SettingsPanel({ ws, hub }: { ws: Workspace; hub: Hub }) {  return (
+export type SettingsSection = 'accounts' | 'access' | 'security';
+const settingsSections = [
+  {
+    id: 'accounts',
+    label: 'Аккаунты агентов',
+    short: 'Аккаунты',
+    icon: UsersRound,
+  },
+  { id: 'access', label: 'Доступ к панели', short: 'Доступ', icon: KeyRound },
+  {
+    id: 'security',
+    label: 'Безопасность',
+    short: 'Безопасность',
+    icon: ShieldCheck,
+  },
+] as const;
+
+const securityNotes = [
+  {
+    icon: LockKeyhole,
+    title: 'Шифрование данных',
+    text: 'Панель хранит SSH-пароли, ключи, токены аккаунтов и историю диалогов с шифрованием AES-256-GCM. Ключ шифрования хранится отдельно от базы.',
+  },
+  {
+    icon: UsersRound,
+    title: 'Аккаунты агентов',
+    text: 'Codex получает доступ к аккаунту на время работы процесса. OpenCode использует отдельные профили. Для OAuth в OpenCode доступен один активный чат на аккаунт, а API-ключ поддерживает параллельные чаты.',
+  },
+  {
+    icon: ShieldCheck,
+    title: 'Разрешения в чате',
+    text: 'Codex работает в песочнице проекта и запрашивает дополнительные права. OpenCode запрашивает доступ к инструментам и выполняет действия с правами пользователя машины.',
+  },
+  {
+    icon: Fingerprint,
+    title: 'Вход владельца',
+    text: 'Вход в личную панель защищён логином и паролем. При установке для доступа через интернет настраиваются HTTPS и продление сертификата. Сервер разработки слушает 127.0.0.1.',
+  },
+];
+
+export function SettingsPanel({
+  ws,
+  hub,
+  section,
+  onSection,
+}: {
+  ws: Workspace;
+  hub: Hub;
+  section: SettingsSection;
+  onSection: (value: SettingsSection) => void;
+}) {
+  return (
     <div className="hub-page settings-page">
-      <div className="page-heading">
-        <div>
-          <span className="eyebrow">РАБОЧЕЕ ПРОСТРАНСТВО</span>
-          <h1>Настройки</h1>
-          <p>Подключение панели и границы доступа.</p>
-        </div>
-      </div>
-      <OwnerSettings />
-      <AccountsSettings hub={hub} ws={ws} />
-      <section className="detail-card">
-        <div className="section-title">
-          <h2>Безопасность</h2>
-          <ShieldCheck size={18} />
-        </div>
-        <div className="security-item">
-          <Check size={16} />
-          <div>
-            <strong>Секреты зашифрованы</strong>
-            <p>
-              SSH-пароли, ключи и история диалогов защищены AES-256-GCM. Ключ
-              шифрования хранится отдельно от базы.
-            </p>
-          </div>
-        </div>
-        <div className="security-item">
-          <Check size={16} />
-          <div>
-            <strong>Личные аккаунты агентов</strong>
-            <p>
-              Сохранённые аккаунты выбираются для машин и чатов. Для каждого
-              чата используется выбранный профиль; работа других аккаунтов не
-              затрагивается.
-            </p>
-          </div>
-        </div>
-        <div className="security-item">
-          <Check size={16} />
-          <div>
-            <strong>Контроль действий в диалоге</strong>
-            <p>
-              Codex использует песочницу проекта и запросы дополнительных прав.
-              OpenCode спрашивает разрешение на инструменты; его действия
-              выполняются с правами пользователя ОС.
-            </p>
-          </div>
-        </div>
-        <div className="security-item">
-          <Check size={16} />
-          <div>
-            <strong>Личная панель</strong>
-            <p>
-              Панель рассчитана на одного владельца. Для доступа через
-              интернет установщик настраивает HTTPS и автоматическое продление сертификатов. Вход защищён логином и паролем.
-              Локальный dev-сервер доступен на 127.0.0.1.
-            </p>
-          </div>
-        </div>
-      </section>
-      <div className="settings-footer">
-        <span>
-          MayPlane <code>0.2.0</code>
-        </span>
-        <a
-          href="https://github.com/develop-mdv/MayPlane"
-          target="_blank"
-          rel="noreferrer"
+      <div className="settings-inner">
+        <Tabs
+          value={section}
+          onValueChange={(value) => onSection(value as SettingsSection)}
+          className="settings-tabs"
         >
-          Репозиторий проекта <ArrowUpRight size={14} />
-        </a>
+          <header className="settings-heading">
+            <h1>Настройки</h1>
+            <TabsList
+              className="settings-tab-list"
+              aria-label="Раздел настроек"
+            >
+              {settingsSections.map(({ id, label, short, icon: Icon }) => (
+                <TabsTrigger key={id} value={id} aria-label={label}>
+                  <Icon size={16} aria-hidden="true" />
+                  {short}
+                </TabsTrigger>
+              ))}
+            </TabsList>
+          </header>
+          <TabsContent value="accounts">
+            <AccountsSettings hub={hub} ws={ws} />
+          </TabsContent>
+          <TabsContent value="access">
+            <OwnerSettings />
+          </TabsContent>
+          <TabsContent value="security">
+            <section className="settings-section">
+              <header className="settings-section-heading">
+                <h2>Защита рабочего пространства</h2>
+              </header>
+              <div className="settings-surface">
+                {securityNotes.map(({ icon: Icon, title, text }) => (
+                  <div className="settings-info-row" key={title}>
+                    <span className="settings-row-icon">
+                      <Icon size={19} />
+                    </span>
+                    <div>
+                      <h3>{title}</h3>
+                      <p>{text}</p>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </section>
+          </TabsContent>
+        </Tabs>
+        <div className="settings-footer">
+          <span>
+            MayPlane <code>0.2.0</code>
+          </span>
+          <a
+            href="https://github.com/develop-mdv/MayPlane"
+            target="_blank"
+            rel="noreferrer"
+          >
+            Репозиторий проекта <ArrowUpRight size={14} />
+          </a>
+        </div>
       </div>
     </div>
   );

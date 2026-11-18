@@ -1,22 +1,45 @@
 'use client';
-import { useEffect, useState } from 'react';
+import { WorkspaceSelect, type WorkspaceOption } from './workspace-select';
+import { useEffect, useId, useState } from 'react';
+import { Combobox } from '@base-ui/react/combobox';
 import {
-  Check,
+  ComboboxContent,
+  ComboboxEmpty,
+  ComboboxItem,
+  ComboboxList,
+} from './ui/combobox';
+import {
+  ShieldCheck,
   ExternalLink,
-  KeyRound,
   LoaderCircle,
   LogIn,
   Plus,
-  ShieldCheck,
+  ChevronDown,
+  ChevronRight,
+  Code2,
+  Laptop,
+  Monitor,
+  MoreHorizontal,
+  Pencil,
+  Server,
+  Sparkles,
+  Terminal,
+  Unplug,
   Trash2,
   UserRound,
-  X,
 } from 'lucide-react';
 import type { AgentAccount, AgentProvider, AccountLogin, Hub } from '@/lib/hub';
 import { providerNames, agentProviders } from '@/lib/hub';
 import type { Workspace } from '@/lib/use-workspace';
 import { Modal, Field, ErrorText, CopyButton, Submit } from './hub-ui';
 import { ClaudeSubscription } from './claude-subscription';
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from './ui/dropdown-menu';
 
 type AuthField = {
   key: string;
@@ -44,6 +67,48 @@ const labels = {
   error: 'Нужен повторный вход',
 };
 
+function accountChoices(
+  accounts: AgentAccount[],
+  provider: AgentProvider,
+  value: string,
+  defaultName?: string,
+  allowNative = true,
+): WorkspaceOption[] {
+  const local =
+    provider === 'claude'
+      ? 'Подписка / профиль Claude на машине'
+      : 'Аккаунт машины';
+  const choices: WorkspaceOption[] = [];
+  if (defaultName !== undefined)
+    choices.push({
+      value: '__default',
+      label: `По умолчанию сервера · ${defaultName || local}`,
+    });
+  if (allowNative) choices.push({ value: '', label: local });
+  for (const account of accounts) {
+    if (
+      account.provider !== provider ||
+      (account.status !== 'connected' && account.id !== value)
+    )
+      continue;
+    choices.push({
+      value: account.id,
+      label: account.name,
+      disabled: account.status !== 'connected',
+      description: [
+        account.email,
+        account.status !== 'connected' && labels[account.status],
+      ]
+        .filter(Boolean)
+        .join(' · '),
+    });
+  }
+  if (value && !choices.some((choice) => choice.value === value)) {
+    choices.push({ value, label: 'Аккаунт недоступен', disabled: true });
+  }
+  return choices;
+}
+
 export function AccountSelect({
   hub,
   provider,
@@ -61,51 +126,25 @@ export function AccountSelect({
   defaultName?: string;
   allowNative?: boolean;
 }) {
-  const accounts = (hub.data.accounts || []).filter(
-    (a) => a.provider === provider,
-  );
+  const accounts = hub.data.accounts || [];
+  const accountInputId = useId();
   return (
-    <label className="hub-field account-select">
+    <label htmlFor={accountInputId} className="hub-field account-select">
       <span>Аккаунт</span>
-      <select
+      <WorkspaceSelect
+        id={accountInputId}
         aria-label="Аккаунт агента"
         value={value}
         disabled={disabled}
-        onChange={(e) => onChange(e.target.value)}
-      >
-        {defaultName !== undefined && (
-          <option value="__default">
-            По умолчанию сервера ·{' '}
-            {defaultName ||
-              (provider === 'claude'
-                ? 'подписка / профиль Claude'
-                : 'аккаунт машины')}
-          </option>
+        onValueChange={onChange}
+        options={accountChoices(
+          accounts,
+          provider,
+          value,
+          defaultName,
+          allowNative,
         )}
-        {allowNative && (
-          <option value="">
-            {provider === 'claude'
-              ? 'Подписка / профиль Claude на машине'
-              : 'Аккаунт машины'}
-          </option>
-        )}
-        {accounts
-          .filter((a) => a.status === 'connected' || a.id === value)
-          .map((a) => (
-            <option key={a.id} value={a.id} disabled={a.status !== 'connected'}>
-              {a.name}
-              {a.email ? ` · ${a.email}` : ''}
-              {a.status !== 'connected' ? ` · ${labels[a.status]}` : ''}
-            </option>
-          ))}
-        {!!value &&
-          value !== '__default' &&
-          !accounts.some((a) => a.id === value) && (
-            <option value={value} disabled>
-              Аккаунт недоступен
-            </option>
-          )}
-      </select>
+      />
     </label>
   );
 }
@@ -132,12 +171,12 @@ function AccountForm({
     [list, setList] = useState<AuthProvider[]>([]),
     [vendor, setVendor] = useState(account?.vendor || 'chatgpt'),
     [method, setMethod] = useState(''),
-    [filter, setFilter] = useState(''),
     [inputs, setInputs] = useState<Record<string, string | boolean>>({}),
     [key, setKey] = useState(''),
     [busy, setBusy] = useState(false),
     [loading, setLoading] = useState(true),
     [error, setError] = useState('');
+  const vendorInputId = useId();
   const api = hub.api;
   const selected = list.find((v) => v.id === vendor),
     auth = selected?.methods.find((m) => m.id === method);
@@ -256,23 +295,22 @@ function AccountForm({
           </Field>
         )}
         <Field label="Агент">
-          <select
+          <WorkspaceSelect
             aria-label="Агент аккаунта"
             disabled={!!account || busy}
             value={provider}
-            onChange={(e) => {
-              setProvider(e.target.value as AgentProvider);
+            onValueChange={(choice) => {
+              setProvider(choice as AgentProvider);
               setList([]);
               setLoading(true);
               setError('');
-              setFilter('');
               setKey('');
             }}
-          >
-            <option value="codex">Codex</option>
-            <option value="opencode">OpenCode</option>
-            <option value="claude">Claude Code</option>
-          </select>
+            options={agentProviders.map((agent) => ({
+              value: agent,
+              label: providerNames[agent],
+            }))}
+          />
         </Field>
         {loading ? (
           <p className="hub-note">
@@ -288,77 +326,71 @@ function AccountForm({
               </p>
             )}
             {provider === 'opencode' && (
-              <Field label="Провайдер">
-                <input
-                  aria-label="Поиск провайдера"
-                  type="search"
-                  placeholder="Найти провайдера…"
-                  value={filter}
+              <div className="hub-field">
+                <label htmlFor={vendorInputId}>Провайдер</label>
+                <Combobox.Root
+                  items={list}
+                  value={selected || null}
+                  itemToStringLabel={(item) => item.name}
+                  itemToStringValue={(item) => item.id}
+                  filter={(item, query) =>
+                    `${item.name} ${item.id}`
+                      .toLowerCase()
+                      .includes(query.trim().toLowerCase())
+                  }
+                  required
                   disabled={!!account || busy}
-                  onChange={(e) => {
-                    setFilter(e.target.value);
-                    setVendor('');
-                    setMethod('');
-                    setKey('');
-                  }}
-                />
-                <select
-                  aria-label="Провайдер аккаунта"
-                  disabled={!!account || busy}
-                  value={vendor}
-                  onChange={(e) => {
-                    setVendor(e.target.value);
-                    const v = list.find((v) => v.id === e.target.value);
+                  onValueChange={(item) => {
+                    setVendor(item?.id || '');
                     selectMethod(
-                      v?.methods.find(
+                      item?.methods.find(
                         (m) =>
                           m.type === 'oauth' && /device|headless/.test(m.id),
                       ) ||
-                        v?.methods.find((m) => m.type === 'oauth') ||
-                        v?.methods[0],
+                        item?.methods.find((m) => m.type === 'oauth') ||
+                        item?.methods[0],
                     );
                   }}
                 >
-                  <option value="" disabled>
-                    Выберите провайдера
-                  </option>
-                  {list
-                    .filter(
-                      (v) =>
-                        !filter ||
-                        `${v.id} ${v.name}`
-                          .toLowerCase()
-                          .includes(filter.toLowerCase()),
-                    )
-                    .map((v) => (
-                      <option key={v.id} value={v.id}>
-                        {v.name}
-                      </option>
-                    ))}
-                </select>
-              </Field>
+                  <div className="workspace-provider-input">
+                    <Combobox.Input
+                      id={vendorInputId}
+                      placeholder="Найти провайдера…"
+                    />
+                    <Combobox.Trigger aria-label="Показать провайдеров">
+                      <ChevronDown size={15} />
+                    </Combobox.Trigger>
+                  </div>
+                  <ComboboxContent className="workspace-select-popup">
+                    <ComboboxEmpty>Провайдеры не найдены</ComboboxEmpty>
+                    <ComboboxList>
+                      {(item: AuthProvider) => (
+                        <ComboboxItem key={item.id} value={item}>
+                          {item.name}
+                        </ComboboxItem>
+                      )}
+                    </ComboboxList>
+                  </ComboboxContent>
+                </Combobox.Root>
+              </div>
             )}
             <Field label="Способ подключения">
-              <select
+              <WorkspaceSelect
                 aria-label="Способ подключения"
                 required
                 disabled={busy || !selected}
                 value={method}
-                onChange={(e) =>
-                  selectMethod(
-                    selected?.methods.find((m) => m.id === e.target.value),
-                  )
+                onValueChange={(choice) =>
+                  selectMethod(selected?.methods.find((m) => m.id === choice))
                 }
-              >
-                <option value="" disabled>
-                  Выберите способ
-                </option>
-                {selected?.methods.map((m) => (
-                  <option key={m.id} value={m.id}>
-                    {m.name}
-                  </option>
-                ))}
-              </select>
+                options={[
+                  { value: '', label: 'Выберите способ', disabled: true },
+                  ...(selected?.methods || []).map((m) => ({
+                    value: m.id,
+                    label: m.name,
+                  })),
+                ]}
+              />
             </Field>
             {subscription && (
               <ClaudeSubscription
@@ -377,24 +409,19 @@ function AccountForm({
             {auth?.fields.filter(visible).map((f) => (
               <Field key={f.key} label={f.title} hint={f.description}>
                 {f.options?.length ? (
-                  <select
+                  <WorkspaceSelect
                     aria-label={f.title}
                     required={f.required}
                     disabled={busy}
                     value={String(inputs[f.key] || '')}
-                    onChange={(e) =>
-                      setInputs((x) => ({ ...x, [f.key]: e.target.value }))
+                    onValueChange={(choice) =>
+                      setInputs((x) => ({ ...x, [f.key]: choice }))
                     }
-                  >
-                    <option value="" disabled>
-                      Выберите значение
-                    </option>
-                    {f.options.map((o) => (
-                      <option key={o.value} value={o.value}>
-                        {o.label}
-                      </option>
-                    ))}
-                  </select>
+                    options={[
+                      { value: '', label: 'Выберите значение', disabled: true },
+                      ...f.options,
+                    ]}
+                  />
                 ) : (
                   <input
                     aria-label={f.title}
@@ -601,6 +628,130 @@ function LoginDialog({
   );
 }
 
+const providerIcons = { codex: Terminal, opencode: Code2, claude: Sparkles };
+
+function MachineDefaults({ hub, ws }: { hub: Hub; ws: Workspace }) {
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState('');
+  const [notice, setNotice] = useState('');
+  const accounts = hub.data.accounts || [];
+  async function save(
+    machineId: string,
+    machineName: string,
+    provider: AgentProvider,
+    accountId: string,
+  ) {
+    setSaving(true);
+    setError('');
+    setNotice('');
+    try {
+      await ws.action(`/hub/machines/${machineId}/agents/${provider}/account`, {
+        accountId: accountId || null,
+      });
+      setNotice(`${machineName} · ${providerNames[provider]} — выбор сохранён`);
+    } catch (reason) {
+      setError((reason as Error).message);
+    } finally {
+      setSaving(false);
+    }
+  }
+  return (
+    <section className="settings-section">
+      <header className="settings-section-heading">
+        <div>
+          <h2>Аккаунты на машинах</h2>
+          <p>
+            Аккаунты по умолчанию для новых чатов. В открытых чатах выбор
+            сохраняется.
+          </p>
+        </div>
+      </header>
+      <div className="settings-surface">
+        <table
+          className="settings-machine-table"
+          aria-label="Аккаунты по умолчанию на машинах"
+        >
+          <thead>
+            <tr>
+              <th scope="col">Машина</th>
+              {agentProviders.map((p) => (
+                <th scope="col" key={p}>
+                  {providerNames[p]}
+                </th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {ws.data.servers.map((m) => {
+              const Icon =
+                m.transport === 'local'
+                  ? Monitor
+                  : m.transport === 'connector'
+                    ? Laptop
+                    : Server;
+              return (
+                <tr key={m.id}>
+                  <th scope="row">
+                    <div className="machine-default-name">
+                      <Icon size={18} aria-hidden="true" />
+                      <div>
+                        <strong>{m.name}</strong>
+                        <small>
+                          {m.transport === 'local'
+                            ? 'Хост панели'
+                            : m.transport === 'connector'
+                              ? 'Коннектор'
+                              : 'SSH'}
+                        </small>
+                      </div>
+                    </div>
+                  </th>
+                  {agentProviders.map((p) => {
+                    const value = m.agentAccounts?.[p] || '';
+                    const options = accountChoices(accounts, p, value);
+                    return (
+                      <td key={p}>
+                        <span
+                          className="mobile-provider-name"
+                          aria-hidden="true"
+                        >
+                          {providerNames[p]}
+                        </span>
+                        {options.length > 1 ? (
+                          <WorkspaceSelect
+                            aria-label={`${providerNames[p]} · ${m.name}`}
+                            value={value}
+                            options={options}
+                            disabled={saving || !ws.connection}
+                            onValueChange={(id) => save(m.id, m.name, p, id)}
+                          />
+                        ) : (
+                          <span
+                            className="machine-profile"
+                            title={options[0].label}
+                          >
+                            {p === 'claude'
+                              ? 'Профиль Claude на машине'
+                              : options[0].label}
+                          </span>
+                        )}
+                      </td>
+                    );
+                  })}
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+      <ErrorText error={error} />
+      <output className="settings-feedback">
+        {saving ? 'Сохраняем выбор…' : notice}
+      </output>
+    </section>
+  );
+}
+
 export function AccountsSettings({ hub, ws }: { hub: Hub; ws: Workspace }) {
   const [form, setForm] = useState<AgentAccount | 'new' | 'claude' | null>(
       null,
@@ -608,7 +759,7 @@ export function AccountsSettings({ hub, ws }: { hub: Hub; ws: Workspace }) {
     [login, setLogin] = useState<AccountLogin | null>(null),
     [renaming, setRenaming] = useState<AgentAccount | null>(null),
     [deleting, setDeleting] = useState<AgentAccount | null>(null),
-    [removeError, setRemoveError] = useState(''),
+    [dialogError, setDialogError] = useState(''),
     [notice, setNotice] = useState(''),
     [name, setName] = useState(''),
     [error, setError] = useState(''),
@@ -625,235 +776,200 @@ export function AccountsSettings({ hub, ws }: { hub: Hub; ws: Workspace }) {
   const hasActiveChats = linkedChats.some((s) =>
     ['connecting', 'running', 'approval'].includes(s.status),
   );
+  async function openLogin(account: AgentAccount) {
+    setError('');
+    if (account.status !== 'pending') {
+      setForm(account);
+      return;
+    }
+    try {
+      setLogin(await hub.api<AccountLogin>(`/hub/accounts/${account.id}`));
+    } catch (reason) {
+      setError((reason as Error).message);
+    }
+  }
+  async function disconnect(account: AgentAccount) {
+    setBusy(true);
+    setError('');
+    try {
+      await hub.mutate(`/accounts/${account.id}`, {}, 'DELETE');
+    } catch (reason) {
+      setError((reason as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  }
+  const hasAssignments = ws.data.servers.some((machine) =>
+    agentProviders.some((provider) => machine.agentAccounts?.[provider]),
+  );
   return (
     <>
-      <section className="detail-card accounts-settings">
-        <div className="section-title">
-          <div>
-            <h2>Аккаунты агентов</h2>
-            <p className="muted">
-              Личные и рабочие аккаунты для ваших серверов и чатов.
-            </p>
-          </div>
+      <section className="settings-section">
+        <header className="settings-section-heading">
+          <h2>Сохранённые аккаунты</h2>
           <button
+            type="button"
             className="hub-button primary"
-            onClick={() => setForm('new')}
             disabled={!ws.connection}
+            aria-label="Добавить аккаунт"
+            onClick={() => setForm('new')}
           >
-            <Plus size={15} /> Добавить аккаунт
+            <Plus size={16} />
+            <span>
+              Добавить<span className="settings-add-object"> аккаунт</span>
+            </span>
           </button>
-        </div>
-        {!accounts.length ? (
-          <div className="accounts-empty">
-            <UserRound size={25} />
-            <strong>Подключите первый аккаунт</strong>
-            <p>
-              Войдите с ChatGPT для Codex или выберите провайдера OpenCode.
-              Сохранённый аккаунт можно использовать на нескольких машинах.
-            </p>
-          </div>
-        ) : (
-          <div className="account-list">
-            {accounts.map((a) => (
-              <article className="account-card" key={a.id}>
-                <div className="account-card-main">
-                  <div className={`agent-logo ${a.provider}`}>
-                    {a.authType === 'api' ? (
-                      <KeyRound size={18} />
-                    ) : (
-                      <UserRound size={18} />
-                    )}
-                  </div>
-                  <div>
-                    <strong>{a.name}</strong>
-                    <p>
-                      {providerNames[a.provider]}
-                      {a.provider === 'opencode' ? ` · ${a.vendor}` : ''}
-                      {a.email ? ` · ${a.email}` : ''}
-                      {a.planType ? ` · ${a.planType}` : ''}
-                    </p>
-                  </div>
-                  <span
-                    className={`state-badge ${a.status === 'connected' ? 'online' : ''}`}
-                  >
-                    {a.status === 'connected' && <Check size={12} />}
-                    {labels[a.status]}
-                  </span>
-                </div>
-                <div className="account-card-actions">
-                  {a.status === 'pending' ? (
-                    <button
-                      className="hub-button"
-                      onClick={async () => {
-                        try {
-                          setLogin(
-                            await hub.api<AccountLogin>(
-                              `/hub/accounts/${a.id}`,
-                            ),
-                          );
-                        } catch (e) {
-                          setError((e as Error).message);
-                        }
-                      }}
+        </header>
+        <div className="settings-surface">
+          {!hub.ready && hub.error ? (
+            <div className="settings-empty">
+              <ErrorText error={hub.error} />
+            </div>
+          ) : !hub.ready && ws.connection ? (
+            <output className="settings-empty">Загружаем аккаунты…</output>
+          ) : !accounts.length ? (
+            <div className="settings-empty">
+              <span className="settings-row-icon">
+                <UserRound size={20} />
+              </span>
+              <div>
+                <h3>Пока нет сохранённых аккаунтов</h3>
+                <p>
+                  Добавьте аккаунт агента, чтобы выбирать его в чатах и на
+                  машинах.
+                </p>
+              </div>
+            </div>
+          ) : (
+            accounts.map((a) => {
+              const Icon = providerIcons[a.provider];
+              return (
+                <article key={a.id} className="settings-account">
+                  <div className="settings-account-row">
+                    <span
+                      className={`settings-row-icon provider-${a.provider}`}
                     >
-                      Продолжить вход
-                    </button>
-                  ) : (
-                    <button className="hub-button" onClick={() => setForm(a)}>
-                      <LogIn size={14} />
-                      {a.status === 'connected'
-                        ? 'Войти повторно'
-                        : 'Подключить'}
-                    </button>
+                      <Icon size={19} />
+                    </span>
+                    <div className="settings-account-identity">
+                      <h3>{a.name}</h3>
+                      <p>
+                        {[
+                          providerNames[a.provider],
+                          a.provider === 'opencode' && a.vendor,
+                          a.email,
+                          a.planType,
+                        ]
+                          .filter(Boolean)
+                          .join(' · ')}
+                      </p>
+                    </div>
+                    <span className={`account-state ${a.status}`}>
+                      <i aria-hidden="true" />
+                      {labels[a.status]}
+                    </span>
+                    {a.status !== 'connected' && (
+                      <button
+                        className="hub-button account-login-action"
+                        disabled={busy || !ws.connection}
+                        onClick={() => void openLogin(a)}
+                      >
+                        {a.status === 'pending'
+                          ? 'Продолжить вход'
+                          : 'Подключить'}
+                      </button>
+                    )}
+                    <DropdownMenu>
+                      <DropdownMenuTrigger
+                        className="icon-button account-menu-trigger"
+                        aria-label={`Действия с аккаунтом ${a.name}`}
+                        title="Действия с аккаунтом"
+                      >
+                        <MoreHorizontal size={18} />
+                      </DropdownMenuTrigger>
+                      <DropdownMenuContent
+                        className="workspace-menu"
+                        align="end"
+                      >
+                        {a.status === 'connected' && (
+                          <DropdownMenuItem
+                            disabled={busy}
+                            onClick={() => void openLogin(a)}
+                          >
+                            <LogIn />
+                            Войти повторно
+                          </DropdownMenuItem>
+                        )}
+                        <DropdownMenuItem
+                          disabled={busy}
+                          onClick={() => {
+                            setDialogError('');
+                            setName(a.name);
+                            setRenaming(a);
+                          }}
+                        >
+                          <Pencil />
+                          Переименовать
+                        </DropdownMenuItem>
+                        <DropdownMenuSeparator />
+                        <DropdownMenuItem
+                          disabled={busy || a.status === 'disconnected'}
+                          onClick={() => void disconnect(a)}
+                        >
+                          <Unplug />
+                          Отключить
+                        </DropdownMenuItem>
+                        <DropdownMenuItem
+                          variant="destructive"
+                          disabled={busy}
+                          onClick={() => {
+                            setDialogError('');
+                            setDeleting(a);
+                          }}
+                        >
+                          <Trash2 />
+                          Удалить аккаунт
+                        </DropdownMenuItem>
+                      </DropdownMenuContent>
+                    </DropdownMenu>
+                  </div>
+                  <ErrorText error={a.error || ''} />
+                  {!!a.pendingCleanup && (
+                    <p className="model-catalog-note">
+                      Удаление доступа с {a.pendingCleanup} профилей машин
+                      завершится после их подключения.
+                    </p>
                   )}
-                  <button
-                    className="text-button"
-                    onClick={() => {
-                      setRenaming(a);
-                      setName(a.name);
-                    }}
-                  >
-                    Переименовать
-                  </button>
-                  <button
-                    className="text-button"
-                    disabled={busy || a.status === 'disconnected'}
-                    onClick={async () => {
-                      setBusy(true);
-                      setError('');
-                      try {
-                        await hub.mutate(`/accounts/${a.id}`, {}, 'DELETE');
-                      } catch (e) {
-                        setError((e as Error).message);
-                      } finally {
-                        setBusy(false);
-                      }
-                    }}
-                  >
-                    <X size={13} /> Отключить
-                  </button>
-                  <button
-                    type="button"
-                    className="text-button danger"
-                    aria-label={`Удалить аккаунт ${a.name}`}
-                    disabled={busy}
-                    onClick={() => {
-                      setRemoveError('');
-                      setDeleting(a);
-                    }}
-                  >
-                    <Trash2 size={13} /> Удалить
-                  </button>
-                </div>
-                <ErrorText error={a.error || ''} />
-                {!!a.pendingCleanup && (
-                  <p className="model-catalog-note">
-                    Удаление доступа с {a.pendingCleanup} профилей машин
-                    завершится после их подключения.
-                  </p>
-                )}
-              </article>
-            ))}
-          </div>
-        )}
-        <div className="account-card">
-          <div className="account-card-main">
-            <div className="agent-logo claude">
-              <UserRound size={18} />
-            </div>
+                </article>
+              );
+            })
+          )}
+          <div className="settings-subscription">
+            <span className="settings-row-icon provider-claude">
+              <Sparkles size={19} />
+            </span>
             <div>
-              <strong>Подписка Claude</strong>
-              <p>
-                Вход через ваш Claude-аккаунт на выбранной машине, без
-                API-ключа.
-              </p>
+              <h3>Подписка Claude</h3>
+              <p>Вход в Claude на выбранной машине без API-ключа.</p>
             </div>
-          </div>
-          <div className="account-card-actions">
             <button
               type="button"
               className="hub-button"
+              aria-label="Подключить подписку Claude"
               disabled={!ws.connection}
               onClick={() => setForm('claude')}
             >
-              <LogIn size={14} /> Подключить подписку Claude
+              Подключить <ChevronRight size={15} />
             </button>
           </div>
         </div>
         <ErrorText error={error} />
-        {notice && (
-          <p className="owner-settings-notice" role="status">
-            {notice}
-          </p>
-        )}
-        <p className="hub-note">
-          <ShieldCheck size={15} /> Токены хранятся на серверной части панели в
-          зашифрованном виде. Codex получает доступ для выбранного процесса; для
-          OpenCode используются отдельные профили аккаунтов.
-        </p>
-        <p className="model-catalog-note">
-          Для OAuth в OpenCode доступен один активный чат на аккаунт: это
-          защищает обновление токенов между машинами. API-ключи позволяют
-          работать параллельно.
-        </p>
+        {notice && <output className="settings-feedback">{notice}</output>}
       </section>
-      {!!accounts.some((a) => a.status === 'connected') && (
-        <section className="detail-card account-machine-defaults">
-          <div className="section-title">
-            <h2>Аккаунты на машинах</h2>
-          </div>
-          <p className="muted">
-            Выбор по умолчанию для новых чатов. В существующих чатах аккаунт
-            закреплён отдельно.
-          </p>
-          {ws.data.servers.map((m) => (
-            <div className="account-machine-row" key={m.id}>
-              <strong>{m.name}</strong>
-              {agentProviders.map((p) => (
-                <label className="hub-field" key={p}>
-                  <span>{providerNames[p]}</span>
-                  <select
-                    aria-label={`${providerNames[p]} · ${m.name}`}
-                    value={m.agentAccounts?.[p] || ''}
-                    disabled={busy}
-                    onChange={async (e) => {
-                      setBusy(true);
-                      setError('');
-                      try {
-                        await ws.action(
-                          `/hub/machines/${m.id}/agents/${p}/account`,
-                          { accountId: e.target.value || null },
-                        );
-                        await hub.refresh();
-                      } catch (e) {
-                        setError((e as Error).message);
-                      } finally {
-                        setBusy(false);
-                      }
-                    }}
-                  >
-                    <option value="">
-                      {p === 'claude'
-                        ? 'Подписка / профиль Claude на машине'
-                        : 'Аккаунт машины'}
-                    </option>
-                    {accounts
-                      .filter(
-                        (a) => a.provider === p && a.status === 'connected',
-                      )
-                      .map((a) => (
-                        <option key={a.id} value={a.id}>
-                          {a.name}
-                          {a.email ? ` · ${a.email}` : ''}
-                        </option>
-                      ))}
-                  </select>
-                </label>
-              ))}
-            </div>
-          ))}
-        </section>
-      )}
+      {ws.data.servers.length > 0 &&
+        (hasAssignments || accounts.some((a) => a.status === 'connected')) && (
+          <MachineDefaults hub={hub} ws={ws} />
+        )}
       {form && (
         <AccountForm
           hub={hub}
@@ -880,17 +996,23 @@ export function AccountsSettings({ hub, ws }: { hub: Hub; ws: Workspace }) {
         />
       )}
       {renaming && (
-        <Modal title="Название аккаунта" onClose={() => setRenaming(null)}>
+        <Modal
+          title="Название аккаунта"
+          onClose={() => {
+            if (!busy) setRenaming(null);
+          }}
+        >
           <form
             className="hub-form"
             onSubmit={async (e) => {
               e.preventDefault();
               setBusy(true);
+              setDialogError('');
               try {
                 await hub.mutate(`/accounts/${renaming.id}`, { name }, 'PATCH');
                 setRenaming(null);
               } catch (e) {
-                setError((e as Error).message);
+                setDialogError((e as Error).message);
               } finally {
                 setBusy(false);
               }
@@ -904,7 +1026,23 @@ export function AccountsSettings({ hub, ws }: { hub: Hub; ws: Workspace }) {
                 required
               />
             </Field>
-            <Submit busy={busy}>Сохранить</Submit>
+            <ErrorText error={dialogError} />
+            <div className="form-actions">
+              <button
+                type="button"
+                className="hub-button"
+                disabled={busy}
+                onClick={() => setRenaming(null)}
+              >
+                Отмена
+              </button>
+              <Submit
+                busy={busy}
+                disabled={!name.trim() || name.trim() === renaming.name}
+              >
+                Сохранить
+              </Submit>
+            </div>
           </form>
         </Modal>
       )}
@@ -943,7 +1081,7 @@ export function AccountsSettings({ hub, ws }: { hub: Hub; ws: Workspace }) {
               Сначала завершите или остановите активные чаты этого аккаунта.
             </p>
           )}
-          <ErrorText error={removeError} />
+          <ErrorText error={dialogError} />
           <div className="form-actions">
             <button
               type="button"
@@ -959,7 +1097,7 @@ export function AccountsSettings({ hub, ws }: { hub: Hub; ws: Workspace }) {
               disabled={busy || hasActiveChats}
               onClick={async () => {
                 setBusy(true);
-                setRemoveError('');
+                setDialogError('');
                 try {
                   const result = await ws.action<{ pendingCleanup: number }>(
                     `/hub/accounts/${deleting.id}/remove`,
@@ -974,7 +1112,7 @@ export function AccountsSettings({ hub, ws }: { hub: Hub; ws: Workspace }) {
                   );
                   await hub.refresh();
                 } catch (e) {
-                  setRemoveError((e as Error).message);
+                  setDialogError((e as Error).message);
                 } finally {
                   setBusy(false);
                 }

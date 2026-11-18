@@ -34,9 +34,7 @@ export function Modal({
       <DialogContent className={`hub-modal ${wide ? 'hub-modal-wide' : ''} ${className}`}>
         <DialogHeader>
           <DialogTitle>{title}</DialogTitle>
-          <DialogDescription>
-            {description || 'Рабочее пространство MayPlane'}
-          </DialogDescription>
+          {description && <DialogDescription>{description}</DialogDescription>}
         </DialogHeader>
         {children}
       </DialogContent>

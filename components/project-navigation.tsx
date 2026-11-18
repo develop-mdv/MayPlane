@@ -7,6 +7,8 @@ import {
   Folder,
   FolderInput,
   MessageSquare,
+  Info,
+  FileDiff,
   MoreHorizontal,
   Pencil,
   Plus,
@@ -32,12 +34,16 @@ export function ChatActions({
   onMove,
   onArchive,
   onDelete,
+  onInfo,
+  onChanges,
 }: {
   session: AgentSession;
   onRename: () => void;
   onMove: () => void;
   onArchive: () => void;
   onDelete: () => void;
+  onInfo?: () => void;
+  onChanges?: () => void;
 }) {
   return (
     <DropdownMenu>
@@ -48,6 +54,18 @@ export function ChatActions({
         <MoreHorizontal size={15} />
       </DropdownMenuTrigger>
       <DropdownMenuContent className="workspace-menu" align="end">
+        {onChanges && (
+          <DropdownMenuItem onClick={onChanges}>
+            <FileDiff />
+            Изменения в чате
+          </DropdownMenuItem>
+        )}
+        {onInfo && (
+          <DropdownMenuItem onClick={onInfo}>
+            <Info />
+            Контекст чата
+          </DropdownMenuItem>
+        )}
         <DropdownMenuItem onClick={onRename} disabled={activeSession(session)}>
           <Pencil />
           Переименовать
@@ -67,6 +85,37 @@ export function ChatActions({
         >
           <Trash2 />
           Удалить чат
+        </DropdownMenuItem>
+      </DropdownMenuContent>
+    </DropdownMenu>
+  );
+}
+
+export function ProjectActions({
+  project,
+  onRename,
+  onRemove,
+}: {
+  project: HubProject;
+  onRename: () => void;
+  onRemove: () => void;
+}) {
+  return (
+    <DropdownMenu>
+      <DropdownMenuTrigger
+        className="icon-button"
+        aria-label={`Действия с проектом ${project.name}`}
+      >
+        <MoreHorizontal size={14} />
+      </DropdownMenuTrigger>
+      <DropdownMenuContent className="workspace-menu" align="end">
+        <DropdownMenuItem onClick={onRename}>
+          <Pencil />
+          Переименовать проект
+        </DropdownMenuItem>
+        <DropdownMenuItem variant="destructive" onClick={onRemove}>
+          <Trash2 />
+          Удалить проект
         </DropdownMenuItem>
       </DropdownMenuContent>
     </DropdownMenu>
@@ -221,27 +270,11 @@ export function ProjectNavigation({
             >
               <Plus size={14} />
             </button>
-            <DropdownMenu>
-              <DropdownMenuTrigger
-                className="icon-button"
-                aria-label={`Действия с проектом ${p.name}`}
-              >
-                <MoreHorizontal size={14} />
-              </DropdownMenuTrigger>
-              <DropdownMenuContent className="workspace-menu" align="end">
-                <DropdownMenuItem onClick={() => onRenameProject(p)}>
-                  <Pencil />
-                  Переименовать проект
-                </DropdownMenuItem>
-                <DropdownMenuItem
-                  variant="destructive"
-                  onClick={() => onRemoveProject(p)}
-                >
-                  <Trash2 />
-                  Удалить проект
-                </DropdownMenuItem>
-              </DropdownMenuContent>
-            </DropdownMenu>
+            <ProjectActions
+              project={p}
+              onRename={() => onRenameProject(p)}
+              onRemove={() => onRemoveProject(p)}
+            />
           </div>
           {!collapsed.has(p.id) && (
             <div className="tree-project-chats">

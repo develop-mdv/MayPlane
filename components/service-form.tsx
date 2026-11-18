@@ -1,7 +1,8 @@
 'use client';
+import { WorkspaceSelect } from './workspace-select';
 
-import { useEffect, useState, type SubmitEvent } from 'react';
-import { LoaderCircle, Plus, Search, Sparkles, X } from 'lucide-react';
+import { useEffect, useRef, useState, type SubmitEvent } from 'react';
+import { ChevronDown, LoaderCircle, Plus, Search, Sparkles, X } from 'lucide-react';
 import type { Server } from '@/lib/domain';
 import type {
   Hub,
@@ -98,6 +99,7 @@ export function ServiceForm({
   const [jobId, setJobId] = useState('');
   const [feedback, setFeedback] = useState('');
   const [warning, setWarning] = useState('');
+  const optionsRef = useRef<HTMLDetailsElement>(null);
   const { api, mutate } = hub;
   const machine = machines.find((m) => m.id === form.machineId);
   const automatic = !!machine && machine.transport !== 'connector';
@@ -136,6 +138,7 @@ export function ServiceForm({
             projectId: previous.projectId || fields.projectId || null,
           }));
           setWarning(draft.warning || '');
+          if (optionsRef.current) optionsRef.current.open = true;
           setFeedback('Черновик заполнен. Проверьте поля перед сохранением.');
           setJobId('');
         } else if (draft.status === 'failed') {
@@ -258,7 +261,6 @@ export function ServiceForm({
   return (
     <Modal
       title={service ? 'Редактировать сервис' : 'Добавить сервис'}
-      description="Карточка приложения, бота или службы на подключённой машине."
       onClose={() => {
         if (!busy) onClose();
       }}
@@ -270,58 +272,71 @@ export function ServiceForm({
       >
         <fieldset className="service-form-fields" disabled={locked}>
           <div className="form-grid">
+            <Field label="Название">
+              <input
+                value={form.name}
+                required
+                maxLength={100}
+                onChange={(event) => field('name', event.target.value)}
+              />
+            </Field>
+            <Field label="Окружение">
+              <input
+                value={form.environment}
+                maxLength={40}
+                placeholder="prod, test"
+                onChange={(event) => field('environment', event.target.value)}
+              />
+            </Field>
+          </div>
+          <div className="form-grid">
             <Field label="Машина">
-              <select
+              <WorkspaceSelect
+                aria-label="Машина"
                 value={form.machineId}
                 disabled={service?.legacy}
                 required
-                onChange={(event) => {
+                onValueChange={(choice) => {
                   setDiscovery(null);
                   setWarning('');
                   setFeedback('');
                   setForm({
                     ...form,
-                    machineId: event.target.value,
+                    machineId: choice,
                     directory: '',
                     healthUrl: '',
                     source: blankSources.manual,
                     additionalSources: [],
                   });
                 }}
-              >
-                <option value="">Выберите машину</option>
-                {machines.map((m) => (
-                  <option key={m.id} value={m.id}>
-                    {m.name}
-                  </option>
-                ))}
-              </select>
+                options={[
+                  { value: '', label: 'Выберите машину' },
+                  ...machines.map((m) => ({ value: m.id, label: m.name })),
+                ]}
+              />
             </Field>
             <Field label="Проект">
-              <select
+              <WorkspaceSelect
+                aria-label="Проект"
                 value={form.projectId || ''}
-                onChange={(event) =>
-                  field('projectId', event.target.value || null)
-                }
-              >
-                <option value="">Без проекта</option>
-                {projects.map((project) => (
-                  <option key={project.id} value={project.id}>
-                    {project.name} ·{' '}
-                    {machines.find((m) => m.id === project.machineId)?.name ||
-                      'рабочая папка'}
-                  </option>
-                ))}
-              </select>
+                onValueChange={(choice) => field('projectId', choice || null)}
+                options={[
+                  { value: '', label: 'Без проекта' },
+                  ...projects.map((project) => ({
+                    value: project.id,
+                    label: `${project.name} · ${machines.find((m) => m.id === project.machineId)?.name || 'рабочая папка'}`,
+                  })),
+                ]}
+              />
             </Field>
           </div>
           <div className="service-source-fields">
             <Field label="Источник состояния и логов">
-              <select
+              <WorkspaceSelect
+                aria-label="Источник состояния и логов"
                 value={source.type}
-                onChange={(event) => {
-                  const source =
-                    blankSources[event.target.value as ServiceSource['type']];
+                onValueChange={(choice) => {
+                  const source = blankSources[choice as ServiceSource['type']];
                   setDiscovery(null);
                   setForm({
                     ...form,
@@ -330,20 +345,16 @@ export function ServiceForm({
                       source.type === 'manual' ? [] : additionalSources,
                   });
                 }}
-              >
-                {Object.entries(serviceSourceNames).map(([value, label]) => (
-                  <option
-                    key={value}
-                    value={value}
-                    disabled={
+                options={Object.entries(serviceSourceNames).map(
+                  ([value, label]) => ({
+                    value,
+                    label,
+                    disabled:
                       value !== 'manual' &&
-                      (!automatic || (value === 'systemd' && !linux))
-                    }
-                  >
-                    {label}
-                  </option>
-                ))}
-              </select>
+                      (!automatic || (value === 'systemd' && !linux)),
+                  }),
+                )}
+              />
             </Field>
             <button
               type="button"
@@ -552,82 +563,67 @@ export function ServiceForm({
           )}
         </div>
         <ErrorText error={busy === 'saving' ? '' : error} />
-        <fieldset className="service-form-fields" disabled={locked}>
-          <div className="form-grid">
-            <Field label="Название">
-              <input
-                value={form.name}
-                required
-                maxLength={100}
-                onChange={(event) => field('name', event.target.value)}
+        <details className="session-options service-options" ref={optionsRef} open={!!service}>
+          <summary>Описание, ссылки и параметры запуска <ChevronDown size={16} /></summary>
+          <fieldset className="service-form-fields" disabled={locked}>
+            <Field label="Описание">
+              <textarea
+                rows={2}
+                maxLength={500}
+                value={form.description}
+                onChange={(event) => field('description', event.target.value)}
               />
             </Field>
-            <Field label="Окружение">
-              <input
-                value={form.environment}
-                maxLength={40}
-                placeholder="prod, test"
-                onChange={(event) => field('environment', event.target.value)}
-              />
-            </Field>
-          </div>
-          <Field label="Описание">
-            <textarea
-              rows={2}
-              maxLength={500}
-              value={form.description}
-              onChange={(event) => field('description', event.target.value)}
-            />
-          </Field>
-          <div className="form-grid">
-            <PathField api={api} machineId={machine?.id} machineName={machine?.name} platform={machine?.platform}
-              startPath={projects.find((p) => p.id === form.projectId && p.machineId === form.machineId)?.path}
-              label="Каталог запуска" value={form.directory} onChange={(path) => field('directory', path)} disabled={locked} />
-            <Field label="Адрес приложения">
+            <div className="form-grid">
+              <PathField api={api} machineId={machine?.id} machineName={machine?.name} platform={machine?.platform}
+                startPath={projects.find((p) => p.id === form.projectId && p.machineId === form.machineId)?.path}
+                label="Каталог запуска" value={form.directory} onChange={(path) => field('directory', path)} disabled={locked} />
+              <Field label="Адрес приложения">
+                <input
+                  type="url"
+                  value={form.url}
+                  maxLength={1000}
+                  placeholder="https://app.example.com"
+                  onChange={(event) => field('url', event.target.value)}
+                />
+              </Field>
+            </div>
+            <Field label="Репозиторий">
               <input
                 type="url"
-                value={form.url}
                 maxLength={1000}
-                placeholder="https://app.example.com"
-                onChange={(event) => field('url', event.target.value)}
+                value={form.repo || ''}
+                placeholder="https://github.com/owner/repo"
+                onChange={(event) => field('repo', event.target.value)}
               />
             </Field>
-          </div>
-          <Field label="Репозиторий">
-            <input
-              type="url"
-              maxLength={1000}
-              value={form.repo || ''}
-              placeholder="https://github.com/owner/repo"
-              onChange={(event) => field('repo', event.target.value)}
-            />
-          </Field>
-          <Field
-            label="Заметки"
-            hint="Например, где конфиг и что проверить после обновления."
-          >
-            <textarea
-              rows={3}
-              maxLength={6000}
-              value={form.notes}
-              onChange={(event) => field('notes', event.target.value)}
-            />
-          </Field>
-          {automatic && (
             <Field
-              label="HTTP-проверка"
-              hint="Необязательно. Панель проверяет адрес на самой машине сервиса."
+              label="Заметки"
+              hint="Например, где конфиг и что проверить после обновления."
             >
-              <input
-                type="url"
-                value={form.healthUrl}
-                maxLength={1000}
-                placeholder="http://127.0.0.1:8080/health"
-                onChange={(event) => field('healthUrl', event.target.value)}
+              <textarea
+                rows={3}
+                maxLength={6000}
+                value={form.notes}
+                onChange={(event) => field('notes', event.target.value)}
               />
             </Field>
-          )}
-        </fieldset>
+            {automatic && (
+              <Field
+                label="HTTP-проверка"
+                hint="Необязательно. Панель проверяет адрес на самой машине сервиса."
+              >
+                <input
+                  type="url"
+                  value={form.healthUrl}
+                  maxLength={1000}
+                  placeholder="http://127.0.0.1:8080/health"
+                  onChange={(event) => field('healthUrl', event.target.value)}
+                />
+              </Field>
+            )}
+          </fieldset>
+        </details>
         <div className="form-actions">
           <button
             type="button"

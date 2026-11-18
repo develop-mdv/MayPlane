@@ -52,13 +52,7 @@ import {
   SheetHeader,
 } from '@/components/ui/sheet';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from '@/components/ui/select';
+import { WorkspaceSelect } from './workspace-select';
 import { Switch } from '@/components/ui/switch';
 import { Checkbox } from '@/components/ui/checkbox';
 import {
@@ -112,23 +106,14 @@ function Picker({
   disabled?: boolean;
 }) {
   return (
-    <Select
+    <WorkspaceSelect
+      aria-label={label}
+      placeholder={label}
+      value={value}
       disabled={disabled}
-      value={value || null}
-      items={items}
-      onValueChange={(v) => onChange(String(v || ''))}
-    >
-      <SelectTrigger aria-label={label} className="picker">
-        <SelectValue placeholder={label} />
-      </SelectTrigger>
-      <SelectContent>
-        {items.map((i) => (
-          <SelectItem key={i.value} value={i.value}>
-            {i.label}
-          </SelectItem>
-        ))}
-      </SelectContent>
-    </Select>
+      onValueChange={onChange}
+      options={items}
+    />
   );
 }
 function FormError({ error }: { error: string }) {

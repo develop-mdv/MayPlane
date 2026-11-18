@@ -552,7 +552,11 @@
   .files-turn-picker select {
     max-width: min(69vw, 470px);
   }
-  .file-row {
-    min-height: 39px;
-  }
+  .file-row, .workspace-mode-buttons button, .path-picker-crumbs button,
+  .workspace-files-toolbar .icon-button, .file-preview-title .icon-button,
+  .path-picker-toolbar .icon-button { min-height: 44px; }
+  .workspace-files-toolbar .icon-button, .file-preview-title .icon-button,
+  .path-picker-toolbar .icon-button { min-width: 44px; }
+  .workspace-mode-buttons { flex-wrap: wrap; flex-shrink: 1; }
+  .files-filter input, .files-turn-picker select { font-size: 1rem; }
 }

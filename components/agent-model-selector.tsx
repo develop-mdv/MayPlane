@@ -1,6 +1,7 @@
 'use client';
+import { WorkspaceSelect } from './workspace-select';
 import { AgentLimitsControl } from './agent-limits';
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useId, useRef, useState } from 'react';
 import {
   Check,
   ChevronDown,
@@ -134,6 +135,7 @@ export function AgentModelSelector({
   disabled?: boolean;
   onLoading?: (loading: boolean) => void;
 }) {
+  const reasoningId = useId();
   const [catalog, setCatalog] = useState<ModelCatalog | null>(null),
     [loading, setLoading] = useState(false),
     [error, setError] = useState('');
@@ -225,27 +227,31 @@ export function AgentModelSelector({
         onChange={(value) => onChange(value, '')}
       />
       {!!levels.length && (
-        <label className="hub-field reasoning-field">
+        <label htmlFor={reasoningId} className="hub-field reasoning-field">
           <span>Уровень reasoning</span>
-          <select
+          <WorkspaceSelect
+            id={reasoningId}
             aria-label="Уровень reasoning"
             disabled={disabled || loading}
             value={reasoning === 'default' ? '' : reasoning}
-            onChange={(e) => onChange(model, e.target.value)}
-          >
-            <option value="">
-              По умолчанию
-              {selected?.defaultReasoning &&
-              selected.defaultReasoning !== 'default'
-                ? ` · ${effortName(selected.defaultReasoning)}`
-                : ''}
-            </option>
-            {levels.map((e) => (
-              <option key={e.id} value={e.id} title={e.description}>
-                {effortNames[e.id] || e.name}
-              </option>
-            ))}
-          </select>
+            onValueChange={(choice) => onChange(model, choice)}
+            options={[
+              {
+                value: '',
+                label:
+                  'По умолчанию' +
+                  (selected?.defaultReasoning &&
+                  selected.defaultReasoning !== 'default'
+                    ? ` · ${effortName(selected.defaultReasoning)}`
+                    : ''),
+              },
+              ...levels.map((level) => ({
+                value: level.id,
+                label: effortNames[level.id] || level.name,
+                description: level.description,
+              })),
+            ]}
+          />
         </label>
       )}
       {reasoning && !loading && !efforts.some((e) => e.id === reasoning) && (

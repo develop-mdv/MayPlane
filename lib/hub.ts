@@ -369,41 +369,45 @@ export const sessionLabels: Record<AgentSession['status'], string> = {
 export const activeSession = (session?: AgentSession | null) =>
   !!session && ['running', 'connecting', 'approval'].includes(session.status);
 
+const emptyHub: HubSnapshot = { projects: [], sessions: [], services: [] };
+
 export function useHub(ws: Workspace) {
-  const [data, setData] = useState<HubSnapshot>({
-    projects: [],
-    sessions: [],
-    services: [],
-  });
+  const { connection, api } = ws;
+  const [snapshot, setSnapshot] = useState<{
+    source: typeof connection;
+    data: HubSnapshot;
+  } | null>(null);
   const [error, setError] = useState('');
-  const api = ws.api;
-  const revision = useRef(0);
+  const data = snapshot && snapshot.source === connection ? snapshot.data : null;
+  const sequence = useRef({ source: connection, version: 0 });
   const refresh = useCallback(async () => {
-    const expected = ++revision.current;
+    const requests = sequence.current;
+    const expected = requests.source === connection ? ++requests.version : -1;
     const next = await api<HubSnapshot>('/hub');
-    if (expected === revision.current) {
-      setData(next);
+    if (expected === requests.version) {
+      setSnapshot({ source: connection, data: next });
       setError('');
     }
     return next;
-  }, [api]);
+  }, [api, connection]);
   useEffect(() => {
-    setData({ projects: [], sessions: [], services: [] });
-    if (!ws.connection) return;
+    const requests = sequence.current;
+    requests.source = connection;
+    if (!connection) return;
     let alive = true,
       loading = false;
     const poll = async () => {
       if (loading) return;
       loading = true;
-      const expected = revision.current;
+      const expected = requests.version;
       try {
         const next = await api<HubSnapshot>('/hub');
-        if (alive && expected === revision.current) {
-          setData(next);
+        if (alive && expected === requests.version) {
+          setSnapshot({ source: connection, data: next });
           setError('');
         }
       } catch (e) {
-        if (alive) setError((e as Error).message);
+        if (alive && expected === requests.version) setError((e as Error).message);
       } finally {
         loading = false;
       }
@@ -412,9 +416,11 @@ export function useHub(ws: Workspace) {
     const timer = setInterval(poll, 3000);
     return () => {
       alive = false;
+      requests.source = null;
+      ++requests.version;
       clearInterval(timer);
     };
-  }, [ws.connection, api]);
+  }, [connection, api]);
   const mutate = useCallback(
     async <T>(
       path: string,
@@ -427,6 +433,6 @@ export function useHub(ws: Workspace) {
     },
     [api, refresh],
   );
-  return { data, error, refresh, mutate, api };
+  return { data: data || emptyHub, error, ready: !!data, refresh, mutate, api };
 }
 export type Hub = ReturnType<typeof useHub>;

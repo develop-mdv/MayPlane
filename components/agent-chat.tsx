@@ -1,8 +1,11 @@
 'use client';
+import { WorkspaceSelect } from './workspace-select';
 import { useEffect, useId, useMemo, useRef, useState } from 'react';
 import {
   ArrowUp,
   AtSign,
+  SlidersHorizontal,
+  Check,
   Square,
   Code2,
   Terminal,
@@ -129,17 +132,23 @@ export function NewSession({
   onClose: () => void;
   onAccounts: () => void;
 }) {
-  const targetMachine = service ? machines.find((m) => m.id === service.machineId) : initialMachine;
-  const allowHost = !!hub.data.capabilities?.hostSsh && isSshMachine(targetMachine);
-  const [runOnHost, setRunOnHost] = useState(() => !!initialMachine && allowHost);
+  const targetMachine = service
+    ? machines.find((m) => m.id === service.machineId)
+    : initialMachine;
+  const allowHost =
+    !!hub.data.capabilities?.hostSsh && isSshMachine(targetMachine);
+  const [runOnHost, setRunOnHost] = useState(
+    () => !!initialMachine && allowHost,
+  );
   const viaSsh = allowHost && runOnHost;
   const workingService = viaSsh ? undefined : service;
-  const serviceLocation = service ? serviceChatLocation(
-    service, projects, targetMachine?.platform,
-  ) : null;
+  const serviceLocation = service
+    ? serviceChatLocation(service, projects, targetMachine?.platform)
+    : null;
   const [projectId, setProjectId] = useState(initialProject || '');
   const [machineId, setMachineId] = useState(
-    initialMachine?.id || projects.find((p) => p.id === initialProject)?.machineId ||
+    initialMachine?.id ||
+      projects.find((p) => p.id === initialProject)?.machineId ||
       hub.data.localMachineId ||
       machines.find((m) => ['online', 'needs_setup'].includes(m.status))?.id ||
       machines[0]?.id ||
@@ -159,10 +168,18 @@ export function NewSession({
       initialProject ? 'workspace-write' : 'read-only',
     );
   const [loadingModels, setLoadingModels] = useState(false);
-  const chatProject = viaSsh ? null : serviceLocation ? serviceLocation.projectId : projectId;
-  const createOnHost = viaSsh || (!service && !chatProject && machineId === '__local');
-  const chatMachine = createOnHost ? hub.data.localMachineId || '' : serviceLocation?.machineId ||
-    projects.find((p) => p.id === projectId)?.machineId || machineId;
+  const chatProject = viaSsh
+    ? null
+    : serviceLocation
+      ? serviceLocation.projectId
+      : projectId;
+  const createOnHost =
+    viaSsh || (!service && !chatProject && machineId === '__local');
+  const chatMachine = createOnHost
+    ? hub.data.localMachineId || ''
+    : serviceLocation?.machineId ||
+      projects.find((p) => p.id === projectId)?.machineId ||
+      machineId;
   const selectedMachine = machines.find((m) => m.id === chatMachine);
   const defaultAccount = (hub.data.accounts || []).find(
     (a) => a.id === selectedMachine?.agentAccounts?.[provider],
@@ -170,11 +187,7 @@ export function NewSession({
   const [busy, setBusy] = useState(false),
     [error, setError] = useState('');
   return (
-    <Modal
-      title="Новый чат"
-      description={service || initialMachine ? undefined : 'Начните чат в рабочей папке проекта или без проекта на выбранной машине.'}
-      onClose={onClose}
-    >
+    <Modal title="Новый чат" onClose={onClose}>
       <form
         className="hub-form"
         onSubmit={async (e) => {
@@ -182,17 +195,29 @@ export function NewSession({
           setBusy(true);
           setError('');
           try {
-            const machineId = createOnHost && !chatMachine
-              ? (await hub.mutate<Server>('/local')).id
-              : chatMachine;
+            const machineId =
+              createOnHost && !chatMachine
+                ? (await hub.mutate<Server>('/local')).id
+                : chatMachine;
             const s = await hub.mutate<AgentSession>('/sessions', {
-              ...(workingService ? { serviceId: workingService.id, serviceCwd: serviceLocation?.cwd } : {
-                projectId: chatProject || null,
-                ...(!chatProject && !viaSsh && cwd.trim() ? { cwd: cwd.trim() } : {}),
-              }),
-              ...(viaSsh && targetMachine ? { sshTarget: service
-                ? { kind: 'service', id: service.id }
-                : { kind: 'machine', id: targetMachine.id } } : {}),
+              ...(workingService
+                ? {
+                    serviceId: workingService.id,
+                    serviceCwd: serviceLocation?.cwd,
+                  }
+                : {
+                    projectId: chatProject || null,
+                    ...(!chatProject && !viaSsh && cwd.trim()
+                      ? { cwd: cwd.trim() }
+                      : {}),
+                  }),
+              ...(viaSsh && targetMachine
+                ? {
+                    sshTarget: service
+                      ? { kind: 'service', id: service.id }
+                      : { kind: 'machine', id: targetMachine.id },
+                  }
+                : {}),
               machineId,
               provider,
               ...(accountChoice === '__default'
@@ -212,86 +237,127 @@ export function NewSession({
       >
         {allowHost && (
           <Field label="Где запустить агента">
-            <select aria-label="Где запустить агента" value={viaSsh ? 'host' : 'machine'} onChange={(event) => {
-              setRunOnHost(event.target.value === 'host');
-              setAccountChoice('__default');
-              setModel('');
-              setReasoning('');
-            }}>
-              <option value="machine">На машине · {machines.find((m) => m.id === serviceLocation?.machineId)?.name || targetMachine?.name}</option>
-              <option value="host">На хосте панели · доступ к цели по SSH</option>
-            </select>
-            {viaSsh && <small>Цель SSH будет доступна в чате. Действия, меняющие состояние сервиса, требуют подтверждения.</small>}
+            <WorkspaceSelect
+              aria-label="Где запустить агента"
+              value={viaSsh ? 'host' : 'machine'}
+              onValueChange={(choice) => {
+                setRunOnHost(choice === 'host');
+                setAccountChoice('__default');
+                setModel('');
+                setReasoning('');
+              }}
+              options={[
+                {
+                  value: 'machine',
+                  label: `На машине · ${machines.find((m) => m.id === serviceLocation?.machineId)?.name || targetMachine?.name || 'Машина'}`,
+                },
+                {
+                  value: 'host',
+                  label: 'На хосте панели с целью в чате по SSH',
+                },
+              ]}
+            />
+            {viaSsh && (
+              <small>
+                Цель SSH будет доступна в чате. Действия, меняющие состояние
+                сервиса, требуют подтверждения.
+              </small>
+            )}
           </Field>
         )}
         {service || initialMachine ? (
           <div className="hub-field">
-            <span>{service ? [service.name, targetMachine?.name].filter(Boolean).join(' · ') : initialMachine?.name}</span>
-            <code>{viaSsh ? 'Домашний каталог на хосте' : serviceLocation?.cwd || 'Домашний каталог'}</code>
+            <span>
+              {service
+                ? [service.name, targetMachine?.name]
+                    .filter(Boolean)
+                    .join(' · ')
+                : initialMachine?.name}
+            </span>
+            <code>
+              {viaSsh
+                ? 'Домашний каталог на хосте'
+                : serviceLocation?.cwd || 'Домашний каталог'}
+            </code>
           </div>
-        ) : <Field label="Проект">
-          <select
-            aria-label="Проект"
-            value={projectId}
-            onChange={(e) => {
-              setProjectId(e.target.value);
-              setCwd('');
-              setModelCwd('');
-              setAccountChoice('__default');
-              setModel('');
-              setReasoning('');
-              setMode(e.target.value ? 'workspace-write' : 'read-only');
-            }}
-          >
-            <option value="">Без проекта</option>
-            {projects.map((p) => (
-              <option key={p.id} value={p.id}>
-                {p.name} ·{' '}
-                {machines.find((m) => m.id === p.machineId)?.name || 'Машина'}
-              </option>
-            ))}
-          </select>
-        </Field>}
-        {!service && !initialMachine && !projectId && (
-          <>
-          <Field label="Машина">
-            <select
-              aria-label="Машина"
-              required
-              value={machineId}
-              onChange={(e) => {
-                setMachineId(e.target.value);
+        ) : (
+          <Field label="Проект">
+            <WorkspaceSelect
+              aria-label="Проект"
+              value={projectId}
+              onValueChange={(choice) => {
+                setProjectId(choice);
                 setCwd('');
                 setModelCwd('');
                 setAccountChoice('__default');
                 setModel('');
                 setReasoning('');
+                setMode(choice ? 'workspace-write' : 'read-only');
               }}
-            >
-              <option value="" disabled>
-                Выберите машину
-              </option>
-              {machines.map((m) => (
-                <option key={m.id} value={m.id}>
-                  {m.name}
-                </option>
-              ))}
-              {hub.data.capabilities?.hostSsh && (!hub.data.localMachineId || machineId === '__local') && (
-                <option value="__local">Хост панели</option>
-              )}
-            </select>
+              options={[
+                { value: '', label: 'Без проекта' },
+                ...projects.map((p) => ({
+                  value: p.id,
+                  label: `${p.name} · ${machines.find((m) => m.id === p.machineId)?.name || 'Машина'}`,
+                })),
+              ]}
+            />
           </Field>
-          <PathField api={hub.api} machineId={selectedMachine?.id} machineName={selectedMachine?.name} platform={selectedMachine?.platform}
-            label="Рабочая папка · необязательно" hint="Если оставить пустым, чат начнётся в домашней папке на выбранной машине."
-            value={cwd} onChange={(path) => { setCwd(path); setModel(''); setReasoning(''); }} />
+        )}
+        {!service && !initialMachine && !projectId && (
+          <>
+            <Field label="Машина">
+              <WorkspaceSelect
+                aria-label="Машина"
+                required
+                value={machineId}
+                onValueChange={(choice) => {
+                  setMachineId(choice);
+                  setCwd('');
+                  setModelCwd('');
+                  setAccountChoice('__default');
+                  setModel('');
+                  setReasoning('');
+                }}
+                options={[
+                  { value: '', label: 'Выберите машину', disabled: true },
+                  ...machines.map((m) => ({ value: m.id, label: m.name })),
+                  ...(hub.data.capabilities?.hostSsh &&
+                  (!hub.data.localMachineId || machineId === '__local')
+                    ? [{ value: '__local', label: 'Хост панели' }]
+                    : []),
+                ]}
+              />
+            </Field>
+            <details className="session-options session-folder">
+              <summary>
+                Рабочая папка <span title={cwd}>{cwd || 'Домашняя'}</span>
+                <ChevronDown size={16} />
+              </summary>
+              <PathField
+                api={hub.api}
+                machineId={selectedMachine?.id}
+                machineName={selectedMachine?.name}
+                platform={selectedMachine?.platform}
+                label="Путь к папке"
+                hint="Оставьте поле пустым, чтобы начать в домашней папке."
+                value={cwd}
+                onChange={(path) => {
+                  setCwd(path);
+                  setModel('');
+                  setReasoning('');
+                }}
+              />
+            </details>
           </>
         )}
         <div className="hub-field">
           <span>Агент</span>
-          <div className="provider-options">
+          <fieldset className="provider-options" aria-label="Агент">
             {agentProviders.map((p) => (
               <button
                 className={provider === p ? 'selected' : ''}
+                aria-pressed={provider === p}
                 type="button"
                 key={p}
                 onClick={() => {
@@ -301,76 +367,31 @@ export function NewSession({
                   setReasoning('');
                 }}
               >
-                <Code2 size={20} />
+                <span className={`provider-dot ${p}`} />
                 <strong>{providerNames[p]}</strong>
-                <small>
-                  {p === 'codex'
-                    ? 'Ваш аккаунт ChatGPT / API'
-                    : p === 'claude'
-                      ? 'Anthropic API / аккаунт машины'
-                      : 'Ваши провайдеры моделей'}
-                </small>
+                {provider === p && <Check size={14} aria-hidden="true" />}
               </button>
             ))}
-          </div>
+          </fieldset>
         </div>
-        <AccountSelect
-          hub={hub}
-          provider={provider}
-          value={accountChoice}
-          defaultName={defaultAccount?.name || ''}
-          onChange={(value) => {
-            setAccountChoice(value);
-            setModel('');
-            setReasoning('');
-          }}
-        />
-        <button className="text-button" type="button" onClick={onAccounts}>
-          Добавить или настроить аккаунты
-        </button>
-        <AgentModelSelector
-          key={provider + ':' + (workingService?.id || chatProject || chatMachine) + ':' + accountChoice}
-          hub={hub}
-          machineId={chatMachine}
-          provider={provider}
-          projectId={chatProject || undefined}
-          serviceId={workingService?.id}
-          cwd={!chatProject && !service && !initialMachine ? modelCwd || undefined : undefined}
-          accountId={
-            accountChoice === '__default' ? undefined : accountChoice || null
-          }
-          model={model}
-          reasoning={reasoning}
-          onLoading={setLoadingModels}
-          onChange={(m, r) => {
-            setModel(m);
-            setReasoning(r);
-          }}
-        />
-        <AgentLimitsControl
-          hub={hub}
-          machineId={selectedMachine?.id || ''}
-          provider={provider}
-          accountId={
-            accountChoice === '__default'
-              ? selectedMachine?.agentAccounts?.[provider] || null
-              : accountChoice || null
-          }
-        />
         {provider === 'codex' ? (
           <Field label="Доступ к рабочей папке">
-            <select
+            <WorkspaceSelect
               aria-label="Доступ к рабочей папке"
               value={mode}
-              onChange={(e) => setMode(e.target.value)}
-            >
-              <option value="workspace-write">
-                Изменения в рабочей папке · дополнительные права по запросу
-              </option>
-              <option value="read-only">
-                Только чтение · для анализа и ревью
-              </option>
-            </select>
+              onValueChange={setMode}
+              options={[
+                {
+                  value: 'workspace-write',
+                  label:
+                    'Изменения в рабочей папке · дополнительные права по запросу',
+                },
+                {
+                  value: 'read-only',
+                  label: 'Только чтение · для анализа и ревью',
+                },
+              ]}
+            />
           </Field>
         ) : (
           <p className="hub-note">
@@ -378,6 +399,68 @@ export function NewSession({
             разрешение на инструменты. Разрешить можно одно действие за раз.
           </p>
         )}
+        <details className="session-options">
+          <summary>
+            Аккаунт и модель <ChevronDown size={16} />
+          </summary>
+          <div className="hub-form">
+            <AccountSelect
+              hub={hub}
+              provider={provider}
+              value={accountChoice}
+              defaultName={defaultAccount?.name || ''}
+              onChange={(value) => {
+                setAccountChoice(value);
+                setModel('');
+                setReasoning('');
+              }}
+            />
+            <button className="text-button" type="button" onClick={onAccounts}>
+              Добавить или настроить аккаунты
+            </button>
+            <AgentModelSelector
+              key={
+                provider +
+                ':' +
+                (workingService?.id || chatProject || chatMachine) +
+                ':' +
+                accountChoice
+              }
+              hub={hub}
+              machineId={chatMachine}
+              provider={provider}
+              projectId={chatProject || undefined}
+              serviceId={workingService?.id}
+              cwd={
+                !chatProject && !service && !initialMachine
+                  ? modelCwd || undefined
+                  : undefined
+              }
+              accountId={
+                accountChoice === '__default'
+                  ? undefined
+                  : accountChoice || null
+              }
+              model={model}
+              reasoning={reasoning}
+              onLoading={setLoadingModels}
+              onChange={(m, r) => {
+                setModel(m);
+                setReasoning(r);
+              }}
+            />
+            <AgentLimitsControl
+              hub={hub}
+              machineId={selectedMachine?.id || ''}
+              provider={provider}
+              accountId={
+                accountChoice === '__default'
+                  ? selectedMachine?.agentAccounts?.[provider] || null
+                  : accountChoice || null
+              }
+            />
+          </div>
+        </details>
         <ErrorText error={error} />
         <div className="form-actions">
           <button className="hub-button" type="button" onClick={onClose}>
@@ -536,23 +619,22 @@ function ApprovalCard({
           {a.params.questions?.map((q) => (
             <Field label={q.question} key={q.id}>
               {q.options?.length ? (
-                <select
+                <WorkspaceSelect
+                  aria-label={q.question}
                   required
                   value={answers[q.id] || ''}
-                  onChange={(e) =>
-                    setAnswers({ ...answers, [q.id]: e.target.value })
+                  onValueChange={(choice) =>
+                    setAnswers({ ...answers, [q.id]: choice })
                   }
-                >
-                  <option value="" disabled>
-                    Выберите ответ
-                  </option>
-                  {q.options.map((o) => (
-                    <option key={o.label} value={o.label}>
-                      {o.label}
-                      {o.description ? ' — ' + o.description : ''}
-                    </option>
-                  ))}
-                </select>
+                  options={[
+                    { value: '', label: 'Выберите ответ', disabled: true },
+                    ...q.options.map((o) => ({
+                      value: o.label,
+                      label: o.label,
+                      description: o.description,
+                    })),
+                  ]}
+                />
               ) : (
                 <input
                   required
@@ -653,6 +735,8 @@ export function AgentChat({
   const [autoApproveDialog, setAutoApproveDialog] = useState<string | null>(null);
   const [executionError, setExecutionError] = useState('');
   const [composerFocused, setComposerFocused] = useState(false);
+  const [toolsOpen, setToolsOpen] = useState(false);
+  const toolsId = useId();
   const [commandsDismissed, setCommandsDismissed] = useState(false);
   const [caret, setCaret] = useState<number | null>(null);
   const [mentionSelection, setMentionSelection] = useState({ key: '', index: 0 });
@@ -796,6 +880,7 @@ export function AgentChat({
     setCommandsDismissed(true);
   }
   function openMentions() {
+    setToolsOpen(false);
     setCommandsDismissed(false);
     if (query) {
       composer.current?.focus();
@@ -806,11 +891,13 @@ export function AgentChat({
     composer.current?.replace(start, end, insert);
   }
   function chooseCustomization(id: string) {
+    setToolsOpen(false);
     setCustomizeServiceId(id);
     if (id && command) rememberDraft(command.content, editorMentions);
     composer.current?.focus();
   }
   function chooseCommand() {
+    setToolsOpen(false);
     if (customizeServiceId) setCustomizeServiceId('');
     const next = attachServiceChatCommand(draft);
     rememberDraft(next, shiftMentions(mentions, next.length - draft.length));
@@ -979,13 +1066,18 @@ export function AgentChat({
         >
           {session.provider === 'codex' && (
             <Field label="Доступ к рабочей папке">
-              <select
+              <WorkspaceSelect
+                aria-label="Доступ к рабочей папке"
                 value={nativeMode}
-                onChange={(event) => setNativeMode(event.target.value)}
-              >
-                <option value="workspace-write">Изменения в рабочей папке</option>
-                <option value="read-only">Только чтение</option>
-              </select>
+                onValueChange={setNativeMode}
+                options={[
+                  {
+                    value: 'workspace-write',
+                    label: 'Изменения в рабочей папке',
+                  },
+                  { value: 'read-only', label: 'Только чтение' },
+                ]}
+              />
             </Field>
           )}
           <div className="form-actions">
@@ -1046,21 +1138,20 @@ export function AgentChat({
               el.scrollHeight - el.scrollTop - el.clientHeight < 100;
         }}
       >
-        {!messages.length && !batches.length ? (
+        {session && !currentDetail && !detailError ? (
+          <output className="workspace-loading"><LoaderCircle className="spin" size={18} /> Загружаем сообщения…</output>
+        ) : !messages.length && !batches.length && !customizations.length && !currentDetail?.approvals.length && !activeSession(live) && !detailError ? (
           <div className="chat-welcome">
             <div className="welcome-mark">
               <Code2 size={32} />
             </div>
-            <span className="eyebrow">ВАШЕ РАБОЧЕЕ ПРОСТРАНСТВО</span>
-            <h1>
-              {session ? 'С чего начнём?' : 'От идеи до работающего кода.'}
-            </h1>
+            <h2>{session?.archived ? 'В этом чате нет сообщений' : 'С чего начнём?'}</h2>
             <p>
               {session
                 ? `${providerNames[session.provider]} · ${project?.name || 'Без проекта'} · ${machine?.name || 'выбранная машина'}.`
-                : 'Ваши агенты, проекты и машины. Один спокойный интерфейс.'}
+                : 'Выберите проект или начните диалог с агентом.'}
             </p>
-            {session ? (
+            {session ? !session.archived && (
               <div className="prompt-suggestions">
                 {(session.projectId
                   ? [
@@ -1285,8 +1376,7 @@ export function AgentChat({
                       ? 'Что изменить в карточке «' + customizeService.name + '»?'
                     : drafting || commandAttached
                       ? 'Что оформить? Можно добавить ссылку на репозиторий…'
-                      : mentionsAvailable ? 'Сообщение агенту. Введите @ для упоминаний или / для команд…'
-                        : 'Сообщение агенту. Введите / для подсказок…'
+                      : 'Сообщение агенту…'
                 }
                 disabled={disabled || session.archived}
                 onFocus={() => {
@@ -1304,6 +1394,7 @@ export function AgentChat({
                   );
                 }}
                 onKeyDown={(e) => {
+                  if (e.nativeEvent.isComposing || e.key === 'Process') return;
                   if ((commandMenuOpen || mentionMenuOpen) && e.key === 'Escape') {
                     e.preventDefault();
                     e.stopPropagation();
@@ -1345,14 +1436,29 @@ export function AgentChat({
                       return;
                     }
                   }
-                  if (e.key === 'Enter' && !e.shiftKey) {
+                  if (
+                    e.key === 'Enter' &&
+                    !e.shiftKey &&
+                    !window.matchMedia('(pointer: coarse)').matches
+                  ) {
                     e.preventDefault();
                     void send();
                   }
                 }}
               />
+              {!session.archived && (autoApprove || harnessEnabled || drafting || customizeService || pinned) && (
+                <div className="composer-context" aria-label="Режимы чата">
+                  {autoApprove && <span className="risk"><ShieldAlert size={13} />Автоаппрув включён</span>}
+                  {harnessEnabled && <span>Harness²</span>}
+                  {drafting && <span>Оформление сервисов</span>}
+                  {customizeService && <span>{customizeService.name}</span>}
+                  {pinned && !mentions.some(({ kind }) => kind !== 'project') && (
+                    <span className="chat-ssh-target"><Terminal size={13} />{pinnedTarget ? `SSH · ${pinnedTarget.name}` : 'Цель SSH недоступна'}</span>
+                  )}
+                </div>
+              )}
               {!session.archived && (
-                <div className="composer-service-mode">
+                <div className="composer-service-mode" id={toolsId} hidden={!toolsOpen}>
                   {mentionsAvailable && (
                     <button type="button" className="chat-service-trigger" title="Упомянуть сервер, сервис или проект"
                       aria-label="Упомянуть сервер, сервис или проект" aria-expanded={mentionMenuOpen}
@@ -1360,9 +1466,6 @@ export function AgentChat({
                       <AtSign size={15} /> Упомянуть
                     </button>
                   )}
-                  {pinned && !mentions.some(({ kind }) => kind !== 'project') && <span className="chat-ssh-target" title="Цель SSH по умолчанию">
-                    <Terminal size={13} /> {pinnedTarget ? `SSH · ${pinnedTarget.name}` : 'Цель SSH недоступна'}
-                  </span>}
                   <button
                     type="button"
                     className="chat-service-trigger"
@@ -1385,32 +1488,57 @@ export function AgentChat({
                     </button>
                   )}
                   {(availableServices.length > 0 || missingCustomization) && (
-                    <label className="composer-service-picker">
+                    <div className="composer-service-picker">
                       <Settings2 size={14} aria-hidden="true" />
-                      <select
+                      <WorkspaceSelect
                         aria-label="Настроить карточку сервиса"
                         disabled={disabled}
                         value={customizeServiceId}
-                        onChange={(event) => chooseCustomization(event.target.value)}
-                      >
-                        <option value="">Настроить сервис…</option>
-                        {missingCustomization && <option value={customizeServiceId}>Карточка недоступна</option>}
-                        {relatedServices.length > 0 && <optgroup label="Связанные с чатом">
-                          {relatedServices.map((service) => <option key={service.id} value={service.id}>{service.name}</option>)}
-                        </optgroup>}
-                        {otherServices.length > 0 && <optgroup label="Другие сервисы">
-                          {otherServices.map((service) => (
-                            <option key={service.id} value={service.id}>
-                              {service.name} · {machines.find((item) => item.id === service.machineId)?.name || 'Машина недоступна'}
-                            </option>
-                          ))}
-                        </optgroup>}
-                      </select>
-                    </label>
+                        onValueChange={(choice) => chooseCustomization(choice)}
+                        options={[
+                          { value: '', label: 'Настроить сервис…' },
+                          ...(missingCustomization
+                            ? [
+                                {
+                                  value: customizeServiceId,
+                                  label: 'Карточка недоступна',
+                                },
+                              ]
+                            : []),
+                          ...relatedServices.map((service) => ({
+                            value: service.id,
+                            label: service.name,
+                            group: 'Связанные с чатом',
+                          })),
+                          ...otherServices.map((service) => ({
+                            value: service.id,
+                            label: service.name,
+                            description:
+                              machines.find(
+                                (item) => item.id === service.machineId,
+                              )?.name || 'Машина недоступна',
+                            group: 'Другие сервисы',
+                          })),
+                        ]}
+                      />
+                    </div>
                   )}
                   {serviceLink && <button type="button" className="chat-service-trigger" onClick={() => onOpenService(serviceLink.id)}>
                     Карточка сервиса <ArrowUpRight size={13} />
                   </button>}
+                  <ChatModelSettings
+                    accountOnly
+                    key={session.id + ':account'}
+                    hub={hub}
+                    session={live || session}
+                    disabled={
+                      disabled ||
+                      sending ||
+                      activeSession(live) ||
+                      session.archived
+                    }
+                    onAccounts={onAccounts}
+                  />
                   {executionAvailable && (
                     <>
                       <ChatExecutionSwitch
@@ -1454,21 +1582,22 @@ export function AgentChat({
               )}
               <div className="composer-toolbar">
                 <div>
+                  {!session.archived && (
+                    <button
+                      type="button"
+                      className="composer-tools-trigger"
+                      aria-label="Инструменты чата"
+                      title="Инструменты чата"
+                      aria-expanded={toolsOpen}
+                      aria-controls={toolsId}
+                      onClick={() => setToolsOpen(!toolsOpen)}
+                    >
+                      <SlidersHorizontal size={17} />
+                      <span>Инструменты</span>
+                    </button>
+                  )}
                   <span className={`provider-dot ${session.provider}`} />
                   <strong>{providerNames[session.provider]}</strong>
-                  <ChatModelSettings
-                    accountOnly
-                    key={session.id + ':account'}
-                    hub={hub}
-                    session={live || session}
-                    disabled={
-                      disabled ||
-                      sending ||
-                      activeSession(live) ||
-                      session.archived
-                    }
-                    onAccounts={onAccounts}
-                  />
                   <ChatModelSettings
                     onAccounts={onAccounts}
                     key={session.id}
