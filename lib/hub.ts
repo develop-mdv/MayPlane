@@ -52,6 +52,7 @@ export type AgentSession = {
   accountId?: string | null;
   profileId?: string;
   nativeSource?: boolean;
+  nativeHandoffPending?: boolean;
   nativeSyncedAt?: string;
   authError?: string | null;
   serviceDrafting?: boolean;

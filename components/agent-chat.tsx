@@ -18,6 +18,7 @@ import {
   Settings2,
   ArrowUpRight,
   FileDiff,
+  RefreshCw,
 } from 'lucide-react';
 import type { Server } from '@/lib/domain';
 import {
@@ -643,8 +644,11 @@ export function AgentChat({
       return text === saved.text ? saved : { text, mentions: shiftMentions(saved.mentions, text.length - saved.text.length) };
     }),
     [error, setError] = useState(''),
+    [detailError, setDetailError] = useState(''),
     [sending, setSending] = useState(false),
     [changingMode, setChangingMode] = useState(false);
+  const [nativeHandoff, setNativeHandoff] = useState(false);
+  const [nativeMode, setNativeMode] = useState('workspace-write');
   const [changingExecution, setChangingExecution] = useState(false);
   const [autoApproveDialog, setAutoApproveDialog] = useState<string | null>(null);
   const [executionError, setExecutionError] = useState('');
@@ -678,6 +682,7 @@ export function AgentChat({
     const s = await api<SessionDetail>(`/hub/sessions/${sessionId}`);
     if (mounted.current && s.id === sessionId) {
       setDetail(s);
+      setDetailError('');
       setError('');
     }
   }
@@ -693,10 +698,10 @@ export function AgentChat({
         const s = await api<SessionDetail>(`/hub/sessions/${sessionId}`);
         if (alive) {
           setDetail(s);
-          setError('');
+          setDetailError('');
         }
       } catch (e) {
-        if (alive) setError((e as Error).message);
+        if (alive) setDetailError((e as Error).message);
       } finally {
         loading = false;
       }
@@ -865,8 +870,13 @@ export function AgentChat({
       setChangingExecution(false);
     }
   }
-  async function send() {
+  async function send(confirmNativeHandoff = false) {
     if (!session || !draft.trim() || chatBusy || commandUnavailable || missingCustomization) return;
+    if (live?.nativeHandoffPending && !confirmNativeHandoff) {
+      setNativeHandoff(true);
+      return;
+    }
+    setNativeHandoff(false);
     const sent = composition;
     const savedDraft = chatDrafts.get(api)?.get(session.id);
     setSending(true);
@@ -874,6 +884,12 @@ export function AgentChat({
     try {
       await hub.mutate(`/sessions/${session.id}/message`, {
         message: sent.text,
+        ...(confirmNativeHandoff
+          ? {
+              confirmNativeHandoff,
+              ...(session.provider === 'codex' ? { nativeMode } : {}),
+            }
+          : {}),
         ...(mentionsAvailable && sent.mentions.length ? {
           mentions: sent.mentions.map(({ kind, id, start, end }) => ({ kind, id, start, end })),
         } : {}),
@@ -955,15 +971,54 @@ export function AgentChat({
           </div>
         </Modal>
       )}
+      {session && nativeHandoff && (
+        <Modal
+          title="Продолжить чат в MayPlane"
+          description="Завершите текущий ход в исходном приложении перед отправкой. Чат продолжится на той же машине и в той же папке."
+          onClose={() => setNativeHandoff(false)}
+        >
+          {session.provider === 'codex' && (
+            <Field label="Доступ к рабочей папке">
+              <select
+                value={nativeMode}
+                onChange={(event) => setNativeMode(event.target.value)}
+              >
+                <option value="workspace-write">Изменения в рабочей папке</option>
+                <option value="read-only">Только чтение</option>
+              </select>
+            </Field>
+          )}
+          <div className="form-actions">
+            <button
+              type="button"
+              className="hub-button"
+              onClick={() => setNativeHandoff(false)}
+            >
+              Отмена
+            </button>
+            <button
+              type="button"
+              className="hub-button primary"
+              disabled={chatBusy}
+              onClick={() => void send(true)}
+            >
+              Продолжить и отправить
+            </button>
+          </div>
+        </Modal>
+      )}
       {session?.nativeSource && (
         <div className="native-chat-notice">
           <span>
-            Диалог машины · перед продолжением остановите ход в CLI или
-            приложении. История перечитывается перед отправкой.
+            Чат с машины · завершите ход в исходном приложении перед отправкой.
           </span>
           <button
+            type="button"
             className="text-button"
-            disabled={sending || activeSession(live) || disabled}
+            disabled={
+              sending || activeSession(live) || disabled ||
+              machine?.status === 'offline'
+            }
             onClick={async () => {
               setSending(true);
               try {
@@ -976,7 +1031,8 @@ export function AgentChat({
               }
             }}
           >
-            Синхронизировать
+            <RefreshCw size={14} />
+            Обновить историю
           </button>
         </div>
       )}
@@ -1190,7 +1246,7 @@ export function AgentChat({
             error={
               missingCustomization ? 'Карточка недоступна из этого чата. Выберите другой сервис или сбросьте настройку.' : commandUnavailable
                 ? 'Команда /services доступна после обновления серверной части MayPlane.'
-                : error || live?.authError || currentDetail?.errorMessage || ''
+                : error || detailError || live?.authError || currentDetail?.errorMessage || ''
             }
           />
           {live?.authError && (

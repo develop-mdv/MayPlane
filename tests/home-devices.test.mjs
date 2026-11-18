@@ -445,3 +445,92 @@ test('OpenCode loads native replay without inference and older agents report the
     409,
   );
 });
+
+test('a machine chat can be viewed and refreshed before the first handoff without duplicating the session', async (t) => {
+  const f = await fixture(t);
+  const projectId = randomUUID();
+  f.store.save(
+    'settings',
+    {
+      id: projectId,
+      recordType: 'workspace',
+      machineId: f.machineId,
+      name: 'Existing project',
+      path: f.cwd,
+    },
+    {},
+  );
+  f.row.status = { type: 'active' };
+  const listPath = `/machines/${f.machineId}/agents/codex/native-sessions`;
+  const list = await (await f.request(listPath, 'POST', {})).json();
+  assert.equal(list.sessions[0].active, true);
+  assert.equal(list.sessions[0].importedSessionId, null);
+  assert.ok(!f.calls.some((call) => call.method === 'thread/read'));
+
+  const selection = {
+    machineId: f.machineId,
+    provider: 'codex',
+    nativeId: list.sessions[0].nativeId,
+    cwd: list.sessions[0].cwd,
+    openForReading: true,
+  };
+  const response = await f.request('/sessions/import', 'POST', selection);
+  assert.equal(response.status, 201);
+  const opened = await response.json();
+  assert.equal(opened.projectId, projectId);
+  assert.equal(opened.nativeHandoffPending, true);
+  assert.equal(opened.mode, 'read-only');
+  const path = `/sessions/${opened.id}`;
+  const detail = async () => (await f.request(path)).json();
+  assert.equal(
+    (await detail()).messages.at(-1).content,
+    'Private local answer',
+  );
+  assert.ok(!f.calls.some((call) => call.method === 'thread/resume'));
+
+  const input = { message: 'Continue on the same machine' };
+  assert.equal((await f.request(path + '/message', 'POST', input)).status, 409);
+  const handoff = {
+    ...input,
+    confirmNativeHandoff: true,
+    nativeMode: 'workspace-write',
+  };
+  const active = await f.request(path + '/message', 'POST', handoff);
+  assert.equal(active.status, 409);
+  assert.match((await active.json()).error, /завершите ход/i);
+  assert.ok(!f.calls.some((call) => call.method === 'thread/resume'));
+
+  f.items.push({
+    item: {
+      id: 'desktop-update',
+      type: 'agentMessage',
+      text: 'Updated on the machine',
+    },
+  });
+  assert.equal((await f.request(path + '/sync', 'POST', {})).status, 200);
+  assert.equal(
+    (await detail()).messages.at(-1).content,
+    'Updated on the machine',
+  );
+  const reopened = await (
+    await f.request('/sessions/import', 'POST', selection)
+  ).json();
+  assert.equal(reopened.id, opened.id);
+  assert.equal(reopened.nativeHandoffPending, true);
+  const updatedList = await (await f.request(listPath, 'POST', {})).json();
+  assert.equal(updatedList.sessions[0].importedSessionId, opened.id);
+
+  f.row.status = { type: 'notLoaded' };
+  assert.equal(
+    (await f.request(path + '/message', 'POST', handoff)).status,
+    202,
+  );
+  const continued = await detail();
+  assert.equal(continued.nativeHandoffPending, undefined);
+  assert.equal(continued.mode, 'workspace-write');
+  assert.equal(continued.messages.at(-1).content, input.message);
+  const resume = f.calls.find((call) => call.method === 'thread/resume');
+  assert.equal(resume.params.threadId, selection.nativeId);
+  assert.equal(resume.params.cwd, f.cwd);
+  assert.equal(resume.params.sandbox, 'workspace-write');
+});

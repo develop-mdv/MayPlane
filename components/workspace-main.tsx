@@ -2,7 +2,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   Activity,
-  Archive,
+  ArrowLeft,
   ArrowUpRight,
   Boxes,
   ChevronRight,
@@ -11,7 +11,6 @@ import {
   FolderGit2,
   FolderInput,
   FolderOpen,
-  GitBranch,
   LayoutGrid,
   Menu,
   MessageSquare,
@@ -45,13 +44,14 @@ import { NewProject, SettingsPanel } from './workspace-forms';
 import { MachinesPanel, PairComputer, ServerForm } from './machines-panel';
 import { ProjectNavigation, ChatActions } from './project-navigation';
 import { ProjectServices, ServicesPanel, type ServiceView } from './services-panel';
-import { NativeSessionImport } from './native-session-import';
+import { MachineChats, type MachineChatSource } from './machine-chats';
 import { CopyButton, ErrorText, Field, Modal, Submit, Toast } from './hub-ui';
 import { RemoveObject } from './remove-object';
 import { WorkspaceBrowser } from './workspace-browser';
 import type { WorkspaceMode } from '@/lib/workspace-files';
 
 type View = 'chat' | 'projects' | 'services' | 'servers' | 'settings';
+type ChatTab = 'panel' | 'machine';
 export default function WorkspaceMain() {
   const ws = useWorkspace(),
     hub = useHub(ws);
@@ -59,13 +59,15 @@ export default function WorkspaceMain() {
     [selectedSession, setSelectedSession] = useState<string | null>(null),
     [selectedMachine, setSelectedMachine] = useState<string | null>(null),
     [scope, setScope] = useState('all');
+  const [chatTab, setChatTab] = useState<ChatTab>('panel');
+  const [machineChatSource, setMachineChatSource] =
+    useState<MachineChatSource>({ provider: 'codex' });
   const [serviceView, setServiceView] = useState<ServiceView>({});
   const [sessionService, setSessionService] = useState<{ service: HubService; customize: boolean } | null>(null);
   const [sessionMachine, setSessionMachine] = useState<Machine | undefined>();
   const [chatCustomizationId, setChatCustomizationId] = useState<string>();
   const [newProject, setNewProject] = useState(false),
     [newSession, setNewSession] = useState(false),
-    [importSession, setImportSession] = useState(false),
     [sessionProject, setSessionProject] = useState<string | null>(null),
     [serverForm, setServerForm] = useState<Machine | 'new' | null>(null),
     [pair, setPair] = useState(false),
@@ -101,6 +103,8 @@ export default function WorkspaceMain() {
   const browserMachineId = browserChat?.machineId || browserProject?.machineId;
   const connected = !!ws.connection && !ws.error;
   const closeToast = useCallback(() => setToast(''), []);
+  const allChats = scope === 'all' && !archive;
+  const showMachineChats = allChats && chatTab === 'machine';
   const visible = hub.data.sessions.filter(
     (s) =>
       !!s.archived === archive &&
@@ -131,9 +135,21 @@ export default function WorkspaceMain() {
     setSidebar(false);
     setError('');
   }
-  function openSession(s: AgentSession, customizeServiceId?: string) {
+  function openChatList(tab: ChatTab = 'panel') {
+    setScope('all');
+    setArchive(false);
+    setSelectedSession(null);
+    setChatTab(tab);
+    navigate('chat');
+  }
+  function openSession(
+    s: AgentSession,
+    customizeServiceId?: string,
+    tab: ChatTab = 'panel',
+  ) {
     setSelectedSession(s.id);
     setChatCustomizationId(customizeServiceId);
+    setChatTab(tab);
     setScope(s.projectId || 'loose');
     setArchive(s.archived);
     setSearch(false);
@@ -143,6 +159,7 @@ export default function WorkspaceMain() {
   function selectProject(id: string | null) {
     setScope(id || 'loose');
     setSelectedSession(null);
+    setChatTab('panel');
     navigate('chat');
   }
   function startSession(id?: string | null) {
@@ -205,7 +222,7 @@ export default function WorkspaceMain() {
       ? 'Чаты без проекта'
       : archive
         ? 'Архив чатов'
-        : 'Все чаты');
+        : 'Чаты');
   const searchProjects = hub.data.projects.filter((p) =>
     p.name.toLowerCase().includes(query.toLowerCase()),
   );
@@ -225,11 +242,7 @@ export default function WorkspaceMain() {
           <button
             className="brand"
             aria-label="MayPlane — главная"
-            onClick={() => {
-              setSelectedSession(null);
-              setScope('all');
-              navigate('chat');
-            }}
+            onClick={() => openChatList()}
           >
             <span className="brand-icon">
               <Command size={19} />
@@ -271,13 +284,7 @@ export default function WorkspaceMain() {
             <button
               key={n.id}
               className={view === n.id ? 'active' : ''}
-              onClick={() => {
-                if (n.id === 'chat') {
-                  setScope('all');
-                  setSelectedSession(null);
-                }
-                navigate(n.id);
-              }}
+              onClick={() => (n.id === 'chat' ? openChatList() : navigate(n.id))}
             >
               <n.icon size={17} />
               <span>{n.label}</span>
@@ -359,6 +366,17 @@ export default function WorkspaceMain() {
             >
               <Menu size={19} />
             </button>
+            {view === 'chat' && session && chatTab === 'machine' && (
+              <button
+                type="button"
+                className="icon-button machine-chats-back"
+                aria-label="Вернуться к чатам на машинах"
+                title="Чаты на машинах"
+                onClick={() => openChatList('machine')}
+              >
+                <ArrowLeft size={17} />
+              </button>
+            )}
             <span className="breadcrumb-home">Рабочее пространство</span>
             <ChevronRight size={13} />
             <strong>
@@ -629,7 +647,9 @@ export default function WorkspaceMain() {
                   </span>
                   <h1>
                     {scopeTitle}
-                    <span className="heading-count">{visible.length}</span>
+                    {!showMachineChats && (
+                      <span className="heading-count">{visible.length}</span>
+                    )}
                   </h1>
                   {project ? (
                     <p className="context-path">
@@ -637,7 +657,7 @@ export default function WorkspaceMain() {
                       {machine?.name} · <code>{project.path}</code>
                       <CopyButton value={project.path} />
                     </p>
-                  ) : (
+                  ) : !showMachineChats && (
                     <p>
                       {archive
                         ? 'История сохранена. Восстановите чат, чтобы продолжить.'
@@ -662,14 +682,6 @@ export default function WorkspaceMain() {
                     </button>
                   )}
                   <button
-                    className="hub-button"
-                    disabled={!connected || !ws.data.servers.length}
-                    onClick={() => setImportSession(true)}
-                  >
-                    <Monitor size={15} />
-                    Продолжить с компьютера
-                  </button>
-                  <button
                     className="hub-button primary"
                     disabled={!connected}
                     onClick={() => startSession()}
@@ -689,7 +701,36 @@ export default function WorkspaceMain() {
                   onAll={() => navigate('services', { projectId: project.id })}
                 />
               )}
-              {visible.length ? (
+              {allChats && (
+                <fieldset className="chat-source-bar">
+                  <legend className="sr-only">Источник чатов</legend>
+                  <button
+                    type="button"
+                    aria-pressed={chatTab === 'panel'}
+                    onClick={() => setChatTab('panel')}
+                  >
+                    В панели
+                  </button>
+                  <button
+                    type="button"
+                    aria-pressed={chatTab === 'machine'}
+                    onClick={() => setChatTab('machine')}
+                  >
+                    <Monitor size={15} aria-hidden="true" /> На машинах
+                  </button>
+                </fieldset>
+              )}
+              {showMachineChats ? (
+                <MachineChats
+                  hub={hub}
+                  machines={ws.data.servers}
+                  source={machineChatSource}
+                  disabled={!connected}
+                  onSourceChange={setMachineChatSource}
+                  onConnect={() => setPair(true)}
+                  onOpened={(s) => openSession(s, undefined, 'machine')}
+                />
+              ) : visible.length ? (
                 <div className="chat-home-list">
                   {visible.map((s) => (
                     <article key={s.id} className="chat-list-row">
@@ -868,17 +909,6 @@ export default function WorkspaceMain() {
           onCreated={(s) => {
             setNewSession(false);
             openSession(s, sessionService?.customize ? sessionService.service.id : undefined);
-          }}
-        />
-      )}
-      {importSession && (
-        <NativeSessionImport
-          hub={hub}
-          machines={ws.data.servers}
-          onClose={() => setImportSession(false)}
-          onOpened={(s) => {
-            setImportSession(false);
-            openSession(s);
           }}
         />
       )}

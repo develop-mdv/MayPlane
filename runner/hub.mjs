@@ -81,6 +81,7 @@ const authorizationError = (message = '') =>
   );
 const signInHelp =
   'Сервис отклонил авторизацию. Проверьте выбранный аккаунт в настройках и повторите вход.';
+const nativeAccessModes = ['read-only', 'workspace-write'];
 const publicRecord = (record) => {
   const { secret: _secret, ...rest } = record;
   return rest;
@@ -228,6 +229,15 @@ export function createHub(
         s.cwd ||
         (s.projectId ? load(s.projectId, 'workspace').path : undefined),
     }));
+  const machineNativeSessions = (machineId, provider) =>
+    store.list('settings').filter(
+      (s) =>
+        s.recordType === 'session' &&
+        s.machineId === machineId &&
+        s.provider === provider &&
+        s.nativeId &&
+        !s.profileId,
+    );
   function locationForService(id) {
     const service = services.get(id);
     return serviceChatLocation(service, records('workspace'), machine(service.machineId).platform);
@@ -977,32 +987,44 @@ export function createHub(
       connection: { connectorUrl },
     };
   }
-  async function syncNative(session, allowLegacy = false, mode) {
+  async function syncNative(
+    session,
+    { importing = false, allowActive = false, mode } = {},
+  ) {
     assert(
-      (session.nativeSource || allowLegacy) && !session.profileId,
+      (session.nativeSource || importing) && !session.profileId,
       'Этот чат уже хранится в панели',
     );
     assert(
       !nativeChanges.has(session.id) &&
+        !modelChanges.has(session.id) &&
         !['running', 'connecting', 'approval'].includes(session.status),
       'Дождитесь завершения работы диалога',
       409,
     );
     nativeChanges.add(session.id);
     try {
+      const m = machine(session.machineId);
       runtimes.get(session.id)?.rpc?.close();
       const data = await nativeSessions.read(
-        machine(session.machineId),
+        m,
         session.provider,
         session.nativeId,
         session.cwd,
+        { allowActive },
       );
       return updateSession(session.id, (s) => {
+        if (importing) {
+          if (!allowActive) delete s.nativeHandoffPending;
+          else if (!s.nativeSource) s.nativeHandoffPending = true;
+        }
         s.nativeSource = true;
         s.nativeModelProvider = data.modelProvider;
-        if (!sameWorkspaceDirectory(s.cwd, data.cwd, machine(s.machineId).platform)) s.projectId = null;
+        if (!sameWorkspaceDirectory(s.cwd, data.cwd, m.platform))
+          s.projectId = null;
         s.cwd = data.cwd;
-        if (allowLegacy && s.provider === 'codex' && mode) s.mode = mode;
+        if (importing && !allowActive && s.provider === 'codex' && mode)
+          s.mode = mode;
         let draftingTurn = false, harnessTurn = false, customizingTurn = false;
         s.secret.messages = data.messages.map((message) => {
           if (message.role === 'user') {
@@ -1414,53 +1436,55 @@ export function createHub(
     );
     if (nativeMatch && method === 'POST') {
       const m = machine(nativeMatch[1]);
-      const result = await nativeSessions.list(m, nativeMatch[2], {
+      const provider = nativeMatch[2];
+      const result = await nativeSessions.list(m, provider, {
         cursor: body.cursor || null,
         cwd: body.cwd,
       });
+      const imported = new Map(
+        machineNativeSessions(m.id, provider)
+          .filter((s) => s.nativeSource)
+          .map((s) => [s.nativeId, s.id]),
+      );
       send({
         ...result,
         sessions: result.sessions.map((s) => ({
           ...s,
-          importedSessionId:
-            sessions().find(
-              (r) =>
-                r.machineId === m.id &&
-                r.provider === nativeMatch[2] &&
-                r.nativeId === s.nativeId &&
-                r.nativeSource &&
-                !r.profileId,
-            )?.id || null,
+          importedSessionId: imported.get(s.nativeId) || null,
         })),
       });
       return true;
     }
     if (path === '/api/hub/sessions/import' && method === 'POST') {
       assert(
-        body.mode === undefined ||
-          ['read-only', 'workspace-write'].includes(body.mode),
+        body.mode === undefined || nativeAccessModes.includes(body.mode),
         'Некорректный режим доступа',
       );
       const m = machine(body.machineId),
         provider = body.provider;
+      const viewing = body.openForReading === true && body.stopped !== true;
       assert(
-        body.stopped === true,
+        viewing || body.stopped === true,
         'Завершите активный ход в исходном приложении и подтвердите переход',
       );
       const key = JSON.stringify([m.id, provider, body.nativeId]);
       assert(!nativeChanges.has(key), 'Этот диалог уже подключается', 409);
       nativeChanges.add(key);
       try {
-        const existing = sessions().find(
-          (s) =>
-            s.machineId === m.id &&
-            s.provider === provider &&
-            s.nativeId === body.nativeId &&
-            !s.profileId,
+        const existing = machineNativeSessions(m.id, provider).find(
+          (s) => s.nativeId === body.nativeId,
         );
         if (existing) {
+          const saved = load(existing.id, 'session');
+          const busy = ['running', 'connecting', 'approval'].includes(
+            saved.status,
+          );
+          if (viewing && busy) {
+            send(publicRecord(saved));
+            return true;
+          }
           assert(
-            !['running', 'connecting', 'approval'].includes(existing.status),
+            !busy,
             'Диалог уже выполняется в панели',
             409,
           );
@@ -1468,11 +1492,15 @@ export function createHub(
             publicRecord(
               await syncNative(
                 {
-                  ...load(existing.id, 'session'),
-                  cwd: body.cwd || existing.cwd,
+                  ...saved,
+                  cwd:
+                    body.cwd ||
+                    saved.cwd ||
+                    (saved.projectId
+                      ? load(saved.projectId, 'workspace').path
+                      : undefined),
                 },
-                true,
-                body.mode,
+                { importing: true, allowActive: viewing, mode: body.mode },
               ),
             ),
           );
@@ -1483,6 +1511,7 @@ export function createHub(
           provider,
           body.nativeId,
           body.cwd,
+          { allowActive: viewing },
         );
         const project = records('workspace').find(
           (p) => p.machineId === m.id && sameWorkspaceDirectory(p.path, data.cwd, m.platform),
@@ -1500,10 +1529,13 @@ export function createHub(
           model: '',
           reasoning: '',
           mode:
-            provider === 'codex' ? body.mode || 'read-only' : 'workspace-write',
+            provider === 'codex'
+              ? (!viewing && body.mode) || 'read-only'
+              : 'workspace-write',
           title: data.title,
           customTitle: true,
           nativeSource: true,
+          ...(viewing ? { nativeHandoffPending: true } : {}),
           nativeSyncedAt: now(),
           status: 'idle',
           archived: false,
@@ -1662,7 +1694,11 @@ export function createHub(
     }
     const syncMatch = path.match(/^\/api\/hub\/sessions\/([a-f0-9-]+)\/sync$/);
     if (syncMatch && method === 'POST') {
-      send(publicRecord(await syncNative(load(syncMatch[1], 'session'))));
+      send(
+        publicRecord(
+          await syncNative(load(syncMatch[1], 'session'), { allowActive: true }),
+        ),
+      );
       return true;
     }
     const customizationMatch = path.match(
@@ -1851,6 +1887,7 @@ export function createHub(
             s.profileId = s.id;
             s.nativeId = null;
             s.nativeSource = false;
+            delete s.nativeHandoffPending;
           }
           s.accountId = accountId;
           s.model = '';
@@ -1953,8 +1990,22 @@ export function createHub(
           409,
         );
         if (s.nativeSource) {
+          if (s.nativeHandoffPending) {
+            assert(
+              body.confirmNativeHandoff === true,
+              'Завершите текущий ход на машине и подтвердите продолжение',
+              409,
+            );
+            assert(
+              body.nativeMode === undefined ||
+                (s.provider === 'codex' &&
+                  nativeAccessModes.includes(body.nativeMode)),
+              'Некорректный режим доступа',
+            );
+          }
           await syncNative(s);
           Object.assign(s, load(s.id, 'session'));
+          if (s.nativeHandoffPending && body.nativeMode) s.mode = body.nativeMode;
         }
         assert(!modelChanges.has(s.id), 'Дождитесь сохранения модели', 409);
         assert(!s.archived, 'Восстановите диалог из архива', 409);
@@ -2003,6 +2054,10 @@ export function createHub(
         }));
         if (s.accountId) accounts.connected(s.accountId, s.provider);
         updateSession(s.id, (x) => {
+          if (x.nativeHandoffPending) {
+            x.mode = s.mode;
+            delete x.nativeHandoffPending;
+          }
           x.status = 'connecting';
           x.authError = null;
           x.secret.errorMessage = null;

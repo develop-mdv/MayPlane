@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { AgentRpc } from './agent-rpc.mjs';
 import { assert } from './security.mjs';
-import { projectPath } from './machine-process.mjs';
+import { projectPath, providers } from './machine-process.mjs';
 
 const iso = (value) => {
   const date = new Date(
@@ -37,6 +37,14 @@ export function createNativeSessions({ openProcess, connectors }) {
       rpc.on('message', (m) => {
         if (m.id !== undefined) rpc.reject(m.id);
       });
+    } catch (error) {
+      if (error.status) throw error;
+      throw Object.assign(
+        new Error(
+          `Не удалось запустить ${providers[provider].name} на выбранной машине.`,
+        ),
+        { status: 502 },
+      );
     } finally {
       opening--;
     }
@@ -44,10 +52,13 @@ export function createNativeSessions({ openProcess, connectors }) {
       rpc.close();
       throw new Error('Панель останавливается');
     }
-    const deadline = setTimeout(
-      () => rpc.close(new Error('Агент не вернул историю за 25 секунд')),
-      25000,
-    );
+    const deadline = setTimeout(() => {
+      rpc.close(
+        Object.assign(new Error('Агент не ответил за 25 секунд'), {
+          status: 504,
+        }),
+      );
+    }, 25000);
     try {
       const init = await rpc.request(
         'initialize',
@@ -65,14 +76,23 @@ export function createNativeSessions({ openProcess, connectors }) {
       if (provider === 'codex') rpc.notify('initialized');
       return await fn(rpc, init);
     } catch (error) {
-      if (/paginated_threads|not supported yet/.test(error.message))
+      if (
+        provider === 'codex' &&
+        /paginated_threads|not supported yet/.test(error.message)
+      )
         throw Object.assign(
           new Error(
             'CLI Codex не поддерживает формат истории приложения. Обновите CLI или используйте встроенный CLI настольного Codex через MAYPLANE_CODEX_BIN.',
           ),
           { status: 409 },
         );
-      throw error;
+      if (error.status) throw error;
+      throw Object.assign(
+        new Error(
+          `Не удалось загрузить диалоги ${providers[provider].name}. Проверьте установку агента на выбранной машине.`,
+        ),
+        { status: 502 },
+      );
     } finally {
       clearTimeout(deadline);
       probes.delete(rpc);
@@ -138,7 +158,7 @@ export function createNativeSessions({ openProcess, connectors }) {
         return { sessions, nextCursor: result.nextCursor || null };
       });
     },
-    async read(machine, provider, nativeId, cwd) {
+    async read(machine, provider, nativeId, cwd, { allowActive = false } = {}) {
       assert(
         ['codex', 'opencode', 'claude'].includes(provider) && validId(nativeId),
         'Некорректный диалог',
@@ -165,7 +185,7 @@ export function createNativeSessions({ openProcess, connectors }) {
           });
           assert(thread?.id === nativeId, 'Диалог не найден', 404);
           assert(
-            thread.status?.type !== 'active',
+            allowActive || thread.status?.type !== 'active',
             'Сначала завершите ход в исходном Codex',
             409,
           );
@@ -239,7 +259,7 @@ export function createNativeSessions({ openProcess, connectors }) {
         }
         assert(
           init.agentCapabilities?.loadSession,
-          'OpenCode не поддерживает загрузку диалогов',
+          `${providers[provider].name} не поддерживает загрузку диалогов через ACP`,
           409,
         );
         cwd = projectPath(cwd, machine.platform || 'linux');
