@@ -3,6 +3,7 @@ import { stripVTControlCharacters } from 'node:util';
 import { connect, run } from './ssh.mjs';
 import { assert, q, redact } from './security.mjs';
 import { serviceSource, serviceUrl, sourceKey, unitName } from './service-model.mjs';
+import { sshActions } from '../lib/chat-references.mjs';
 
 const containerId = /^[a-f0-9]{64}$/;
 const maxDiscovery = 160;
@@ -94,7 +95,12 @@ function commandError(error, output, file, args, aborted = false) {
   );
 }
 
-export async function withServiceMachine(machine, work, signal) {
+export async function withServiceMachine(
+  machine,
+  work,
+  signal,
+  { gracefulAbort = false } = {},
+) {
   assert(
     machine.transport !== 'connector',
     'Для этой машины доступна ручная карточка',
@@ -132,9 +138,9 @@ export async function withServiceMachine(machine, work, signal) {
   } catch {
     throw remoteError('Не удалось подключиться к машине по SSH.');
   }
-  // Closing at the deadline also bounds requests abandoned during a remote command.
+  // For mutations, let run() signal the remote command and wait for its exit.
   const close = () => ssh.destroy();
-  abort.addEventListener('abort', close, { once: true });
+  if (!gracefulAbort) abort.addEventListener('abort', close, { once: true });
   try {
     abort.throwIfAborted();
     return await work(
@@ -273,14 +279,18 @@ function summarizeDocker(entries, stats, siblings, statsErrors) {
   };
 }
 
-async function readDocker(execute, sources, collectStats) {
-  const wanted = new Set(sources?.map(sourceKey));
+async function listDocker(execute) {
   const listed = jsonLines(
     await execute('docker', ['ps', '-a', '--no-trunc', '--format', dockerList]),
   );
-  const rows = listed
+  return listed
     .map((row) => ({ ...row, source: dockerSource(row) }))
     .filter((row) => row.source);
+}
+
+async function readDocker(execute, sources, collectStats) {
+  const wanted = new Set(sources?.map(sourceKey));
+  const rows = await listDocker(execute);
   const selected = sources
     ? rows.filter((row) => wanted.has(sourceKey(row.source)))
     : rows.slice(0, maxDiscovery);
@@ -357,6 +367,33 @@ async function readDocker(execute, sources, collectStats) {
     ),
   );
   return { records, limited: !sources && rows.length > maxDiscovery };
+}
+
+export async function controlServiceSource(
+  execute,
+  source,
+  action,
+  beforeAction,
+) {
+  assert(Object.hasOwn(sshActions, action), 'Неизвестная операция с сервисом');
+  if (source.type === 'systemd') {
+    beforeAction();
+    await execute(
+      'systemctl',
+      ['--no-ask-password', '--no-pager', action, '--', source.unit],
+      { timeout: 14000 },
+    );
+    return 1;
+  }
+  const key = sourceKey(source);
+  const ids = (await listDocker(execute))
+    .filter((row) => sourceKey(row.source) === key)
+    .map((row) => row.id);
+  assert(ids.length, 'Контейнеры сервиса не найдены', 404);
+  assert(ids.length <= 64, 'Слишком много экземпляров для одной операции');
+  beforeAction();
+  await execute('docker', [action, '--', ...ids], { timeout: 14000 });
+  return ids.length;
 }
 
 function unitRecords(output) {

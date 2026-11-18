@@ -61,6 +61,7 @@ export default function WorkspaceMain() {
     [scope, setScope] = useState('all');
   const [serviceView, setServiceView] = useState<ServiceView>({});
   const [sessionService, setSessionService] = useState<{ service: HubService; customize: boolean } | null>(null);
+  const [sessionMachine, setSessionMachine] = useState<Machine | undefined>();
   const [chatCustomizationId, setChatCustomizationId] = useState<string>();
   const [newProject, setNewProject] = useState(false),
     [newSession, setNewSession] = useState(false),
@@ -146,12 +147,20 @@ export default function WorkspaceMain() {
   }
   function startSession(id?: string | null) {
     setSessionService(null);
+    setSessionMachine(undefined);
     setSessionProject(id === undefined ? project?.id || null : id);
     setNewSession(true);
   }
   function startServiceChat(service: HubService, customize = false) {
     setSessionProject(null);
+    setSessionMachine(undefined);
     setSessionService({ service, customize });
+    setNewSession(true);
+  }
+  function startMachineChat(machine: Machine) {
+    setSessionProject(null);
+    setSessionService(null);
+    setSessionMachine(machine);
     setNewSession(true);
   }
   function servicesInProject(project: HubProject) {
@@ -447,6 +456,7 @@ export default function WorkspaceMain() {
               onSelect={setSelectedMachine}
               onAdd={(s) => setServerForm(s || 'new')}
               onPair={() => setPair(true)}
+              onNewChat={startMachineChat}
               onServices={(machineId) => navigate('services', { machineId })}
               onRemove={(m) =>
                 setRemoval({ kind: 'machine', id: m.id, name: m.name })
@@ -848,6 +858,7 @@ export default function WorkspaceMain() {
           projects={hub.data.projects}
           machines={ws.data.servers}
           initialProject={sessionProject || undefined}
+          initialMachine={sessionMachine}
           service={sessionService?.service}
           onClose={() => setNewSession(false)}
           onAccounts={() => {

@@ -658,6 +658,7 @@ export function createServices({
     saveCustomization,
     chatDraft,
     saveChatDrafts,
+    refreshMachine,
     list: () => listServices(store).map(snapshotOf),
     forgetServices(ids) {
       for (const id of ids) observations.delete(id);

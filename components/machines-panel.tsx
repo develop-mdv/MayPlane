@@ -4,6 +4,7 @@ import {
   Server as ServerIcon,
   Boxes,
   Monitor,
+  MessageSquare,
   Plus,
   ArrowLeft,
   ArrowUpRight,
@@ -1007,6 +1008,7 @@ export function MachinesPanel({
   onSelect,
   onAdd,
   onPair,
+  onNewChat,
   onServices,
   onAccounts,
   onRemove,
@@ -1017,6 +1019,7 @@ export function MachinesPanel({
   onSelect: (id: string | null) => void;
   onAdd: (server?: Server) => void;
   onPair: () => void;
+  onNewChat: (machine: Server) => void;
   onServices: (id: string) => void;
   onAccounts: () => void;
   onRemove: (machine: Server) => void;
@@ -1090,6 +1093,9 @@ export function MachinesPanel({
               </p>
             </div>
             <div className="heading-actions">
+              <button type="button" className="hub-button" disabled={!ws.connection || !!ws.error} onClick={() => onNewChat(machine)}>
+                <MessageSquare size={15} /> Новый чат
+              </button>
               <button type="button" className="hub-button" onClick={() => onServices(machine.id)}>
                 <Boxes size={15} />
                 Сервисы <span>{hub.data.services.filter((s) => s.machineId === machine.id).length}</span>

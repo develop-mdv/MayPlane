@@ -30,10 +30,19 @@ export type RemovalResult = {
   deletedServices: string[];
   deletedMachines: string[];
 };
+export type ChatReference = { kind: 'machine' | 'service' | 'project'; id: string };
+export type ChatMention = ChatReference & {
+  name: string;
+  machineName?: string;
+  text: string;
+  start?: number;
+  end?: number;
+};
 export type AgentSession = {
   id: string;
   projectId: string | null;
   serviceId?: string;
+  sshTarget?: ChatReference;
   cwd?: string;
   machineId: string;
   provider: AgentProvider;
@@ -69,10 +78,11 @@ export type AgentMessage = {
   serviceCustomizationOutput?: boolean;
   harnessOutput?: boolean;
   command?: '/services';
+  mentions?: ChatMention[];
 };
 export type AgentApproval = {
   id: string;
-  kind: 'permission' | 'input';
+  kind: 'permission' | 'input' | 'ssh';
   method: string;
   params: {
     command?: string | string[];
@@ -81,6 +91,14 @@ export type AgentApproval = {
     networkApprovalContext?: { host?: string; protocol?: string };
     toolCall?: unknown;
     changes?: unknown;
+    sshOperation?: {
+      action: 'start' | 'stop' | 'restart';
+      service: string;
+      machine: string;
+      address: string;
+      source: string;
+      sourceType: 'docker' | 'compose' | 'systemd';
+    };
     questions?: {
       id: string;
       header?: string;
@@ -266,7 +284,13 @@ export type ServiceLogs = {
   warning: string;
 };
 export type HubSnapshot = {
-  capabilities?: { serviceChat?: boolean; chatExecution?: boolean; serviceWorkspace?: boolean };
+  capabilities?: {
+    serviceChat?: boolean;
+    chatExecution?: boolean;
+    serviceWorkspace?: boolean;
+    chatMentions?: boolean;
+    hostSsh?: boolean;
+  };
   accounts?: AgentAccount[];
   tasks?: {
     id: string;

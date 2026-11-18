@@ -7,6 +7,15 @@ import {
 } from '../lib/claude-runtime.mjs';
 import { AgentRpc } from './agent-rpc.mjs';
 import { automaticApproval } from './agent-approvals.mjs';
+import {
+  chatTargetsInput,
+  unwrapChatTargetsInput,
+  sshActions,
+  visibleChatMentions,
+} from '../lib/chat-references.mjs';
+import { chatReference, createChatTargets } from './chat-targets.mjs';
+import { createHostSshMcp, hostSshAcpServer } from './host-ssh-mcp.mjs';
+import { createHostSshTools, hostSshTools } from './host-ssh-tools.mjs';
 import { unwrapHarnessInput, harnessReport } from '../lib/chat-harness.mjs';
 import {
   beginHarnessTurn,
@@ -199,6 +208,19 @@ export function createHub(
   const services = createServices({
     store, machine, save, accounts, openProcess, connectors, ...serviceOptions,
   });
+  const chatTargets = createChatTargets({
+    findMachine: (id) =>
+      !deletingMachines.has(id) && store.list('servers').find((m) => m.id === id),
+    getService: services.get,
+    getProject: (id) => load(id, 'workspace'),
+  });
+  const hostSsh = createHostSshTools({
+    chatTargets,
+    machine,
+    withMachine: serviceOptions.withMachine,
+    refreshMachine: services.refreshMachine,
+  });
+  const sshMcp = createHostSshMcp(hostSshTools);
   const sessions = () =>
     records('session').map((s) => ({
       ...s,
@@ -285,11 +307,52 @@ export function createHub(
     if (!runtime) return;
     clearTimeout(runtime.turnTimer);
     runtime.turnTimer = null;
+    const sshTurn = runtime.sshTurn;
+    runtime.sshTurn = null;
+    sshTurn?.controller.abort();
   }
   function canUpdateSession(id) {
     if (closed || deletingSessions.has(id)) return false;
     const session = store.get('settings', id);
     return !!session && !deletingMachines.has(session.machineId) && !deletingProjects.has(session.projectId);
+  }
+  async function approveSsh(runtime, turn, operation, signal) {
+    const sessionId = runtime.sessionId;
+    assert(
+      runtime.sshTurn === turn && canUpdateSession(sessionId),
+      'Ход агента завершён',
+      409,
+    );
+    assert(!turn.approval, 'Сначала ответьте на ожидающий запрос SSH', 409);
+    const deadline = AbortSignal.any([signal, AbortSignal.timeout(120000)]);
+    deadline.throwIfAborted();
+    const id = randomUUID();
+    const { promise, resolve } = Promise.withResolvers();
+    turn.approval = { id, resolve, signal: deadline };
+    const cancel = () => resolve(false);
+    deadline.addEventListener('abort', cancel, { once: true });
+    try {
+      updateSession(sessionId, (s) => {
+        s.status = 'approval';
+        s.secret.approvals.push({
+          id,
+          kind: 'ssh',
+          method: 'mayplane/ssh',
+          params: { sshOperation: operation },
+          createdAt: now(),
+        });
+      });
+      return await promise;
+    } finally {
+      deadline.removeEventListener('abort', cancel);
+      turn.approval = null;
+      if (canUpdateSession(sessionId))
+        updateSession(sessionId, (s) => {
+          s.secret.approvals = s.secret.approvals.filter((a) => a.id !== id);
+          if (s.status === 'approval' && !s.secret.approvals.length)
+            s.status = 'running';
+        });
+    }
   }
   function recordWorkspaceChanges(runtime) {
     const turn = runtime?.changeTurn;
@@ -632,6 +695,26 @@ export function createHub(
           accountId,
           profileId,
         );
+      if (m.transport === 'local' && session) {
+        runtime.sshMcp = await sshMcp.register((tool, args, signal) => {
+          const turn = runtime.sshTurn;
+          return hostSsh.call(
+            tool,
+            args,
+            turn,
+            signal,
+            (operation, deadline) => approveSsh(runtime, turn, operation, deadline),
+            (operation, outcome) => {
+              if (canUpdateSession(session.id))
+                addMessage(
+                  session.id,
+                  'tool',
+                  `SSH · ${sshActions[operation.action]} ${operation.service}\n${operation.machine} · ${operation.source}\n${outcome}`,
+                );
+            },
+          );
+        });
+      }
       const opened = await openProcess(
         m,
         {
@@ -639,6 +722,7 @@ export function createHub(
           operation: 'agent',
           cwd,
           nativeDesktop: !!session?.nativeSource,
+          ...(runtime.sshMcp ? { hostMcp: runtime.sshMcp } : {}),
           ...(profileId ? { profileId } : {}),
         },
         connectors,
@@ -652,6 +736,7 @@ export function createHub(
       runtime.rpc.on('disconnected', () => {
         const expected = runtime.managedClose;
         clearTurnTimer(runtime);
+        runtime.sshMcp?.close();
         runtimes.delete(key);
         if (runtime.releaseAccount)
           void releaseRuntime(runtime).catch(() => {});
@@ -673,6 +758,7 @@ export function createHub(
       });
       try {
         if (provider === 'codex') {
+          runtime.sshMcpSupported = !!runtime.sshMcp;
           await runtime.rpc.request('initialize', {
             clientInfo: {
               name: 'mayplane',
@@ -737,6 +823,8 @@ export function createHub(
             clientInfo: { name: 'mayplane', version: '0.2.0' },
           });
           if (session) {
+            runtime.sshMcpSupported = !!runtime.sshMcp &&
+              result.agentCapabilities?.mcpCapabilities?.http === true;
             assert(
               !session.nativeId || result.agentCapabilities?.loadSession,
               'Эта версия агента не поддерживает возобновление. Обновите установку или создайте новый диалог.',
@@ -747,7 +835,8 @@ export function createHub(
               session.nativeId ? 'session/load' : 'session/new',
               {
                 cwd,
-                mcpServers: [],
+                mcpServers: runtime.sshMcpSupported
+                  ? [hostSshAcpServer(runtime.sshMcp)] : [],
                 ...(session.nativeId ? { sessionId: session.nativeId } : {}),
               },
             );
@@ -774,6 +863,7 @@ export function createHub(
       return runtime;
     })().catch(async (error) => {
       runtimes.delete(key);
+      runtime.sshMcp?.close();
       if (runtime.releaseAccount || runtime.cleanupPromise)
         await releaseRuntime(runtime).catch(() => {});
       throw Object.assign(
@@ -863,7 +953,13 @@ export function createHub(
         })),
       projects: records('workspace'),
       services: services.list(),
-      capabilities: { serviceChat: true, chatExecution: true, serviceWorkspace: true },
+      capabilities: {
+        serviceChat: true,
+        chatExecution: true,
+        serviceWorkspace: true,
+        chatMentions: true,
+        hostSsh: true,
+      },
       sessions: sessions().sort((a, b) =>
         b.updatedAt.localeCompare(a.updatedAt),
       ),
@@ -912,16 +1008,18 @@ export function createHub(
           if (message.role === 'user') {
             const task = unwrapHarnessInput(message.content);
             harnessTurn = task !== null;
-            const input = task ?? message.content;
+            const targets = unwrapChatTargetsInput(task ?? message.content);
+            const input = targets?.content ?? task ?? message.content;
+            const mentions = targets?.mentions ? { mentions: targets.mentions } : {};
             const customization = unwrapServiceCustomizationInput(input);
             customizingTurn = customization !== null;
             if (customizingTurn) {
               draftingTurn = false;
-              return { ...message, content: customization };
+              return { ...message, content: customization, ...mentions };
             }
             const visible = visibleServiceChatInput(input);
             draftingTurn = visible.content !== input;
-            return { ...message, ...visible };
+            return { ...message, ...visible, ...mentions };
           }
           if (message.role === 'assistant') {
             let content = harnessTurn
@@ -1493,6 +1591,13 @@ export function createHub(
       const projectId = location ? location.projectId : body.projectId;
       const p = projectId ? load(projectId, 'workspace') : null;
       const m = machine(location?.machineId || p?.machineId || body.machineId);
+      const sshTarget = body.sshTarget === undefined ? null : chatReference(body.sshTarget);
+      if (sshTarget) {
+        assert(
+          !location && m.transport === 'local' && chatTargets.resolve(sshTarget).binding,
+          'Для чата на хосте выберите SSH-сервер или его сервис',
+        );
+      }
       if (location && Object.hasOwn(body, 'serviceCwd'))
         assert(body.serviceCwd === location.cwd || sameWorkspaceDirectory(body.serviceCwd, location.cwd, m.platform),
           'Рабочая папка сервиса изменилась. Откройте создание чата ещё раз.', 409);
@@ -1522,6 +1627,7 @@ export function createHub(
         projectId: p?.id || null,
         machineId: m.id,
         ...(location ? { serviceId: body.serviceId } : {}),
+        ...(sshTarget ? { sshTarget } : {}),
         cwd: projectPath(p?.path || location?.cwd || (!location && body.cwd) || (await resolveHome(m)), m.platform || 'linux'),
         provider: body.provider,
         accountId: accountId || null,
@@ -1884,6 +1990,17 @@ export function createHub(
         const command = serviceRequest ? serviceChatCommand : undefined;
         const message = serviceRequest || body.message.trim();
         const drafting = !customization && (!!serviceRequest || !!s.serviceDrafting);
+        const { targets, mentions: rawMentions, defaultTarget, instructions } = chatTargets.prepare(
+          body.message,
+          body.mentions,
+          s.sshTarget,
+          sessionMachine.transport === 'local',
+        );
+        // The chat stores the trimmed message, with an attached slash command removed.
+        const messageOffset = body.message.trimEnd().length - message.length;
+        const mentions = rawMentions.map(({ start, end, ...mention }) => ({
+          ...mention, start: start - messageOffset, end: end - messageOffset,
+        }));
         if (s.accountId) accounts.connected(s.accountId, s.provider);
         updateSession(s.id, (x) => {
           x.status = 'connecting';
@@ -1911,6 +2028,11 @@ export function createHub(
               { status: 409 },
             );
           }
+          assert(
+            !targets.size || ready.sshMcpSupported,
+            'Обновите агент на хосте до версии с поддержкой MCP по HTTP для работы через SSH.',
+            409,
+          );
         } catch (error) {
           if (connectingRuntime?.cancelled)
             throw Object.assign(
@@ -1926,7 +2048,10 @@ export function createHub(
           throw error;
         }
         const userMessageId = randomUUID();
-        addMessage(s.id, 'user', message, userMessageId, false, command ? { command } : undefined);
+        addMessage(s.id, 'user', message, userMessageId, false, {
+          ...(command ? { command } : {}),
+          ...(mentions.length ? { mentions: visibleChatMentions(mentions) } : {}),
+        });
         // Accept promptly; native agent events update the durable session asynchronously.
         void (async () => {
           let runningRuntime, messageId;
@@ -1962,10 +2087,15 @@ export function createHub(
                   command,
                 )
                 : message;
+            const input = mentions.length || defaultTarget
+              ? chatTargetsInput({ mentions, defaultTarget, instructions }, task)
+              : task;
             r.harnessTurn = s.harnessEnabled === true
-              ? beginHarnessTurn(s, r.cwd, task)
+              ? beginHarnessTurn(s, r.cwd, input)
               : null;
-            const text = r.harnessTurn?.input ?? task;
+            const text = r.harnessTurn?.input ?? input;
+            if (targets.size)
+              r.sshTurn = { targets, controller: new AbortController(), calls: 0 };
             const timer = setTimeout(
               () => {
                 r.rpc.close();
@@ -2078,7 +2208,7 @@ export function createHub(
       }
       if (method === 'POST' && sm[2] === 'stop') {
         const r = runtimes.get(s.id);
-        const closeAfterStop = r?.serviceTurn || r?.harnessTurn ||
+        const closeAfterStop = r?.serviceTurn || r?.harnessTurn || r?.sshTurn ||
           r?.autoApproved > 0 || s.autoApprove === true;
         if (r) {
           r.cancelled = true;
@@ -2117,6 +2247,19 @@ export function createHub(
         assert(a, 'Запрос уже закрыт', 409);
         const r = runtimes.get(s.id);
         assert(r?.rpc && !r.rpc.dead, 'Связь с агентом потеряна', 409);
+        if (a.kind === 'ssh') {
+          const pending = r.sshTurn?.approval;
+          assert(
+            pending?.id === a.id && !pending.signal.aborted && !pending.answered,
+            'Запрос уже закрыт',
+            409,
+          );
+          assert(['accept', 'decline'].includes(body.decision), 'Некорректное решение');
+          pending.answered = true;
+          pending.resolve(body.decision === 'accept');
+          send({ ok: true });
+          return true;
+        }
         let response;
         if (a.kind === 'input') {
           const answers = {};
@@ -2433,6 +2576,7 @@ export function createHub(
       nativeSessions.close();
       if (closed) return;
       closed = true;
+      sshMcp.close();
       services.close();
       modelCatalog.close();
       agentLimits.close();

@@ -1,7 +1,8 @@
 'use client';
-import { useEffect, useId, useRef, useState } from 'react';
+import { useEffect, useId, useMemo, useRef, useState } from 'react';
 import {
   ArrowUp,
+  AtSign,
   Square,
   Code2,
   Terminal,
@@ -33,6 +34,7 @@ import {
   type AgentProvider,
   type ServiceConversationBatch,
   type ServiceCustomizationDraft,
+  type ChatMention,
 } from '@/lib/hub';
 import {
   attachServiceChatCommand,
@@ -55,8 +57,23 @@ import {
 } from './service-chat';
 import { ServiceCustomizationCard } from './service-customization';
 import { PathField } from './path-picker';
-const chatDrafts = new WeakMap<object, Map<string, string>>();
+import { ChatEditor, type ChatEditorHandle, type DraftMention } from './chat-editor';
+import { MentionPicker, MentionTag, mentionOptions } from './chat-mentions';
+import {
+  inlineMentionRanges,
+  isSshMachine,
+  maxChatMentions,
+  mentionQuery,
+  mentionText,
+  sshActions,
+} from '@/lib/chat-references.mjs';
+
+type ChatDraft = { text: string; mentions: DraftMention[] };
+const chatDrafts = new WeakMap<object, Map<string, ChatDraft>>();
 const chatCustomization = new WeakMap<object, Map<string, string>>();
+const shiftMentions = (mentions: DraftMention[], offset: number) => offset
+  ? mentions.map((mention) => ({ ...mention, start: mention.start + offset, end: mention.end + offset }))
+  : mentions;
 
 function ChatExecutionSwitch({
   label,
@@ -95,6 +112,7 @@ export function NewSession({
   projects,
   machines,
   initialProject,
+  initialMachine,
   service,
   onCreated,
   onClose,
@@ -104,20 +122,27 @@ export function NewSession({
   projects: HubProject[];
   machines: Server[];
   initialProject?: string;
+  initialMachine?: Server;
   service?: HubService;
   onCreated: (s: AgentSession) => void;
   onClose: () => void;
   onAccounts: () => void;
 }) {
+  const targetMachine = service ? machines.find((m) => m.id === service.machineId) : initialMachine;
+  const allowHost = !!hub.data.capabilities?.hostSsh && isSshMachine(targetMachine);
+  const [runOnHost, setRunOnHost] = useState(() => !!initialMachine && allowHost);
+  const viaSsh = allowHost && runOnHost;
+  const workingService = viaSsh ? undefined : service;
   const serviceLocation = service ? serviceChatLocation(
-    service, projects, machines.find((m) => m.id === service.machineId)?.platform,
+    service, projects, targetMachine?.platform,
   ) : null;
   const [projectId, setProjectId] = useState(initialProject || '');
   const [machineId, setMachineId] = useState(
-    projects.find((p) => p.id === initialProject)?.machineId ||
+    initialMachine?.id || projects.find((p) => p.id === initialProject)?.machineId ||
+      hub.data.localMachineId ||
       machines.find((m) => ['online', 'needs_setup'].includes(m.status))?.id ||
       machines[0]?.id ||
-      '',
+      (hub.data.capabilities?.hostSsh ? '__local' : ''),
   );
   const [provider, setProvider] = useState<AgentProvider>('codex');
   const [cwd, setCwd] = useState('');
@@ -133,8 +158,9 @@ export function NewSession({
       initialProject ? 'workspace-write' : 'read-only',
     );
   const [loadingModels, setLoadingModels] = useState(false);
-  const chatProject = serviceLocation ? serviceLocation.projectId : projectId;
-  const chatMachine = serviceLocation?.machineId ||
+  const chatProject = viaSsh ? null : serviceLocation ? serviceLocation.projectId : projectId;
+  const createOnHost = viaSsh || (!service && !chatProject && machineId === '__local');
+  const chatMachine = createOnHost ? hub.data.localMachineId || '' : serviceLocation?.machineId ||
     projects.find((p) => p.id === projectId)?.machineId || machineId;
   const selectedMachine = machines.find((m) => m.id === chatMachine);
   const defaultAccount = (hub.data.accounts || []).find(
@@ -145,7 +171,7 @@ export function NewSession({
   return (
     <Modal
       title="Новый чат"
-      description={service ? 'Агент будет работать в рабочей папке сервиса.' : 'Начните чат в рабочей папке проекта или без проекта на выбранной машине.'}
+      description={service || initialMachine ? undefined : 'Начните чат в рабочей папке проекта или без проекта на выбранной машине.'}
       onClose={onClose}
     >
       <form
@@ -155,12 +181,18 @@ export function NewSession({
           setBusy(true);
           setError('');
           try {
+            const machineId = createOnHost && !chatMachine
+              ? (await hub.mutate<Server>('/local')).id
+              : chatMachine;
             const s = await hub.mutate<AgentSession>('/sessions', {
-              ...(service ? { serviceId: service.id, serviceCwd: serviceLocation?.cwd } : {
-                projectId: projectId || null,
-                ...(!projectId && cwd.trim() ? { cwd: cwd.trim() } : {}),
+              ...(workingService ? { serviceId: workingService.id, serviceCwd: serviceLocation?.cwd } : {
+                projectId: chatProject || null,
+                ...(!chatProject && !viaSsh && cwd.trim() ? { cwd: cwd.trim() } : {}),
               }),
-              machineId: chatMachine,
+              ...(viaSsh && targetMachine ? { sshTarget: service
+                ? { kind: 'service', id: service.id }
+                : { kind: 'machine', id: targetMachine.id } } : {}),
+              machineId,
               provider,
               ...(accountChoice === '__default'
                 ? {}
@@ -177,10 +209,24 @@ export function NewSession({
           }
         }}
       >
-        {service ? (
+        {allowHost && (
+          <Field label="Где запустить агента">
+            <select aria-label="Где запустить агента" value={viaSsh ? 'host' : 'machine'} onChange={(event) => {
+              setRunOnHost(event.target.value === 'host');
+              setAccountChoice('__default');
+              setModel('');
+              setReasoning('');
+            }}>
+              <option value="machine">На машине · {machines.find((m) => m.id === serviceLocation?.machineId)?.name || targetMachine?.name}</option>
+              <option value="host">На хосте панели · доступ к цели по SSH</option>
+            </select>
+            {viaSsh && <small>Цель SSH будет доступна в чате. Действия, меняющие состояние сервиса, требуют подтверждения.</small>}
+          </Field>
+        )}
+        {service || initialMachine ? (
           <div className="hub-field">
-            <span>{service.name} · {selectedMachine?.name || 'Машина сервиса'}</span>
-            <code>{serviceLocation?.cwd || 'Домашний каталог'}</code>
+            <span>{service ? [service.name, targetMachine?.name].filter(Boolean).join(' · ') : initialMachine?.name}</span>
+            <code>{viaSsh ? 'Домашний каталог на хосте' : serviceLocation?.cwd || 'Домашний каталог'}</code>
           </div>
         ) : <Field label="Проект">
           <select
@@ -205,7 +251,7 @@ export function NewSession({
             ))}
           </select>
         </Field>}
-        {!service && !projectId && (
+        {!service && !initialMachine && !projectId && (
           <>
           <Field label="Машина">
             <select
@@ -229,6 +275,9 @@ export function NewSession({
                   {m.name}
                 </option>
               ))}
+              {hub.data.capabilities?.hostSsh && (!hub.data.localMachineId || machineId === '__local') && (
+                <option value="__local">Хост панели</option>
+              )}
             </select>
           </Field>
           <PathField api={hub.api} machineId={selectedMachine?.id} machineName={selectedMachine?.name} platform={selectedMachine?.platform}
@@ -279,13 +328,13 @@ export function NewSession({
           Добавить или настроить аккаунты
         </button>
         <AgentModelSelector
-          key={provider + ':' + (service?.id || chatProject || chatMachine) + ':' + accountChoice}
+          key={provider + ':' + (workingService?.id || chatProject || chatMachine) + ':' + accountChoice}
           hub={hub}
           machineId={chatMachine}
           provider={provider}
           projectId={chatProject || undefined}
-          serviceId={service?.id}
-          cwd={!chatProject && !service ? modelCwd || undefined : undefined}
+          serviceId={workingService?.id}
+          cwd={!chatProject && !service && !initialMachine ? modelCwd || undefined : undefined}
           accountId={
             accountChoice === '__default' ? undefined : accountChoice || null
           }
@@ -340,40 +389,74 @@ export function NewSession({
   );
 }
 
-function RichText({ text }: { text: string }) {
+function RichText({
+  text,
+  mentions = [],
+}: {
+  text: string;
+  mentions?: ChatMention[];
+}) {
+  const references = inlineMentionRanges(text, mentions);
+  let offset = 0;
+  const markup = references
+    .map(({ start, end }) => {
+      const prefix = text.slice(offset, start);
+      offset = end;
+      // A name can contain Markdown delimiters. Keep token offsets while parsing.
+      return prefix + '\uFFFC'.repeat(end - start);
+    })
+    .join('') + text.slice(offset);
+  function renderRange(start: number, end: number) {
+    const parts = [];
+    for (const mention of references) {
+      if (mention.start < start || mention.end > end) continue;
+      parts.push(
+        text.slice(start, mention.start),
+        <MentionTag key={mention.start} mention={mention} />,
+      );
+      start = mention.end;
+    }
+    return parts.length ? [...parts, text.slice(start, end)] : text.slice(start, end);
+  }
+  offset = 0;
   return (
     <div className="message-text">
-      {text.split(/(```[\s\S]*?```)/g).map((part, i) =>
-        part.startsWith('```') ? (
-          <div className="code-block" key={i}>
-            <div>
-              <span>{part.slice(3).split('\n')[0] || 'code'}</span>
-              <CopyButton
-                value={part.replace(/^```[^\n]*\n?/, '').replace(/```$/, '')}
-              />
+      {markup.split(/(```[\s\S]*?```)/g).map((part, i) => {
+        const start = offset;
+        offset += part.length;
+        if (part.startsWith('```')) {
+          const codeEnd = offset - 3;
+          const codeStart = Math.min(
+            codeEnd,
+            start + (part.match(/^```[^\n]*\n?/)?.[0].length ?? 3),
+          );
+          return (
+            <div className="code-block" key={i}>
+              <div>
+                <span>{text.slice(start + 3, offset).split('\n')[0] || 'code'}</span>
+                <CopyButton value={text.slice(codeStart, codeEnd)} />
+              </div>
+              <pre><code>{renderRange(codeStart, codeEnd)}</code></pre>
             </div>
-            <pre>
-              <code>
-                {part.replace(/^```[^\n]*\n?/, '').replace(/```$/, '')}
-              </code>
-            </pre>
-          </div>
-        ) : (
+          );
+        }
+        let inline = start;
+        return (
           <span key={i}>
             {part
               .split(/(`[^`\n]+`|\*\*[^*\n]+\*\*)/g)
-              .map((s, j) =>
-                s.startsWith('`') ? (
-                  <code key={j}>{s.slice(1, -1)}</code>
-                ) : s.startsWith('**') ? (
-                  <strong key={j}>{s.slice(2, -2)}</strong>
-                ) : (
-                  s
-                ),
-              )}
+              .map((segment, index) => {
+                const start = inline;
+                inline += segment.length;
+                if (segment.startsWith('`'))
+                  return <code key={index}>{renderRange(start + 1, inline - 1)}</code>;
+                if (segment.startsWith('**'))
+                  return <strong key={index}>{renderRange(start + 2, inline - 2)}</strong>;
+                return renderRange(start, inline);
+              })}
           </span>
-        ),
-      )}
+        );
+      })}
     </div>
   );
 }
@@ -391,6 +474,7 @@ function ApprovalCard({
   const [answers, setAnswers] = useState<Record<string, string>>({}),
     [busy, setBusy] = useState(false),
     [error, setError] = useState('');
+  const ssh = a.kind === 'ssh' ? a.params.sshOperation : undefined;
   async function answer(decision?: string) {
     setBusy(true);
     try {
@@ -411,10 +495,11 @@ function ApprovalCard({
       <div className="approval-title">
         <ShieldCheck size={19} />
         <strong>
-          {a.kind === 'input' ? 'Агенту нужен ваш ответ' : 'Запрос разрешения'}
+          {ssh ? `${sshActions[ssh.action]} «${ssh.service}»?` : a.kind === 'input' ? 'Агенту нужен ваш ответ' : 'Запрос разрешения'}
         </strong>
         <span>Ожидает вас</span>
       </div>
+      {ssh && <p>SSH · {ssh.machine} · <code>{ssh.address}</code> · <code>{ssh.source}</code></p>}
       {a.params.reason && <p>{a.params.reason}</p>}
       {a.params.networkApprovalContext && (
         <p>
@@ -482,7 +567,7 @@ function ApprovalCard({
         </form>
       ) : (
         <div className="approval-actions">
-          {session.provider === 'codex' ? (
+          {a.kind === 'ssh' || session.provider === 'codex' ? (
             <>
               <button
                 className="hub-button"
@@ -552,9 +637,10 @@ export function AgentChat({
   const [customizeServiceId, setCustomizeServiceId] = useState(() => initialCustomizeServiceId ||
     (sessionId ? chatCustomization.get(api)?.get(sessionId) || '' : ''));
   const [detail, setDetail] = useState<SessionDetail | null>(null),
-    [draft, setDraft] = useState<string>(() => {
-      const saved = sessionId ? chatDrafts.get(api)?.get(sessionId) || '' : '';
-      return customizeServiceId ? (splitServiceChatCommand(saved)?.content ?? saved) : saved;
+    [composition, setComposition] = useState<ChatDraft>(() => {
+      const saved = (sessionId && chatDrafts.get(api)?.get(sessionId)) || { text: '', mentions: [] };
+      const text = customizeServiceId ? splitServiceChatCommand(saved.text)?.content ?? saved.text : saved.text;
+      return text === saved.text ? saved : { text, mentions: shiftMentions(saved.mentions, text.length - saved.text.length) };
     }),
     [error, setError] = useState(''),
     [sending, setSending] = useState(false),
@@ -564,23 +650,28 @@ export function AgentChat({
   const [executionError, setExecutionError] = useState('');
   const [composerFocused, setComposerFocused] = useState(false);
   const [commandsDismissed, setCommandsDismissed] = useState(false);
+  const [caret, setCaret] = useState<number | null>(null);
+  const [mentionSelection, setMentionSelection] = useState({ key: '', index: 0 });
   const commandMenuId = useId();
+  const mentionMenuId = useId();
   const bottom = useRef<HTMLDivElement>(null),
     scroller = useRef<HTMLDivElement>(null),
     follow = useRef(true),
-    composer = useRef<HTMLTextAreaElement>(null);
+    composer = useRef<ChatEditorHandle>(null);
   const mounted = useRef(false);
-  function rememberDraft(text: string) {
+  const { text: draft, mentions } = composition;
+  function rememberDraft(text: string, references: DraftMention[] = []) {
+    const next = { text, mentions: references };
     if (sessionId) {
       let drafts = chatDrafts.get(api);
       if (!drafts) {
         drafts = new Map();
         chatDrafts.set(api, drafts);
       }
-      if (text) drafts.set(sessionId, text);
+      if (text) drafts.set(sessionId, next);
       else drafts.delete(sessionId);
     }
-    setDraft(text);
+    setComposition(next);
   }
   async function reload() {
     if (!sessionId) return;
@@ -648,6 +739,8 @@ export function AgentChat({
   const command = splitServiceChatCommand(draft);
   const commandAttached = !!command?.separated;
   const serviceChatAvailable = !!hub.data.capabilities?.serviceChat;
+  const mentionsAvailable = !!hub.data.capabilities?.chatMentions;
+  const chatOnHost = session?.machineId === hub.data.localMachineId;
   const executionAvailable = !!hub.data.capabilities?.chatExecution;
   const customizationsAvailable = !!hub.data.capabilities?.serviceWorkspace;
   const availableServices = session && customizationsAvailable ? hub.data.services : [];
@@ -660,7 +753,12 @@ export function AgentChat({
   const otherServices = availableServices.filter((service) => !relatedServices.includes(service));
   const customizeService = availableServices.find((service) => service.id === customizeServiceId);
   const missingCustomization = !!customizeServiceId && !customizeService;
-  const serviceLink = customizeService || relatedServices.find((service) => service.id === session?.serviceId);
+  const pinned = session?.sshTarget;
+  const serviceLink = customizeService || relatedServices.find((service) =>
+    service.id === session?.serviceId || (pinned?.kind === 'service' && pinned.id === service.id));
+  const pinnedTarget = pinned?.kind === 'machine'
+    ? machines.find((m) => m.id === pinned.id)
+    : hub.data.services.find((s) => s.id === pinned?.id);
   const commandUnavailable = !!command && !serviceChatAvailable;
   const commandMenuOpen =
     composerFocused &&
@@ -669,18 +767,52 @@ export function AgentChat({
     !session?.archived &&
     suggestsServiceChatCommand(draft);
   const draftContent = commandAttached && command ? command.content : draft;
+  const draftOffset = draft.length - draftContent.length;
+  const editorMentions = useMemo(() => shiftMentions(mentions, -draftOffset), [mentions, draftOffset]);
+  const query = mentionsAvailable && caret !== null ? mentionQuery(draft, draftOffset + caret, mentions) : null;
+  const mentionMenuOpen = !!query && composerFocused && !commandsDismissed && !disabled && !session?.archived;
+  const mentionMatches = mentionMenuOpen
+    ? mentionOptions(machines, hub.data.services, hub.data.projects, query.query, chatOnHost)
+    : [];
+  const queryKey = query ? `${query.start}:${query.query}` : '';
+  const activeMention = mentionSelection.key === queryKey && mentionSelection.index < mentionMatches.length
+    ? mentionSelection.index : 0;
+  function chooseMention(option: (typeof mentionMatches)[number]) {
+    if (!query) return;
+    if (mentions.length >= maxChatMentions) {
+      setError(`До ${maxChatMentions} упоминаний в сообщении`);
+      setCommandsDismissed(true);
+      return;
+    }
+    const text = mentionText(option.name);
+    const rest = draft.slice(query.end);
+    const suffix = !rest || /^[\p{L}\p{N}_@]/u.test(rest) ? ' ' : '';
+    composer.current?.replace(query.start - draftOffset, query.end - draftOffset, suffix, { ...option, text });
+    setCommandsDismissed(true);
+  }
+  function openMentions() {
+    setCommandsDismissed(false);
+    if (query) {
+      composer.current?.focus();
+      return;
+    }
+    const { start, end } = composer.current?.getSelection() ?? { start: draftContent.length, end: draftContent.length };
+    const insert = start && !/[\s([{«]/u.test(draftContent[start - 1]) ? ' @' : '@';
+    composer.current?.replace(start, end, insert);
+  }
   function chooseCustomization(id: string) {
     setCustomizeServiceId(id);
-    if (id && command) rememberDraft(command.content);
+    if (id && command) rememberDraft(command.content, editorMentions);
     composer.current?.focus();
   }
   function chooseCommand() {
     if (customizeServiceId) setCustomizeServiceId('');
-    rememberDraft(attachServiceChatCommand(draft));
+    const next = attachServiceChatCommand(draft);
+    rememberDraft(next, shiftMentions(mentions, next.length - draft.length));
     composer.current?.focus();
   }
   function removeCommand() {
-    rememberDraft(draftContent);
+    rememberDraft(draftContent, editorMentions);
     composer.current?.focus();
   }
   async function changeServiceMode(active: boolean) {
@@ -735,18 +867,22 @@ export function AgentChat({
   }
   async function send() {
     if (!session || !draft.trim() || chatBusy || commandUnavailable || missingCustomization) return;
-    const text = draft;
+    const sent = composition;
+    const savedDraft = chatDrafts.get(api)?.get(session.id);
     setSending(true);
     setError('');
     try {
       await hub.mutate(`/sessions/${session.id}/message`, {
-        message: text,
+        message: sent.text,
+        ...(mentionsAvailable && sent.mentions.length ? {
+          mentions: sent.mentions.map(({ kind, id, start, end }) => ({ kind, id, start, end })),
+        } : {}),
         ...(customizeService ? { customizeServiceId: customizeService.id } : {}),
       });
       const drafts = chatDrafts.get(api);
-      if (drafts && drafts.get(session.id) === text) drafts.delete(session.id);
+      if (drafts && drafts.get(session.id) === savedDraft) drafts.delete(session.id);
       if (mounted.current) {
-        setDraft((value) => (value === text ? '' : value));
+        setComposition((value) => (value === sent ? { text: '', mentions: [] } : value));
         follow.current = true;
         await reload();
         composer.current?.focus();
@@ -996,7 +1132,7 @@ export function AgentChat({
                             <ServiceCommandTag />
                           </div>
                         )}
-                      {text && <RichText text={text} />}
+                      {text && <RichText text={text} mentions={m.mentions} />}
                       {m.role === 'user' && currentDetail?.changedTurns?.includes(m.id) && (
                         <button type="button" className="text-button chat-turn-changes" onClick={() => onOpenChanges(m.id)}>
                           <FileDiff size={14} /> Правки по этому запросу
@@ -1076,19 +1212,16 @@ export function AgentChat({
                   <ServiceCommandTag onRemove={removeCommand} />
                 </div>
               )}
-              <textarea
+              <ChatEditor
                 ref={composer}
-                rows={3}
-                aria-label="Сообщение агенту"
-                aria-autocomplete="list"
-                aria-controls={commandMenuOpen ? commandMenuId : undefined}
-                aria-activedescendant={
-                  commandMenuOpen ? commandMenuId + '-services' : undefined
+                controls={mentionMenuOpen ? mentionMenuId : commandMenuOpen ? commandMenuId : undefined}
+                activeDescendant={
+                  mentionMenuOpen && mentionMatches.length ? `${mentionMenuId}-${activeMention}`
+                    : commandMenuOpen ? commandMenuId + '-services' : undefined
                 }
-                value={draftContent}
-                maxLength={
-                  32000 - (commandAttached ? serviceChatCommand.length + 1 : 0)
-                }
+                text={draftContent}
+                mentions={editorMentions}
+                maxLength={32000 - draftOffset}
                 placeholder={
                   session.archived
                     ? 'Диалог в архиве'
@@ -1096,7 +1229,8 @@ export function AgentChat({
                       ? 'Что изменить в карточке «' + customizeService.name + '»?'
                     : drafting || commandAttached
                       ? 'Что оформить? Можно добавить ссылку на репозиторий…'
-                      : 'Сообщение агенту. Введите / для подсказок…'
+                      : mentionsAvailable ? 'Сообщение агенту. Введите @ для упоминаний или / для команд…'
+                        : 'Сообщение агенту. Введите / для подсказок…'
                 }
                 disabled={disabled || session.archived}
                 onFocus={() => {
@@ -1104,22 +1238,36 @@ export function AgentChat({
                   setCommandsDismissed(false);
                 }}
                 onBlur={() => setComposerFocused(false)}
-                onChange={(e) => {
+                onCaret={setCaret}
+                onChange={({ text, mentions }) => {
                   setCommandsDismissed(false);
-                  if (customizeServiceId && splitServiceChatCommand(e.target.value)) setCustomizeServiceId('');
+                  if (customizeServiceId && splitServiceChatCommand(text)) setCustomizeServiceId('');
                   rememberDraft(
-                    commandAttached
-                      ? serviceChatCommand + ' ' + e.target.value
-                      : e.target.value,
+                    draft.slice(0, draftOffset) + text,
+                    shiftMentions(mentions, draftOffset),
                   );
                 }}
                 onKeyDown={(e) => {
-                  if (e.nativeEvent.isComposing) return;
-                  if (commandMenuOpen && e.key === 'Escape') {
+                  if ((commandMenuOpen || mentionMenuOpen) && e.key === 'Escape') {
                     e.preventDefault();
                     e.stopPropagation();
                     setCommandsDismissed(true);
                     return;
+                  }
+                  if (mentionMenuOpen && mentionMatches.length) {
+                    if (e.key === 'ArrowUp' || e.key === 'ArrowDown') {
+                      e.preventDefault();
+                      const length = mentionMatches.length;
+                      setMentionSelection({ key: queryKey,
+                        index: (activeMention + (e.key === 'ArrowUp' ? -1 : 1) + length) % length,
+                      });
+                      return;
+                    }
+                    if (!e.shiftKey && (e.key === 'Enter' || e.key === 'Tab')) {
+                      e.preventDefault();
+                      chooseMention(mentionMatches[activeMention]);
+                      return;
+                    }
                   }
                   if (
                     commandMenuOpen &&
@@ -1132,13 +1280,14 @@ export function AgentChat({
                   }
                   if (
                     commandAttached &&
-                    e.key === 'Backspace' &&
-                    e.currentTarget.selectionStart === 0 &&
-                    e.currentTarget.selectionEnd === 0
+                    e.key === 'Backspace'
                   ) {
-                    e.preventDefault();
-                    removeCommand();
-                    return;
+                    const selection = composer.current?.getSelection();
+                    if (selection?.start === 0 && selection.end === 0) {
+                      e.preventDefault();
+                      removeCommand();
+                      return;
+                    }
                   }
                   if (e.key === 'Enter' && !e.shiftKey) {
                     e.preventDefault();
@@ -1148,6 +1297,16 @@ export function AgentChat({
               />
               {!session.archived && (
                 <div className="composer-service-mode">
+                  {mentionsAvailable && (
+                    <button type="button" className="chat-service-trigger" title="Упомянуть сервер, сервис или проект"
+                      aria-label="Упомянуть сервер, сервис или проект" aria-expanded={mentionMenuOpen}
+                      disabled={disabled} onMouseDown={(e) => e.preventDefault()} onClick={openMentions}>
+                      <AtSign size={15} /> Упомянуть
+                    </button>
+                  )}
+                  {pinned && !mentions.some(({ kind }) => kind !== 'project') && <span className="chat-ssh-target" title="Цель SSH по умолчанию">
+                    <Terminal size={13} /> {pinnedTarget ? `SSH · ${pinnedTarget.name}` : 'Цель SSH недоступна'}
+                  </span>}
                   <button
                     type="button"
                     className="chat-service-trigger"
@@ -1324,6 +1483,9 @@ export function AgentChat({
                 onSelect={chooseCommand}
               />
             )}
+            {mentionMenuOpen && (
+              <MentionPicker id={mentionMenuId} options={mentionMatches} active={activeMention} onSelect={chooseMention} />
+            )}
           </div>
           <p className="composer-footnote">
             <span>
@@ -1331,7 +1493,9 @@ export function AgentChat({
               {session.cwd || project?.path || 'Без проекта'}
             </span>
             <span>
-              {commandMenuOpen
+              {mentionMenuOpen && mentionMatches.length
+                ? '↑ ↓ — выбрать · Enter — добавить · Esc — закрыть'
+                : commandMenuOpen
                 ? 'Enter — выбрать · Esc — закрыть'
                 : 'Enter — отправить · Shift + Enter — новая строка'}
             </span>

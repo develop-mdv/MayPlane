@@ -11,6 +11,7 @@ import { resourceMetrics } from '../lib/machine-metrics.mjs';
 import { connect } from './ssh.mjs';
 import { assert } from './security.mjs';
 import { posixAgentCommand } from './agent-launch.mjs';
+import { hostSshMcpName, hostSshMcpTokenEnv } from './host-ssh-mcp.mjs';
 import {
   profileEnvironment,
   profileId as validateProfileId,
@@ -191,6 +192,7 @@ export function localProcess({
   profileVendor,
   profileCredential,
   nativeDesktop,
+  hostMcp,
 }) {
   if (profileId) {
     validateProfileId(profileId);
@@ -209,6 +211,12 @@ export function localProcess({
           ? 'credential-import'
           : 'credential-clear';
   let { executable, args } = processSpec(provider, operation);
+  if (hostMcp && provider === 'codex' && operation === 'agent') {
+    args = [
+      '-c', `mcp_servers.${hostSshMcpName}={url=${JSON.stringify(hostMcp.url)},bearer_token_env_var="${hostSshMcpTokenEnv}",tool_timeout_sec=150}`,
+      ...args,
+    ];
+  }
   const override =
     process.env[
       provider === 'claude' && ['agent', 'adapter-version'].includes(operation)
@@ -370,6 +378,13 @@ export function localProcess({
   // Infrastructure credentials never enter the agent environment.
   for (const name of Object.keys(env))
     if (/^(MAYPLANE_|ALLOWED_ORIGINS$)/.test(name)) delete env[name];
+  if (hostMcp && operation === 'agent') {
+    if (provider === 'codex') env[hostSshMcpTokenEnv] = hostMcp.token;
+    // Keep the loopback request and its short-lived bearer on the host.
+    env.NO_PROXY = env.no_proxy = [env.NO_PROXY, env.no_proxy, '127.0.0.1']
+      .filter(Boolean)
+      .join(',');
+  }
   if (provider === 'claude') delete env.CLAUDECODE;
   if (provider === 'claude' && operation === 'login') {
     const { spawn: spawnPty } = createRequire(import.meta.url)(

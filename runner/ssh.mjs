@@ -288,7 +288,7 @@ export async function copyFile(source, target, path) {
     'Контрольные суммы копии не совпали',
   );
 }
-export async function metrics(client) {
+export async function metrics(client, { signal } = {}) {
   let output = await run(
     client,
     `cpu_snapshot() { awk '/^cpu / {for(i=2;i<=9;i++) total+=$i; printf "%.0f %.0f\\n",total,$5+$6}' /proc/stat; }
@@ -300,7 +300,7 @@ awk '/^MemTotal:/ {t=$2*1024} /^MemAvailable:/ {a=$2*1024;have=1} /^MemFree:/ {f
 df -Pk / | awk 'NR==2 && $2>0 {printf "DISK_TOTAL:%.0f\\nDISK_USED:%.0f\\nDISK_AVAILABLE:%.0f\\n",$2*1024,$3*1024,$4*1024}'
 echo "CORES:$(nproc)"
 if docker compose version >/dev/null 2>&1; then echo 'DOCKER:yes'; else echo 'DOCKER:no'; fi`,
-    { timeout: 20000 },
+    { timeout: 20000, signal },
   );
   output += await run(
     client,
@@ -308,7 +308,7 @@ if docker compose version >/dev/null 2>&1; then echo 'DOCKER:yes'; else echo 'DO
 ip -4 -o addr show scope global 2>/dev/null | awk 'NR==1 {split($4,a,"/"); print "IPV4:"a[1]}' || true
 ip -6 -o addr show scope global 2>/dev/null | awk 'NR==1 {split($4,a,"/"); print "IPV6:"a[1]}' || true
 awk -F '[: ]+' 'NR>2 && $2!="lo" {rx+=$3;tx+=$11} END {printf "RX:%.0f\\nTX:%.0f\\n",rx,tx}' /proc/net/dev`,
-    { timeout: 10000 },
+    { timeout: 10000, signal },
   );
   return parseMetricsOutput(output);
 }
